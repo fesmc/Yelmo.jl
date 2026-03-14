@@ -1,0 +1,4 @@
+[deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+Yelmo = "f480e141-c095-4a5e-9e4c-f8685db772bc"
