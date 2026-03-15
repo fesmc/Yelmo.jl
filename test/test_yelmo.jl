@@ -9,15 +9,12 @@ using Yelmo
 
 # Define parameters and write parameter file
 p = YelmoParameters("test")
-write_nml(p)
 
 # Initialize Yelmo
-#ylmo = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file", 0.0);
-ylmo = YelmoMirror("test.nml", "file", 0.0);
+ylmo = YelmoMirror(p, "file", 0.0);
 
 # Populate boundary fields
 ylmo.bnd.H_sed .= 100.0
-sync!(ylmo)
 
 # Initialize Yelmo state
 init_state!(ylmo, 0.0, "robin-cold");
@@ -31,7 +28,6 @@ for t in time_init:dt:time_end
 
     # Update boundary fields
     ylmo.bnd.z_bed .+= 100.0
-    sync!(ylmo)
 
 end
 

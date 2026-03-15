@@ -1,6 +1,7 @@
 module YelmoCore
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
+using ..YelmoPar: YelmoParameters, write_nml
 
 export YelmoMirror, init_state!, time_step!, sync!
 export yelmo_get_var2D, yelmo_get_var2D!
@@ -9,6 +10,7 @@ export yelmo_set_var2D!, yelmo_set_var3D!
 
 # ---------------------------------------------------------------------------
 #const yelmolib = "../libyelmo/include/libyelmo_c_api.so"
+const yelmopath = joinpath(@__DIR__, "..", "yelmo")
 const yelmolib = joinpath(@__DIR__, "..", "yelmo", "libyelmo", "include", "libyelmo_c_api.so")
 
 const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
@@ -16,6 +18,7 @@ const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
 # ---------------------------------------------------------------------------
 mutable struct YelmoMirror
     alias::String
+    rundir::String
     time::Float64
     g::NamedTuple
     v::NamedTuple
@@ -27,7 +30,10 @@ mutable struct YelmoMirror
     tpo::NamedTuple
 end
 
-function YelmoMirror(filename::String, grid_def::String, time::Float64; alias::String="ylmo1")
+function YelmoMirror(filename::String, grid_def::String, time::Float64; 
+    alias::String="ylmo1", 
+    rundir::String="./"
+    )
 
     # First call yelmo init to initialize model in fortran
     ccall((:yelmo_init, yelmolib), Cvoid,
@@ -54,11 +60,26 @@ function YelmoMirror(filename::String, grid_def::String, time::Float64; alias::S
     thrm = yelmo_get_variable_set(v.thrm,"thrm",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
     tpo = yelmo_get_variable_set(v.tpo,"tpo",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
     
-    return YelmoMirror(alias,time,g,v,bnd,dta,dyn,mat,thrm,tpo)
+    return YelmoMirror(alias,rundir,time,g,v,bnd,dta,dyn,mat,thrm,tpo)
+end
+
+function YelmoMirror(p::YelmoParameters, grid_def::String, time::Float64; 
+    alias::String="ylmo1",
+    rundir::String="./"
+    )
+
+    # Write a namelist file with current parameters for Yelmo
+    filename = joinpath(rundir,p.name*".nml")
+    write_nml(filename,p)
+    
+    return YelmoMirror(filename, grid_def, time; alias, rundir)
 end
 
 function init_state!(ylmo::YelmoMirror, time::Float64, thrm_method::String)
     
+    # Sync yelmo to fortran
+    sync!(ylmo)
+
     # call yelmo_init_state in fortran
     ccall((:yelmo_init_state, yelmolib), Cvoid,
         (Float64, Ptr{UInt8}, Ptr{UInt8}),
@@ -75,6 +96,9 @@ end
 
 function time_step!(ylmo::YelmoMirror, dt::Float64)
 
+    # Sync yelmo to fortran
+    sync!(ylmo)
+    
     # Update time
     ylmo.time += dt
     

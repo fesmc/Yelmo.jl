@@ -8,21 +8,24 @@ using Yelmo
 
 # Northern hemisphere #
 begin
-    ylmo_nh = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file", 0.0; alias="ylmo1");
+    p_nh = YelmoParameters("North")
+
+    ylmo_nh = YelmoMirror(p_nh, "file", 0.0; alias="ylmo1");
 
     # Populate boundary fields
     ylmo_nh.bnd.H_sed .= 100.0
-    sync!(ylmo_nh);
 
     init_state!(ylmo_nh, 0.0, "robin-cold");
 end;
 
 # Southern hemisphere #
 begin
-    ylmo_sh = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file", 0.0; alias="ylmo2");
+    p_sh = YelmoParameters("South")
 
+    ylmo_sh = YelmoMirror(p_sh, "file", 0.0; alias="ylmo2");
+
+    # Populate boundary fields
     ylmo_sh.bnd.H_sed .= 200.0
-    sync!(ylmo_sh);
 
     init_state!(ylmo_sh, 0.0, "robin-cold");
 end;
@@ -38,7 +41,6 @@ for t in time_init:dt:time_end
     
     # Update boundary fields
     ylmo_nh.bnd.z_bed .+= 100.0
-    sync!(ylmo_nh)
 
 end
 
