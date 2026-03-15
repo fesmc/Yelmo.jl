@@ -1,30 +1,24 @@
 """
     YelmoPar
-
 Module for constructing and serializing Yelmo namelist parameter files.
-
 Each namelist group is represented by a dedicated struct. Constructor functions
 provide default values matching the reference namelist. A `write_namelist`
 routine serializes any `YelmoPar` object to a `.nml` file.
-
 Usage:
     using .YelmoPar
-
-    p = YelmoPar.yelmo_params(
-        ctrl    = YelmoPar.ctrl_params(time_end=50e3, dtt=5.0),
-        yelmo   = YelmoPar.yelmo_params(domain="Antarctica"),
+    p = YelmoParameters("experiment1";
+        ydyn = YelmoPar.ydyn_params(solver="ssa"),
     )
-
-    YelmoPar.write_namelist("run.nml", p)
+    YelmoPar.write_nml("run.nml", p)
 """
 module YelmoPar
 
 using Printf
-
 export YelmoParameters
 export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        ytill_params, yneff_params, ymat_params, ytherm_params,
-       yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
+       yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params,
+       phys_params, earth_params
 export write_nml
 
 # ---------------------------------------------------------------------------
@@ -69,7 +63,6 @@ Base.@kwdef struct YelmoParams
     pc_eps           ::Float64 = 1.0
 end
 yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ytopo
 # ---------------------------------------------------------------------------
@@ -102,7 +95,6 @@ Base.@kwdef struct YtopoParams
     fmb_scale           ::Float64 = 1.0
 end
 ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ycalv
 # ---------------------------------------------------------------------------
@@ -132,7 +124,6 @@ Base.@kwdef struct YcalvParams
     zb_sigma        ::Float64 = 0.0
 end
 ycalv_params(; kwargs...) = YcalvParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ydyn
 # ---------------------------------------------------------------------------
@@ -165,7 +156,6 @@ Base.@kwdef struct YdynParams
     cb_sia          ::Float64 = 0.0
 end
 ydyn_params(; kwargs...) = YdynParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ytill
 # ---------------------------------------------------------------------------
@@ -184,7 +174,6 @@ Base.@kwdef struct YtillParams
     cf_ref    ::Float64 = 0.8
 end
 ytill_params(; kwargs...) = YtillParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &yneff
 # ---------------------------------------------------------------------------
@@ -201,7 +190,6 @@ Base.@kwdef struct YneffParams
     s_const ::Float64 = 0.5
 end
 yneff_params(; kwargs...) = YneffParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ymat
 # ---------------------------------------------------------------------------
@@ -226,7 +214,6 @@ Base.@kwdef struct YmatParams
     tracer_impl_kappa   ::Float64 = 1.5
 end
 ymat_params(; kwargs...) = YmatParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &ytherm
 # ---------------------------------------------------------------------------
@@ -254,7 +241,6 @@ Base.@kwdef struct YthermParams
     kt_rock         ::Float64 = 6.3e7
 end
 ytherm_params(; kwargs...) = YthermParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &yelmo_masks
 # ---------------------------------------------------------------------------
@@ -267,7 +253,6 @@ Base.@kwdef struct YelmoMasksParams
     regions_nms   ::Vector{String} = ["mask", "None"]
 end
 yelmo_masks_params(; kwargs...) = YelmoMasksParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &yelmo_init_topo
 # ---------------------------------------------------------------------------
@@ -281,7 +266,6 @@ Base.@kwdef struct YelmoInitTopoParams
     smooth_z_bed    ::Float64 = 0.0
 end
 yelmo_init_topo_params(; kwargs...) = YelmoInitTopoParams(; kwargs...)
-
 # ---------------------------------------------------------------------------
 # &yelmo_data
 # ---------------------------------------------------------------------------
@@ -305,15 +289,45 @@ Base.@kwdef struct YelmoDataParams
     pd_age_names    ::Vector{String} = ["age_iso", "depth_iso"]
 end
 yelmo_data_params(; kwargs...) = YelmoDataParams(; kwargs...)
+# ---------------------------------------------------------------------------
+# &phys  (physical constants)
+# ---------------------------------------------------------------------------
+Base.@kwdef struct PhysParams
+    sec_year    ::Float64 = 31536000.0   # [s/a]      365*24*3600
+    g           ::Float64 = 9.81         # [m/s^2]    Gravitational accel.
+    T0          ::Float64 = 273.15       # [K]        Reference freezing temperature
+    rho_ice     ::Float64 = 910.0        # [kg/m^3]   Density ice
+    rho_w       ::Float64 = 1000.0       # [kg/m^3]   Density water
+    rho_sw      ::Float64 = 1028.0       # [kg/m^3]   Density seawater
+    rho_a       ::Float64 = 3300.0       # [kg/m^3]   Density asthenosphere
+    rho_rock    ::Float64 = 2000.0       # [kg/m^3]   Density bedrock (mantle/lithosphere)
+    L_ice       ::Float64 = 333500.0     # [J/kg]     Latent heat of fusion for ice/water
+    T_pmp_beta  ::Float64 = 9.8e-8       # [K/Pa]     Greve and Blatter (2009)
+end
+phys_params(; kwargs...) = PhysParams(; kwargs...)
+
+const _EARTH_DEFAULTS = (
+    sec_year   = 31536000.0,
+    g          = 9.81,
+    T0         = 273.15,
+    rho_ice    = 910.0,
+    rho_w      = 1000.0,
+    rho_sw     = 1028.0,
+    rho_a      = 3300.0,
+    rho_rock   = 2000.0,
+    L_ice      = 333500.0,
+    T_pmp_beta = 9.8e-8,
+)
+
+earth_params(; kwargs...) = PhysParams(; _EARTH_DEFAULTS..., kwargs...)
 
 # ---------------------------------------------------------------------------
 # Top-level container
 # ---------------------------------------------------------------------------
 """
     YelmoParameters
-
 Top-level container holding one struct per namelist group. Construct via
-`yelmo_params(; kwargs...)` to override individual groups.
+`YelmoParameters(name; kwargs...)` to override individual groups.
 """
 struct YelmoParameters
     name            ::String
@@ -328,21 +342,20 @@ struct YelmoParameters
     yelmo_masks     ::YelmoMasksParams
     yelmo_init_topo ::YelmoInitTopoParams
     yelmo_data      ::YelmoDataParams
+    phys           ::PhysParams
 end
-
 """
     YelmoParameters(name; yelmo, ytopo, ...) -> YelmoParameters
-
 Construct a `YelmoParameters` object. Any group can be supplied as a keyword
-argument; omitted groups are filled with defaults. `name` is provided as an
-alias to the parameter set.
-
+argument; omitted groups are filled with defaults. `name` is a label for the
+parameter set and the stem of the output filename.
 # Example
 ```julia
 p = YelmoParameters("experiment1";
     ydyn  = ydyn_params(solver="ssa"),
+    phys = phys_params(rho_ice=917.0),
 )
-write_namelist("run.nml", p)
+write_nml("run.nml", p)
 ```
 """
 function YelmoParameters(name;
@@ -357,20 +370,18 @@ function YelmoParameters(name;
     yelmo_masks     = yelmo_masks_params(),
     yelmo_init_topo = yelmo_init_topo_params(),
     yelmo_data      = yelmo_data_params(),
+    phys            = phys_params(),
 )
     return YelmoParameters(
         name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, ymat, ytherm,
-        yelmo_masks, yelmo_init_topo, yelmo_data,
+        yelmo_masks, yelmo_init_topo, yelmo_data, phys,
     )
 end
-
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
-
 """
     format_value(v) -> String
-
 Format a Julia value for Fortran namelist syntax.
 """
 format_value(v::Bool)              = v ? "True" : "False"
@@ -379,10 +390,8 @@ format_value(v::Int)               = string(v)
 format_value(v::Float64)           = _fmt_float(v)
 format_value(v::AbstractVector{<:AbstractString}) = join(["\"$s\"" for s in v], " ")
 format_value(v::AbstractVector{<:Real})            = join(format_value.(v), ", ")
-
 """
     _fmt_float(x) -> String
-
 Produce a clean, compact float representation. Uses exponential notation
 when the magnitude is very large or very small, otherwise decimal.
 """
@@ -390,9 +399,7 @@ function _fmt_float(x::Float64)
     x == 0.0 && return "0.0"
     a = abs(x)
     if a >= 1e5 || (a < 1e-3 && a > 0.0)
-        # Use exponential form, stripping trailing zeros
         s = @sprintf("%.6e", x)
-        # Convert 1.500000e+03 → 1.5e3
         m = match(r"^(-?)(\d+\.\d*?)0*(e[+-]?)0*(\d+)$", s)
         if m !== nothing
             mantissa = endswith(m[2], ".") ? m[2] * "0" : m[2]
@@ -403,17 +410,12 @@ function _fmt_float(x::Float64)
         return s
     else
         s = @sprintf("%.10g", x)
-        # Ensure at least one decimal point so Fortran reads it as real
         occursin('.', s) || (s *= ".0")
         return s
     end
 end
-
-using Printf
-
 """
     write_group(io, group_name, s)
-
 Write one namelist group to `io` from struct `s`.
 The field named `const_` is written as `const` (Julia keyword workaround).
 """
@@ -426,14 +428,13 @@ function write_group(io::IO, group_name::AbstractString, s)
     end
     println(io, "/\n")
 end
-
 """
-    write_namelist(filename, p::YelmoParameters)
-
+    write_nml(filename, p::YelmoParameters)
 Write a complete Yelmo namelist file from `p`.
 """
 function write_nml(filename::AbstractString, p::YelmoParameters)
     open(filename, "w") do io
+        write_group(io, "phys",            p.phys)
         write_group(io, "yelmo",           p.yelmo)
         write_group(io, "ytopo",           p.ytopo)
         write_group(io, "ycalv",           p.ycalv)
@@ -449,11 +450,9 @@ function write_nml(filename::AbstractString, p::YelmoParameters)
     @info "Namelist written to $(filename)"
     return nothing
 end
-
-function write_nml(p::YelmoParameters;rundir="")
-    filename = joinpath(rundir,p.name*".nml")
-    write_nml(filename,p)
+function write_nml(p::YelmoParameters; rundir="")
+    filename = joinpath(rundir, p.name * ".nml")
+    write_nml(filename, p)
     return nothing
 end
-
 end # module YelmoPar
