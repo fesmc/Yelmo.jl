@@ -8,10 +8,10 @@ using CairoMakie
 using Yelmo
 
 # Define parameters and write parameter file
-p = YelmoParameters("test")
+p = YelmoParameters("Greenland")
 
 # Initialize Yelmo
-ylmo = YelmoMirror(p, "file", 0.0);
+ylmo = YelmoMirror(p, 0.0);
 
 # Populate boundary fields
 ylmo.bnd.H_sed .= 100.0

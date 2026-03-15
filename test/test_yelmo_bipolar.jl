@@ -10,7 +10,7 @@ using Yelmo
 begin
     p_nh = YelmoParameters("North")
 
-    ylmo_nh = YelmoMirror(p_nh, "file", 0.0; alias="ylmo1");
+    ylmo_nh = YelmoMirror(p_nh, 0.0; alias="ylmo1");
 
     # Populate boundary fields
     ylmo_nh.bnd.H_sed .= 100.0
@@ -22,7 +22,7 @@ end;
 begin
     p_sh = YelmoParameters("South")
 
-    ylmo_sh = YelmoMirror(p_sh, "file", 0.0; alias="ylmo2");
+    ylmo_sh = YelmoMirror(p_sh, 0.0; alias="ylmo2");
 
     # Populate boundary fields
     ylmo_sh.bnd.H_sed .= 200.0
