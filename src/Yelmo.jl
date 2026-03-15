@@ -2,17 +2,26 @@ module Yelmo
 
 # Sub-modules
 include("YelmoMeta.jl")
+include("YelmoPar.jl")
 include("YelmoCore.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
+using .YelmoPar
 using .YelmoCore
 using .YelmoIO
 
-# Re-export the public API
+# Re-export the public API at the package level
 
 # YelmoMeta
 export VariableMeta, parse_variable_table
+
+# YelmoPar
+export YelmoParameters
+export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
+       ytill_params, yneff_params, ymat_params, ytherm_params,
+       yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
+export write_nml
 
 # YelmoCore
 export YelmoMirror, init_state!, time_step!, sync!  # Public API

@@ -3,11 +3,17 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
+#using Revise
 using CairoMakie
 using Yelmo
 
+# Define parameters and write parameter file
+p = YelmoParameters("test")
+write_nml(p)
+
 # Initialize Yelmo
-ylmo = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file", 0.0);
+#ylmo = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file", 0.0);
+ylmo = YelmoMirror("test.nml", "file", 0.0);
 
 # Populate boundary fields
 ylmo.bnd.H_sed .= 100.0
