@@ -11,7 +11,7 @@ ylmo = YelmoMirror("/Users/alrobi001/models/yelmo/par/yelmo_initmip.nml", "file"
 
 # Populate boundary fields
 ylmo.bnd.H_sed .= 100.0
-yelmo_sync(ylmo)
+sync!(ylmo)
 
 # Initialize Yelmo state
 init_state!(ylmo, 0.0, "robin-cold");
@@ -24,11 +24,11 @@ for t in time_init:dt:time_end
     time_step!(ylmo,t-ylmo.time);
 
     # Update boundary fields
-    ylmo.bnd.H_sed .= 100.0 .+ t
-    yelmo_sync(ylmo)
+    ylmo.bnd.z_bed .+= 100.0
+    sync!(ylmo)
 
 end
 
 # Plot some data
-heatmap(log10.(ylmo.dyn.uxy_s))
+heatmap(ylmo.g.xc,ylmo.g.yc,log10.(ylmo.dyn.uxy_s))
 

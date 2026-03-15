@@ -2,10 +2,10 @@ module YelmoCore
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
 
-export YelmoMirror, init_state!, time_step!, yelmo_sync
+export YelmoMirror, init_state!, time_step!, sync!
 export yelmo_get_var2D, yelmo_get_var2D!
 export yelmo_get_var3D, yelmo_get_var3D!
-export yelmo_set_var2D!
+export yelmo_set_var2D!, yelmo_set_var3D!
 
 # ---------------------------------------------------------------------------
 #const yelmolib = "../libyelmo/include/libyelmo_c_api.so"
@@ -206,12 +206,28 @@ function yelmo_get_var3D(nx::Int, ny::Int, nz::Int, name::String; alias::String=
     return v3D
 end
 
-function yelmo_sync(ylmo)
-    # Push values from Julia to fortran 
-    # (for now just boundary fields)
+function sync!(ylmo)
+    # Push values from Julia to fortran
+
+    # All boundary fields
     for k in keys(ylmo.v.bnd)
         yelmo_set_var2D!("bnd_$(k)", ylmo.bnd[k]; ylmo.alias)
     end
+
+    # tpo variables
+    yelmo_set_var2D!("tpo_H_ice", ylmo.tpo.H_ice; ylmo.alias)
+
+    # dyn variables
+    yelmo_set_var2D!("dyn_cb_ref", ylmo.dyn.cb_ref; ylmo.alias)
+    yelmo_set_var2D!("dyn_N_eff",  ylmo.dyn.N_eff;  ylmo.alias)
+    yelmo_set_var3D!("dyn_ux", ylmo.dyn.ux; ylmo.alias)
+    yelmo_set_var3D!("dyn_uy", ylmo.dyn.uy; ylmo.alias)
+    yelmo_set_var3D!("dyn_uz", ylmo.dyn.uz; ylmo.alias)
+
+    # thrm variables
+    yelmo_set_var3D!("thrm_T_ice", ylmo.thrm.T_ice; ylmo.alias)
+    yelmo_set_var2D!("thrm_H_w", ylmo.thrm.H_w; ylmo.alias)
+
 end
 
 function yelmo_set_var2D!(name::String, v2D::Array{Float64,2}; alias::String="ylmo1")
@@ -221,6 +237,18 @@ function yelmo_set_var2D!(name::String, v2D::Array{Float64,2}; alias::String="yl
     ccall((:yelmo_set_var2D, yelmolib), Cvoid,
           (Ptr{Cdouble}, Cint, Cint, Cstring, Ptr{UInt8}),
           v2D, nx, ny, name, alias)
+
+    return nothing
+
+end
+
+function yelmo_set_var3D!(name::String, v3D::Array{Float64,3}; alias::String="ylmo1")
+
+    nx, ny, nz = size(v3D)
+
+    ccall((:yelmo_set_var3D, yelmolib), Cvoid,
+          (Ptr{Cdouble}, Cint, Cint, Cint, Cstring, Ptr{UInt8}),
+          v3D, nx, ny, nz, name, alias)
 
     return nothing
 

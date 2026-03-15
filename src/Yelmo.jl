@@ -15,10 +15,10 @@ using .YelmoIO
 export VariableMeta, parse_variable_table
 
 # YelmoCore
-export YelmoMirror, init_state!, time_step!, yelmo_sync
-export yelmo_get_var2D, yelmo_get_var2D!
-export yelmo_get_var3D, yelmo_get_var3D!
-export yelmo_set_var2D!
+export YelmoMirror, init_state!, time_step!, sync!  # Public API
+export yelmo_get_var2D, yelmo_get_var2D!    # Mainly internally used
+export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
+export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoIO
 export load_grids_from_restart
