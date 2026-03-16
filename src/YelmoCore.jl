@@ -20,6 +20,7 @@ mutable struct YelmoMirror
     alias::String
     rundir::String
     time::Float64
+    p::YelmoParameters
     g::NamedTuple
     v::NamedTuple
     bnd::NamedTuple
@@ -32,16 +33,28 @@ end
 
 function YelmoMirror(filename::String, time::Float64; 
     alias::String="ylmo1", 
-    rundir::String="./"
+    rundir::String="./",
+    overwrite::Bool=false
     )
 
-    # Option needed for Fortran call
-    grid_def = "file"
+    # Load parameters from source parameter file
+    p = YelmoParameters(filename)
 
-    # First call yelmo init to initialize model in fortran
-    ccall((:yelmo_init, yelmolib), Cvoid,
-        (Ptr{UInt8}, Ptr{UInt8}, Float64, Ptr{UInt8}),
-        filename * "\0", grid_def * "\0", time, alias * "\0")
+    return YelmoMirror(p, time; alias, rundir, overwrite)
+end
+
+function YelmoMirror(p::YelmoParameters, time::Float64; 
+    alias::String="ylmo1",
+    rundir::String="./",
+    overwrite::Bool=false
+    )
+
+    # Write a namelist file with current parameters for Yelmo
+    filename = joinpath(rundir,p.name*".nml")
+    write_nml(filename,p;overwrite)
+    
+    # First initialize the Yelmo mirror in fortran
+    _init_yelmomirror(filename, time; alias)
 
     # Populate Julia version of Yelmo object with info from fortran
     g = yelmo_get_grid_info(alias=alias)
@@ -63,19 +76,20 @@ function YelmoMirror(filename::String, time::Float64;
     thrm = yelmo_get_variable_set(v.thrm,"thrm",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
     tpo = yelmo_get_variable_set(v.tpo,"tpo",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
     
-    return YelmoMirror(alias,rundir,time,g,v,bnd,dta,dyn,mat,thrm,tpo)
+    return YelmoMirror(alias,rundir,time,p,g,v,bnd,dta,dyn,mat,thrm,tpo)
 end
 
-function YelmoMirror(p::YelmoParameters, time::Float64; 
-    alias::String="ylmo1",
-    rundir::String="./"
-    )
+function _init_yelmomirror(filename::String, time::Float64; alias::String="ylmo1")
 
-    # Write a namelist file with current parameters for Yelmo
-    filename = joinpath(rundir,p.name*".nml")
-    write_nml(filename,p)
-    
-    return YelmoMirror(filename, time; alias, rundir)
+    # Option needed for Fortran call
+    grid_def = "file"
+
+    # First call yelmo init to initialize model in fortran
+    ccall((:yelmo_init, yelmolib), Cvoid,
+        (Ptr{UInt8}, Ptr{UInt8}, Float64, Ptr{UInt8}),
+        filename * "\0", grid_def * "\0", time, alias * "\0")
+
+    return
 end
 
 function init_state!(ylmo::YelmoMirror, time::Float64, thrm_method::String)

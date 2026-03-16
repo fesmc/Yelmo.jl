@@ -20,6 +20,7 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params,
        phys_params, earth_params
 export write_nml
+export read_nml
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -377,6 +378,15 @@ function YelmoParameters(name;
         yelmo_masks, yelmo_init_topo, yelmo_data, phys,
     )
 end
+
+function YelmoParameters(filename, name)
+    p = read_nml(filename)
+    return YelmoParameters(
+        name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
+        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
+    )
+end
+
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
@@ -432,7 +442,10 @@ end
     write_nml(filename, p::YelmoParameters)
 Write a complete Yelmo namelist file from `p`.
 """
-function write_nml(filename::AbstractString, p::YelmoParameters)
+function write_nml(filename::AbstractString, p::YelmoParameters; overwrite::Bool=false)
+    if isfile(filename) && !overwrite
+        error("File already exists: $(filename). Use overwrite=true to overwrite.")
+    end
     open(filename, "w") do io
         write_group(io, "phys",            p.phys)
         write_group(io, "yelmo",           p.yelmo)
@@ -450,9 +463,201 @@ function write_nml(filename::AbstractString, p::YelmoParameters)
     @info "Namelist written to $(filename)"
     return nothing
 end
-function write_nml(p::YelmoParameters; rundir="")
+function write_nml(p::YelmoParameters; rundir::String="", overwrite::Bool=false)
     filename = joinpath(rundir, p.name * ".nml")
-    write_nml(filename, p)
+    write_nml(filename, p; overwrite)
     return nothing
 end
+
+### READING NML FILES ###
+
+# ---------------------------------------------------------------------------
+# Deserialization helpers
+# ---------------------------------------------------------------------------
+
+"""
+    parse_nml_file(filename) -> Dict{String, Dict{String, String}}
+
+Low-level parser. Returns a two-level dict:
+    group_name => (field_name => raw_value_string)
+Handles line continuation, inline comments, and multi-line values.
+"""
+function parse_nml_file(filename::AbstractString)
+    groups = Dict{String, Dict{String, String}}()
+    current_group = nothing
+    current_key   = nothing
+    current_val   = nothing
+
+    for raw_line in eachline(filename)
+        line = strip(raw_line)
+        isempty(line) && continue
+        startswith(line, '!') && continue          # comment line
+
+        # Strip inline comments (outside of quoted strings)
+        line = _strip_inline_comment(line)
+        isempty(line) && continue
+
+        # &group_name
+        if startswith(line, '&')
+            # Flush any pending continuation
+            if current_group !== nothing && current_key !== nothing
+                groups[current_group][current_key] = strip(current_val)
+                current_key = current_val = nothing
+            end
+            current_group = lowercase(strip(line[2:end]))
+            groups[current_group] = Dict{String, String}()
+            continue
+        end
+
+        # End-of-group marker
+        if line == "/" || line == "&end" || startswith(line, "/")
+            if current_group !== nothing && current_key !== nothing
+                groups[current_group][current_key] = strip(current_val)
+                current_key = current_val = nothing
+            end
+            current_group = nothing
+            continue
+        end
+
+        current_group === nothing && continue
+
+        # key = value  (possibly continued on next line via trailing comma)
+        if occursin('=', line)
+            # Flush previous key if any
+            if current_key !== nothing
+                groups[current_group][current_key] = strip(current_val)
+            end
+            idx = findfirst('=', line)
+            current_key = strip(line[1:idx-1])
+            current_val = strip(line[idx+1:end])
+        else
+            # Continuation line: append to current value
+            current_key !== nothing && (current_val *= " " * line)
+        end
+    end
+    # Flush final key
+    if current_group !== nothing && current_key !== nothing
+        groups[current_group][current_key] = strip(current_val)
+    end
+
+    return groups
+end
+
+"""
+    _strip_inline_comment(line) -> String
+
+Remove everything after an unquoted `!` character.
+"""
+function _strip_inline_comment(line::AbstractString)
+    in_quote = false
+    for (i, c) in enumerate(line)
+        c == '"' && (in_quote = !in_quote)
+        !in_quote && c == '!' && return strip(line[1:i-1])
+    end
+    return line
+end
+
+# ---------------------------------------------------------------------------
+# Type-directed value parsing
+# ---------------------------------------------------------------------------
+
+"""
+    parse_nml_value(::Type{T}, s) -> T
+
+Parse a raw namelist string `s` into Julia type `T`.
+"""
+parse_nml_value(::Type{Bool}, s::AbstractString) =
+    lowercase(strip(s)) in ("true", ".true.", "t", "1")
+
+parse_nml_value(::Type{Int}, s::AbstractString) =
+    parse(Int, strip(s))
+
+parse_nml_value(::Type{Float64}, s::AbstractString) =
+    parse(Float64, replace(strip(s), r"[dD]" => "e"))  # Fortran D-exponent
+
+parse_nml_value(::Type{String}, s::AbstractString) =
+    strip(s, [' ', '"', '\''])
+
+function parse_nml_value(::Type{Vector{Float64}}, s::AbstractString)
+    parts = split(strip(s), r"[\s,]+"; keepempty=false)
+    return parse.(Float64, replace.(parts, r"[dD]" => "e"))
+end
+
+function parse_nml_value(::Type{Vector{String}}, s::AbstractString)
+    # Match all quoted tokens
+    ms = collect(eachmatch(r"\"([^\"]*)\"|'([^']*)'", s))
+    isempty(ms) && return String[]
+    return [something(m[1], m[2]) for m in ms]
+end
+
+# Fallback for unexpected types
+parse_nml_value(::Type{T}, s::AbstractString) where {T} = parse(T, strip(s))
+
+# ---------------------------------------------------------------------------
+# Struct reconstruction from a flat Dict{String,String}
+# ---------------------------------------------------------------------------
+
+"""
+    struct_from_dict(::Type{S}, d) -> S
+
+Reconstruct struct `S` from a `Dict{String,String}` of raw namelist values.
+Fields absent from `d` keep the default value from `S`'s `@kwdef` constructor.
+The Fortran field `const` is mapped back to Julia field `const_`.
+"""
+function struct_from_dict(::Type{S}, d::Dict{String,String}) where {S}
+    kwargs = Dict{Symbol,Any}()
+    defaults = S()   # zero-arg @kwdef constructor gives us all defaults
+    for fname in fieldnames(S)
+        nml_name = fname == :const_ ? "const" : string(fname)
+        if haskey(d, nml_name)
+            FT = fieldtype(S, fname)
+            kwargs[fname] = parse_nml_value(FT, d[nml_name])
+        else
+            kwargs[fname] = getfield(defaults, fname)
+        end
+    end
+    return S(; kwargs...)
+end
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+"""
+    read_nml(filename) -> YelmoParameters
+
+Read a Yelmo namelist file and return a fully populated `YelmoParameters`.
+Groups or fields absent from the file fall back to the struct defaults.
+
+# Example
+```julia
+p = read_nml("run.nml")
+println(p.ydyn.solver)   # "diva"
+```
+"""
+function read_nml(filename::AbstractString)
+    raw = parse_nml_file(filename)
+    get_group(name) = get(raw, name, Dict{String,String}())
+
+    return YelmoParameters(
+        splitext(basename(filename))[1];   # name = stem of filename
+        yelmo           = struct_from_dict(YelmoParams,          get_group("yelmo")),
+        ytopo           = struct_from_dict(YtopoParams,          get_group("ytopo")),
+        ycalv           = struct_from_dict(YcalvParams,          get_group("ycalv")),
+        ydyn            = struct_from_dict(YdynParams,           get_group("ydyn")),
+        ytill           = struct_from_dict(YtillParams,          get_group("ytill")),
+        yneff           = struct_from_dict(YneffParams,          get_group("yneff")),
+        ymat            = struct_from_dict(YmatParams,           get_group("ymat")),
+        ytherm          = struct_from_dict(YthermParams,         get_group("ytherm")),
+        yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
+        yelmo_init_topo = struct_from_dict(YelmoInitTopoParams,  get_group("yelmo_init_topo")),
+        yelmo_data      = struct_from_dict(YelmoDataParams,      get_group("yelmo_data")),
+        phys            = struct_from_dict(PhysParams,           get_group("phys")),
+    )
+end
+
+
+
+
 end # module YelmoPar
+

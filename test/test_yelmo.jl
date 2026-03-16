@@ -9,9 +9,10 @@ using Yelmo
 
 # Define parameters and write parameter file
 p = YelmoParameters("Greenland")
+#p = YelmoParameters("/Users/alrobi001/models/yelmo/output/grl-diva-test/yelmo_initmip.nml","Greenland")
 
 # Initialize Yelmo
-ylmo = YelmoMirror(p, 0.0);
+ylmo = YelmoMirror(p, 0.0; overwrite=true);
 
 # Populate boundary fields
 ylmo.bnd.H_sed .= 100.0
