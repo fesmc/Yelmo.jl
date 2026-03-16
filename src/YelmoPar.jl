@@ -21,6 +21,7 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        phys_params, earth_params
 export write_nml
 export read_nml
+export compare
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -657,7 +658,73 @@ function read_nml(filename::AbstractString)
 end
 
 
+## Comparison
 
+# ---------------------------------------------------------------------------
+# Equality
+# ---------------------------------------------------------------------------
+
+function Base.:(==)(a::YelmoParameters, b::YelmoParameters)
+    for fname in fieldnames(YelmoParameters)
+        fname == :name && continue
+        getfield(a, fname) == getfield(b, fname) || return false
+    end
+    return true
+end
+
+for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
+          YneffParams, YmatParams, YthermParams, YelmoMasksParams,
+          YelmoInitTopoParams, YelmoDataParams, PhysParams)
+    @eval function Base.:(==)(a::$S, b::$S)
+        for fname in fieldnames($S)
+            getfield(a, fname) == getfield(b, fname) || return false
+        end
+        return true
+    end
+end
+
+# For each sub-struct, fall back to the auto-generated field-wise ==
+# (this works because all leaf types are Bool/Int/Float64/String/Vector,
+#  which already have == defined)
+
+# ---------------------------------------------------------------------------
+# Diff printing
+# ---------------------------------------------------------------------------
+
+"""
+    diff_nml([io,] p1, p2; include_name=false)
+
+Print all fields that differ between `p1` and `p2`, grouped by namelist group.
+Identical groups are skipped entirely.
+"""
+function compare(io::IO, p1::YelmoParameters, p2::YelmoParameters; include_name=false)
+    any_diff = false
+    for fname in fieldnames(YelmoParameters)
+        fname == :name && !include_name && continue
+        g1, g2 = getfield(p1, fname), getfield(p2, fname)
+        g1 == g2 && continue
+
+        # Group header
+        any_diff = true
+        println(io, "&$(fname)")
+
+        if fname == :name
+            println(io, "  $(rpad("name", 24))  \"$(g1)\"  =>  \"$(g2)\"")
+        else
+            for sfield in fieldnames(typeof(g1))
+                v1, v2 = getfield(g1, sfield), getfield(g2, sfield)
+                v1 == v2 && continue
+                label = sfield == :const_ ? "const" : string(sfield)
+                println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
+            end
+        end
+        println(io, "/\n")
+    end
+    any_diff || println(io, "(no differences)")
+    return nothing
+end
+
+compare(p1::YelmoParameters, p2::YelmoParameters; kw...) = compare(stdout, p1, p2; kw...)
 
 end # module YelmoPar
 

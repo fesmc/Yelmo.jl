@@ -24,6 +24,7 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        phys_params, earth_params
 export write_nml
 export read_nml
+export compare
 
 # YelmoCore
 export YelmoMirror, init_state!, time_step!, sync!  # Public API

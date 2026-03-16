@@ -3,13 +3,12 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
-#using Revise
+using Revise
 using CairoMakie
 using Yelmo
 
 # Define parameters and write parameter file
 p = YelmoParameters("Greenland")
-#p = YelmoParameters("/Users/alrobi001/models/yelmo/output/grl-diva-test/yelmo_initmip.nml","Greenland")
 
 # Initialize Yelmo
 ylmo = YelmoMirror(p, 0.0; overwrite=true);
@@ -35,3 +34,11 @@ end
 # Plot some data
 heatmap(ylmo.g.xc,ylmo.g.yc,log10.(ylmo.dyn.uxy_s))
 
+
+
+## Parameter sets
+
+p1 = YelmoParameters("Greenland");
+p2 = YelmoParameters("Greenland";ydyn  = ydyn_params(solver="ssa"));
+
+p3 = YelmoParameters("/Users/alrobi001/models/yelmo/output/grl-diva-test/yelmo_initmip.nml","Greenland")
