@@ -3,8 +3,10 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
+using BenchmarkTools
 using Revise
-using CairoMakie
+#using CairoMakie
+#using Oceananigans.Fields
 using Yelmo
 
 # Define parameters and write parameter file
@@ -14,17 +16,17 @@ p = YelmoParameters("Greenland")
 ylmo = YelmoMirror(p, 0.0; overwrite=true);
 
 # Populate boundary fields
-ylmo.bnd.H_sed .= 100.0
+ylmo.bnd.H_sed .= 100.0;
 
 # Initialize Yelmo state
-init_state!(ylmo, 0.0, "robin-cold");
+@btime init_state!(ylmo, 0.0, "robin-cold");
 
 time_init, time_end, dt = 0.0, 5.0, 1.0;
 
 for t in time_init:dt:time_end
 
     # Advance by dt
-    time_step!(ylmo,t-ylmo.time);
+    @btime time_step!(ylmo,t-ylmo.time);
 
     # Update boundary fields
     ylmo.bnd.z_bed .+= 100.0
@@ -32,8 +34,7 @@ for t in time_init:dt:time_end
 end
 
 # Plot some data
-heatmap(ylmo.g.xc,ylmo.g.yc,log10.(ylmo.dyn.uxy_s))
-
+heatmap(ylmo.dyn.uxy_s,colorscale=log10)
 
 
 ## Parameter sets

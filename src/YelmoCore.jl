@@ -1,5 +1,7 @@
 module YelmoCore
 
+using Oceananigans: Grids, Fields
+
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoPar: YelmoParameters, write_nml
 
@@ -54,32 +56,32 @@ function YelmoMirror(p::YelmoParameters, time::Float64;
     write_nml(filename,p;overwrite)
     
     # First initialize the Yelmo mirror in fortran
-    _init_yelmomirror(filename, time; alias)
+    _init_yelmomirror(filename, time, alias)
 
     # Populate Julia version of Yelmo object with info from fortran
-    g = yelmo_get_grid_info(alias=alias)
+    g = yelmo_get_grid_info(alias)
 
     # Load variable meta information
     v = (
-        bnd = parse_variable_table("input/yelmo-variables-ybound.md"),
-        dta = parse_variable_table("input/yelmo-variables-ydata.md"),
-        dyn = parse_variable_table("input/yelmo-variables-ydyn.md"),
-        mat = parse_variable_table("input/yelmo-variables-ymat.md"),
-        thrm = parse_variable_table("input/yelmo-variables-ytherm.md"),
-        tpo = parse_variable_table("input/yelmo-variables-ytopo.md"),
+        bnd  = parse_variable_table("input/yelmo-variables-ybound.md","bnd"),
+        dta  = parse_variable_table("input/yelmo-variables-ydata.md","dta"),
+        dyn  = parse_variable_table("input/yelmo-variables-ydyn.md","dyn"),
+        mat  = parse_variable_table("input/yelmo-variables-ymat.md","mat"),
+        thrm = parse_variable_table("input/yelmo-variables-ytherm.md","thrm"),
+        tpo  = parse_variable_table("input/yelmo-variables-ytopo.md","tpo"),
     )
 
-    bnd = yelmo_get_variable_set(v.bnd,"bnd",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
-    dta = yelmo_get_variable_set(v.dta,"dta",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
-    dyn = yelmo_get_variable_set(v.dyn,"dyn",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
-    mat = yelmo_get_variable_set(v.mat,"mat",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
-    thrm = yelmo_get_variable_set(v.thrm,"thrm",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
-    tpo = yelmo_get_variable_set(v.tpo,"tpo",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac)
+    bnd = yelmo_get_variable_set(v.bnd,"bnd",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
+    dta = yelmo_get_variable_set(v.dta,"dta",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
+    dyn = yelmo_get_variable_set(v.dyn,"dyn",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
+    mat = yelmo_get_variable_set(v.mat,"mat",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
+    thrm = yelmo_get_variable_set(v.thrm,"thrm",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
+    tpo = yelmo_get_variable_set(v.tpo,"tpo",g.nx,g.ny,g.nz_aa,g.nz_ac,g.nzr_aa,g.nzr_ac,alias)
     
     return YelmoMirror(alias,rundir,time,p,g,v,bnd,dta,dyn,mat,thrm,tpo)
 end
 
-function _init_yelmomirror(filename::String, time::Float64; alias::String="ylmo1")
+function _init_yelmomirror(filename::String, time::Float64, alias::String)
 
     # Option needed for Fortran call
     grid_def = "file"
@@ -128,7 +130,7 @@ function time_step!(ylmo::YelmoMirror, dt::Float64)
     return ylmo
 end
 
-function yelmo_get_grid_info(; alias::String="ylmo1")
+function yelmo_get_grid_info(alias::String)
 
     # Step 1: get sizes
     nx    = Ref{Cint}(0)
@@ -174,39 +176,39 @@ end
 
 function yelmo_get_variables!(ylmo)
 
-    yelmo_get_variable_set!(ylmo.bnd, ylmo.v.bnd, "bnd"; ylmo.alias)
-    yelmo_get_variable_set!(ylmo.dta, ylmo.v.dta, "dta"; ylmo.alias)
-    yelmo_get_variable_set!(ylmo.dyn, ylmo.v.dyn, "dyn"; ylmo.alias)
-    yelmo_get_variable_set!(ylmo.mat, ylmo.v.mat, "mat"; ylmo.alias)
-    yelmo_get_variable_set!(ylmo.thrm, ylmo.v.thrm, "thrm"; ylmo.alias)
-    yelmo_get_variable_set!(ylmo.tpo, ylmo.v.tpo, "tpo"; ylmo.alias)
+    yelmo_get_variable_set!(ylmo.bnd, ylmo.v.bnd, "bnd", ylmo.alias)
+    yelmo_get_variable_set!(ylmo.dta, ylmo.v.dta, "dta", ylmo.alias)
+    yelmo_get_variable_set!(ylmo.dyn, ylmo.v.dyn, "dyn", ylmo.alias)
+    yelmo_get_variable_set!(ylmo.mat, ylmo.v.mat, "mat", ylmo.alias)
+    yelmo_get_variable_set!(ylmo.thrm, ylmo.v.thrm, "thrm", ylmo.alias)
+    yelmo_get_variable_set!(ylmo.tpo, ylmo.v.tpo, "tpo", ylmo.alias)
     
     return ylmo
 end
 
-function yelmo_get_variable_set!(dat, vlist, prefix; alias="ylmo1")
+function yelmo_get_variable_set!(dat, vlist, prefix, alias::String)
     for k in keys(vlist)
-        _get_var!(dat[k], vlist[k], prefix, k; alias)
+        _get_var!(dat[k], vlist[k], prefix, k, alias)
     end
     return dat
 end
 
-function _get_var!(arr, meta, prefix, k; alias="ylmo1")
+function _get_var!(arr, meta, prefix, k, alias::String)
     varname = "$(prefix)_$(k)"
     dims = meta.dimensions
     is3D = any(d -> d in VERTICAL_DIMS, dims)
     if is3D
-        yelmo_get_var3D!(arr, varname; alias)
+        yelmo_get_var3D!(arr, varname, alias)
     else
-        yelmo_get_var2D!(arr, varname; alias)
+        yelmo_get_var2D!(arr, varname, alias)
     end
 end
 
-function yelmo_get_variable_set(vlist, prefix, nx, ny, nz_aa, nz_ac, nzr_aa, nzr_ac; alias="ylmo1")
+function yelmo_get_variable_set(vlist, prefix, nx, ny, nz_aa, nz_ac, nzr_aa, nzr_ac, alias::String)
     dat = NamedTuple{keys(vlist)}(
         _alloc_var(vlist[k], nx, ny, nz_aa, nz_ac, nzr_aa, nzr_ac) for k in keys(vlist)
     )
-    yelmo_get_variable_set!(dat, vlist, prefix; alias)
+    yelmo_get_variable_set!(dat, vlist, prefix, alias)
     return dat
 end
 
@@ -219,7 +221,7 @@ function _alloc_var(meta, nx, ny, nz_aa, nz_ac, nzr_aa, nzr_ac)
     return isnothing(nz) ? zeros(Float64, nx, ny) : zeros(Float64, nx, ny, nz)
 end
 
-function yelmo_get_var2D!(v2D::Array{Float64,2}, name::String; alias::String="ylmo1")
+function yelmo_get_var2D!(v2D::Array{Float64,2}, name::String, alias::String)
     nx, ny = size(v2D)
     ccall((:yelmo_get_var2D, yelmolib), Cvoid,
         (Ptr{Float64}, Int32, Int32, Ptr{UInt8}, Ptr{UInt8}),
@@ -227,13 +229,13 @@ function yelmo_get_var2D!(v2D::Array{Float64,2}, name::String; alias::String="yl
     return v2D
 end
 
-function yelmo_get_var2D(nx::Int, ny::Int, name::String; alias::String="ylmo1")
+function yelmo_get_var2D(nx::Int, ny::Int, name::String, alias::String)
     v2D = Matrix{Float64}(undef, nx, ny)
-    yelmo_get_var2D!(v2D, name; alias)
+    yelmo_get_var2D!(v2D, name, alias)
     return v2D
 end
 
-function yelmo_get_var3D!(v3D::Array{Float64,3}, name::String; alias::String="ylmo1")
+function yelmo_get_var3D!(v3D::Array{Float64,3}, name::String, alias::String)
     nx, ny, nz = size(v3D)
     ccall((:yelmo_get_var3D, yelmolib), Cvoid,
         (Ptr{Float64}, Int32, Int32, Int32, Ptr{UInt8}, Ptr{UInt8}),
@@ -241,9 +243,9 @@ function yelmo_get_var3D!(v3D::Array{Float64,3}, name::String; alias::String="yl
     return v3D
 end
 
-function yelmo_get_var3D(nx::Int, ny::Int, nz::Int, name::String; alias::String="ylmo1")
+function yelmo_get_var3D(nx::Int, ny::Int, nz::Int, name::String, alias::String)
     v3D = Array{Float64}(undef, nx, ny, nz)
-    yelmo_get_var3D!(v3D, name; alias)
+    yelmo_get_var3D!(v3D, name, alias)
     return v3D
 end
 
@@ -252,26 +254,26 @@ function sync!(ylmo)
 
     # All boundary fields
     for k in keys(ylmo.v.bnd)
-        yelmo_set_var2D!("bnd_$(k)", ylmo.bnd[k]; ylmo.alias)
+        yelmo_set_var2D!("bnd_$(k)", ylmo.bnd[k], ylmo.alias)
     end
 
     # tpo variables
-    yelmo_set_var2D!("tpo_H_ice", ylmo.tpo.H_ice; ylmo.alias)
+    yelmo_set_var2D!("tpo_H_ice", ylmo.tpo.H_ice, ylmo.alias)
 
     # dyn variables
-    yelmo_set_var2D!("dyn_cb_ref", ylmo.dyn.cb_ref; ylmo.alias)
-    yelmo_set_var2D!("dyn_N_eff",  ylmo.dyn.N_eff;  ylmo.alias)
-    yelmo_set_var3D!("dyn_ux", ylmo.dyn.ux; ylmo.alias)
-    yelmo_set_var3D!("dyn_uy", ylmo.dyn.uy; ylmo.alias)
-    yelmo_set_var3D!("dyn_uz", ylmo.dyn.uz; ylmo.alias)
+    yelmo_set_var2D!("dyn_cb_ref", ylmo.dyn.cb_ref, ylmo.alias)
+    yelmo_set_var2D!("dyn_N_eff",  ylmo.dyn.N_eff,  ylmo.alias)
+    yelmo_set_var3D!("dyn_ux", ylmo.dyn.ux, ylmo.alias)
+    yelmo_set_var3D!("dyn_uy", ylmo.dyn.uy, ylmo.alias)
+    yelmo_set_var3D!("dyn_uz", ylmo.dyn.uz, ylmo.alias)
 
     # thrm variables
-    yelmo_set_var3D!("thrm_T_ice", ylmo.thrm.T_ice; ylmo.alias)
-    yelmo_set_var2D!("thrm_H_w", ylmo.thrm.H_w; ylmo.alias)
+    yelmo_set_var3D!("thrm_T_ice", ylmo.thrm.T_ice, ylmo.alias)
+    yelmo_set_var2D!("thrm_H_w", ylmo.thrm.H_w, ylmo.alias)
 
 end
 
-function yelmo_set_var2D!(name::String, v2D::Array{Float64,2}; alias::String="ylmo1")
+function yelmo_set_var2D!(name::String, v2D::Array{Float64,2}, alias::String)
 
     nx, ny = size(v2D)
 
@@ -283,7 +285,7 @@ function yelmo_set_var2D!(name::String, v2D::Array{Float64,2}; alias::String="yl
 
 end
 
-function yelmo_set_var3D!(name::String, v3D::Array{Float64,3}; alias::String="ylmo1")
+function yelmo_set_var3D!(name::String, v3D::Array{Float64,3}, alias::String)
 
     nx, ny, nz = size(v3D)
 

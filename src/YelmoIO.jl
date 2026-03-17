@@ -1,6 +1,6 @@
 module YelmoIO
 
-using Oceananigans
+using Oceananigans: Grids, Fields, RectilinearGrid, Bounded, Flat
 using NCDatasets
 
 export load_grids_from_restart

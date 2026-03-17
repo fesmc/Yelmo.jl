@@ -3,7 +3,8 @@ module Yelmo
 # Sub-modules
 include("YelmoMeta.jl")
 include("YelmoPar.jl")
-include("YelmoCore.jl")
+#include("YelmoCore.jl")
+include("YelmoCoreFields.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
