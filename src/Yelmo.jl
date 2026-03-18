@@ -38,5 +38,8 @@ export load_grids_from_restart
 export load_field_from_dataset_2D
 export load_field_from_dataset_3D
 export load_fields_from_restart
+export init_output
+export OutputSelection
+export write_output!
 
 end # module
