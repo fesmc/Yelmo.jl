@@ -212,26 +212,40 @@ end
 # ---------------------------------------------------------------------------
 
 struct OutputSelection
-    groups  :: Union{Nothing, Vector{Symbol}}
-    include :: Union{Nothing, Vector}
-    exclude :: Union{Nothing, Vector}
+    groups    :: Union{Nothing, Vector{Symbol}}
+    include   :: Union{Nothing, Vector}
+    exclude   :: Union{Nothing, Vector}
+    per_group :: Union{Nothing, Dict{Symbol, Vector}}  # group => name/regex patterns
 end
 
 OutputSelection(; groups=nothing, include=nothing, exclude=nothing) =
-    OutputSelection(groups, include, exclude)
+    OutputSelection(groups, include, exclude, nothing)
 
-function _name_matches(name::String, patterns)
-    for p in patterns
-        if p isa Regex
-            occursin(p, name) && return true
-        else
-            name == p && return true
-        end
+"""
+    OutputSelection(group_vars)
+
+Select specific variables per group, e.g.:
+
+    OutputSelection([
+        :tpo => ["H_ice", "z_srf"],
+        :dyn => ["ux", "uy", r".*_acx\$"],
+    ])
+"""
+OutputSelection(group_vars::Vector{Pair{Symbol, T}} where T) =
+    OutputSelection(
+        Symbol[k for (k, _) in group_vars],
+        nothing,
+        nothing,
+        Dict{Symbol, Vector}(k => v for (k, v) in group_vars),
+    )
+
+function _selected(name::String, gname::Symbol, sel::OutputSelection)
+    # per-group patterns take priority
+    if sel.per_group !== nothing
+        patterns = get(sel.per_group, gname, nothing)
+        patterns === nothing && return false
+        return _name_matches(name, patterns)
     end
-    return false
-end
-
-function _selected(name::String, sel::OutputSelection)
     sel.include !== nothing && !_name_matches(name, sel.include) && return false
     sel.exclude !== nothing &&  _name_matches(name, sel.exclude) && return false
     return true
@@ -359,10 +373,10 @@ function init_output(ylmo::YelmoMirror, path::String;
     defDim(ds, "time",         Inf)
 
     # ---- coordinate variables ---------------------------------------------
-    _defcoord(ds, "x_c", Float64, ("x_c",), xnodes(ylmo.g, Center()), "km", "x cell centre")
-    _defcoord(ds, "x_f", Float64, ("x_f",), xnodes(ylmo.g, Face()),   "km", "x face")
-    _defcoord(ds, "y_c", Float64, ("y_c",), ynodes(ylmo.g, Center()), "km", "y cell centre")
-    _defcoord(ds, "y_f", Float64, ("y_f",), ynodes(ylmo.g, Face()),   "km", "y face")
+    _defcoord(ds, "x_c", Float64, ("x_c",), xnodes(ylmo.g, Center()), "m", "x-coordinate, center")
+    _defcoord(ds, "x_f", Float64, ("x_f",), xnodes(ylmo.g, Face()),   "m", "x-coordinate, face")
+    _defcoord(ds, "y_c", Float64, ("y_c",), ynodes(ylmo.g, Center()), "m", "y-coordinate, center")
+    _defcoord(ds, "y_f", Float64, ("y_f",), ynodes(ylmo.g, Face()),   "m", "y-coordinate, face")
     _defcoord(ds, "zeta",         Float64, ("zeta",),
               znodes(ylmo.gt, Center()), "1", "normalised ice layer midpoint")
     _defcoord(ds, "zeta_ac",      Float64, ("zeta_ac",),
@@ -382,8 +396,8 @@ function init_output(ylmo::YelmoMirror, path::String;
 
         for fname in keys(group_nt)
             name  = String(fname)
-            _selected(name, selection) || continue
-
+            _selected(name, gname, selection) || continue
+            
             field = group_nt[fname]
             dims  = _spatial_dims(field, ylmo)
             dims === nothing && continue
@@ -416,7 +430,7 @@ function write_output!(out::YelmoOutput, ylmo::YelmoMirror)
 
         for fname in keys(group_nt)
             name = String(fname)
-            _selected(name, out.selection) || continue
+            _selected(name, gname, out.selection) || continue
             haskey(ds, name)               || continue
 
             data = _get_data(group_nt[fname])
