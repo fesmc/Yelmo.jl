@@ -3,13 +3,17 @@ module Yelmo
 # Sub-modules
 include("YelmoMeta.jl")
 include("YelmoPar.jl")
-#include("YelmoCore.jl")
-include("YelmoCoreFields.jl")
+include("YelmoModelPar.jl")
+include("YelmoCore.jl")
+#include("YelmoMirrorCoreMatrices.jl")
+include("YelmoMirrorCoreFields.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
 using .YelmoPar
+using .YelmoModelPar
 using .YelmoCore
+using .YelmoMirrorCore
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -27,17 +31,24 @@ export write_nml
 export read_nml
 export compare
 
+# YelmoModelPar
+export YelmoModelParameters
+
 # YelmoCore
-export YelmoMirror, init_state!, time_step!, sync!  # Public API
+export AbstractYelmoModel, YelmoModel
+export init_state!, step!, load_state!
+export load_grids_from_restart, load_fields_from_restart
+export load_field_from_dataset_2D, load_field_from_dataset_3D
+export make_field, matches_patterns, yelmo_define_grids
+export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+
+# YelmoMirrorCore
+export YelmoMirror, yelmo_sync!  # Public API
 export yelmo_get_var2D, yelmo_get_var2D!    # Mainly internally used
 export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoIO
-export load_grids_from_restart
-export load_field_from_dataset_2D
-export load_field_from_dataset_3D
-export load_fields_from_restart
 export init_output
 export OutputSelection
 export write_output!

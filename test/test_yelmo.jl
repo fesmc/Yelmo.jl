@@ -20,7 +20,7 @@ ylmo = YelmoMirror(p, 0.0; rundir="run01", overwrite=true);
 ylmo.bnd.H_sed .= 100.0;
 
 # Initialize Yelmo state
-init_state!(ylmo, 0.0, "robin-cold");
+init_state!(ylmo, 0.0; thrm_method="robin-cold");
 
 # Initialize output file
 out = init_output(ylmo, joinpath(ylmo.rundir,"yelmo.nc"),
@@ -41,7 +41,7 @@ for t in time_init:dt:time_end
     ylmo.bnd.z_bed .+= 100.0
 
     # Advance by dt
-    time_step!(ylmo,t-ylmo.time);
+    step!(ylmo,t-ylmo.time);
 
     write_output!(out, ylmo)
 end
@@ -78,7 +78,7 @@ out = init_output(ylmo, "output/yelmo.nc";
 time_init, time_end, dt = 0.0, 5.0, 1.0;
 
 for t in time_init:dt:time_end
-    time_step!(ylmo,t-ylmo.time);
+    step!(ylmo,t-ylmo.time);
     write_output!(out, ylmo)
 end
 
