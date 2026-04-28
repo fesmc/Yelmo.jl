@@ -5,7 +5,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoPar: YelmoParameters, write_nml
 
-export YelmoMirror, init_state!, time_step!, yelmo_sync!
+export YelmoMirror, init_state!, step!, yelmo_sync!
 export yelmo_get_var2D, yelmo_get_var2D!
 export yelmo_get_var3D, yelmo_get_var3D!
 export yelmo_set_var2D!, yelmo_set_var3D!
@@ -159,8 +159,8 @@ end
 
 # --- Simulations ---
 
-function init_state!(ylmo::YelmoMirror, time::Float64, thrm_method::String)
-    
+function init_state!(ylmo::YelmoMirror, time::Float64; thrm_method::String="robin-cold")
+
     # Sync yelmo to fortran
     yelmo_sync!(ylmo)
 
@@ -168,7 +168,7 @@ function init_state!(ylmo::YelmoMirror, time::Float64, thrm_method::String)
     ccall((:yelmo_init_state, yelmolib), Cvoid,
         (Float64, Ptr{UInt8}, Ptr{UInt8}),
         time, thrm_method * "\0", ylmo.calias)
-    
+
     # Update yelmo in julia
     yelmo_get_variables!(ylmo)
 
@@ -178,7 +178,7 @@ function init_state!(ylmo::YelmoMirror, time::Float64, thrm_method::String)
     return ylmo
 end
 
-function time_step!(ylmo::YelmoMirror, dt::Float64)
+function step!(ylmo::YelmoMirror, dt::Float64)
 
     # Sync yelmo to fortran
     yelmo_sync!(ylmo)
