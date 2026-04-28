@@ -30,15 +30,21 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # The Yelmo Fortran restart does not carry every variable in the
     # model variable tables (no `dta` group, missing `bnd::domain_mask`).
     # Skip `dta` and relax strict-mode for the remaining groups in v0.
-    y = YelmoModel(RESTART_PATH, 0.0;
-                   rundir = rundir,
-                   alias  = "ymodel-v0",
-                   groups = (:bnd, :dyn, :mat, :thrm, :tpo),
-                   strict = false)
+    # No `p` is passed — the constructor should auto-build defaults and
+    # emit a warning.
+    y = @test_logs (:warn, r"No parameters supplied") match_mode=:any YelmoModel(
+        RESTART_PATH, 0.0;
+        rundir = rundir,
+        alias  = "ymodel-v0",
+        groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+        strict = false,
+    )
 
     @test y isa AbstractYelmoModel
     @test y.alias == "ymodel-v0"
     @test y.time  == 0.0
+    @test y.p isa YelmoModelParameters
+    @test y.p.name == "ymodel-v0"
 
     # Sanity checks on a few loaded fields — values should be non-trivial,
     # i.e. came from the restart, not the default-initialised allocation.

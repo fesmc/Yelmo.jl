@@ -4,6 +4,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using NCDatasets
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
+using ..YelmoModelPar: YelmoModelParameters
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
@@ -313,6 +314,11 @@ function YelmoModel(restart_file::String, time::Float64;
                     p = nothing,
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
                     strict::Bool = true)
+
+    if p === nothing
+        @warn "No parameters supplied to YelmoModel; constructing YelmoModelParameters(\"$(alias)\") with defaults."
+        p = YelmoModelParameters(alias)
+    end
 
     g, gt, gr = load_grids_from_restart(restart_file)
     gt === nothing && error("Restart file $(restart_file) has no ice vertical axis; cannot build ice grid.")
