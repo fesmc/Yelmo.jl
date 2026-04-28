@@ -96,6 +96,22 @@ end
 _alloc_group(vlist, g2d, g3d, g3r) =
     NamedTuple{keys(vlist)}(_alloc_field(vlist[k], g2d, g3d, g3r) for k in keys(vlist))
 
+"""
+Construct a 2D `CenterField` on `grid` with Dirichlet `value` boundary
+conditions on every non-Flat horizontal face (east/west/south/north).
+Used for ice-sheet fields like `H_ice` whose physical boundary
+condition is "no ice past the domain edge."
+"""
+function _dirichlet_2d_field(grid::RectilinearGrid, value::Real)
+    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
+        east  = ValueBoundaryCondition(value),
+        west  = ValueBoundaryCondition(value),
+        south = ValueBoundaryCondition(value),
+        north = ValueBoundaryCondition(value),
+    )
+    return CenterField(grid; boundary_conditions=bcs)
+end
+
 # ---------------------------------------------------------------------------
 # Abstract type
 # ---------------------------------------------------------------------------
@@ -348,6 +364,12 @@ function YelmoModel(restart_file::String, time::Float64;
     mat  = _alloc_group(v_meta.mat,  g, gt, gr)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
+
+    # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
+    # boundary conditions on the domain edge. The upwind advection
+    # operator reads these via Oceananigans' standard halo machinery
+    # without per-cell branching in the kernel.
+    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = _dirichlet_2d_field(g, 0.0),)))
 
     y = YelmoModel(alias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 
