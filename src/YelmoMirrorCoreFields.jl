@@ -1,4 +1,4 @@
-module YelmoCore
+module YelmoMirrorCore
 
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 

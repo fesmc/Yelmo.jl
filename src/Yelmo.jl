@@ -3,13 +3,13 @@ module Yelmo
 # Sub-modules
 include("YelmoMeta.jl")
 include("YelmoPar.jl")
-#include("YelmoCore.jl")
-include("YelmoCoreFields.jl")
+#include("YelmoMirrorCoreMatrices.jl")
+include("YelmoMirrorCoreFields.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
 using .YelmoPar
-using .YelmoCore
+using .YelmoMirrorCore
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -27,7 +27,7 @@ export write_nml
 export read_nml
 export compare
 
-# YelmoCore
+# YelmoMirrorCore
 export YelmoMirror, init_state!, time_step!, sync!  # Public API
 export yelmo_get_var2D, yelmo_get_var2D!    # Mainly internally used
 export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used

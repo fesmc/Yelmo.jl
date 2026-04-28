@@ -3,7 +3,7 @@ module YelmoIO
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using NCDatasets
-using ..YelmoCore
+using ..YelmoMirrorCore
 using ..YelmoMeta
 export load_grids_from_restart
 export load_field_from_dataset_2D
