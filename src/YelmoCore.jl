@@ -141,8 +141,22 @@ Oceananigans `RectilinearGrid`s. `grid3d_ice` and `grid3d_rock` may be
 function load_grids_from_restart(filename::AbstractString)
     ds = NCDataset(filename)
 
-    xc = ds["xc"][:]
-    yc = ds["yc"][:]
+    xc = Vector{Float64}(ds["xc"][:])
+    yc = Vector{Float64}(ds["yc"][:])
+
+    # Yelmo's NetCDF convention stores horizontal coordinates in
+    # kilometres while velocities and thickness are in metres / m·yr⁻¹.
+    # Convert to metres on load so the grid spacing is consistent with
+    # the prognostic fields and CFL/advection arithmetic produces
+    # physical results without per-call rescaling.
+    x_units = lowercase(strip(get(ds["xc"].attrib, "units", "")))
+    y_units = lowercase(strip(get(ds["yc"].attrib, "units", "")))
+    if x_units == "km"
+        xc .*= 1000.0
+    end
+    if y_units == "km"
+        yc .*= 1000.0
+    end
 
     Nx = length(xc)
     Ny = length(yc)
