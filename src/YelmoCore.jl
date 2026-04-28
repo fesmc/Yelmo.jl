@@ -12,6 +12,7 @@ export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -22,6 +23,13 @@ const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
 const XFACE_VARIABLES = ["ux_s", "ux_b", "ux", r".*_acx$"]
 const YFACE_VARIABLES = ["uy_s", "uy_b", "uy", r".*_acy$"]
 const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
+
+# Per-cell ice evolution mask values (`bnd.mask_ice`).
+# Stored as Float64 in the field so they round-trip through Oceananigans
+# CenterField storage; the values themselves are integers.
+const MASK_ICE_NONE    = 0  # H_ice forced to 0
+const MASK_ICE_FIXED   = 1  # H_ice held at its current value
+const MASK_ICE_DYNAMIC = 2  # H_ice evolves freely
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -343,8 +351,36 @@ function YelmoModel(restart_file::String, time::Float64;
 
     y = YelmoModel(alias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 
+    # Default mask_ice to all-dynamic before load_state!. If the restart
+    # file carries `mask_ice`, load_state! overwrites this; otherwise the
+    # post-load inference may overwrite based on `ice_allowed`.
+    fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
+
     load_state!(y, restart_file; groups=groups, strict=strict)
 
+    _infer_mask_ice!(y, restart_file)
+
+    return y
+end
+
+# Fill `bnd.mask_ice` based on what is actually in the restart file.
+#  - If the restart contains `mask_ice`, do nothing (load_state! has
+#    already placed its values into `y.bnd.mask_ice`).
+#  - Else if it contains `ice_allowed`, derive: allowed → DYNAMIC,
+#    not-allowed → NONE. Read directly from the file so this works
+#    even when `:bnd` was not in the loaded `groups`.
+#  - Else leave the all-dynamic default established before load_state!.
+function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString)
+    NCDataset(restart_file) do ds
+        haskey(ds, "mask_ice") && return  # already loaded
+        haskey(ds, "ice_allowed") || return  # nothing to infer from
+
+        ia = _read_nc_2d(ds["ice_allowed"])
+        m = interior(y.bnd.mask_ice)
+        @inbounds for j in axes(m, 2), i in axes(m, 1)
+            m[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
+        end
+    end
     return y
 end
 

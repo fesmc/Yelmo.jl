@@ -41,6 +41,7 @@ export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
 # YelmoMirrorCore
 export YelmoMirror, yelmo_sync!  # Public API
