@@ -3,6 +3,7 @@ module Yelmo
 # Sub-modules
 include("YelmoMeta.jl")
 include("YelmoPar.jl")
+include("YelmoModelPar.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
 include("YelmoMirrorCoreFields.jl")
@@ -10,6 +11,7 @@ include("YelmoIO.jl")
 
 using .YelmoMeta
 using .YelmoPar
+using .YelmoModelPar
 using .YelmoCore
 using .YelmoMirrorCore
 using .YelmoIO
@@ -28,6 +30,9 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
 export write_nml
 export read_nml
 export compare
+
+# YelmoModelPar
+export YelmoModelParameters
 
 # YelmoCore
 export AbstractYelmoModel, YelmoModel
