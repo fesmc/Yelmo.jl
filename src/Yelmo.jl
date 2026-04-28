@@ -53,7 +53,7 @@ export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoModelTopo
-export topo_step!
+export topo_step!, advect_thickness!
 
 # YelmoIO
 export init_output

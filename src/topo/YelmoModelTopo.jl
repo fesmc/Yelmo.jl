@@ -19,7 +19,9 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
-export topo_step!
+export topo_step!, advect_thickness!
+
+include("advection.jl")
 
 """
     topo_step!(y::YelmoModel, dt) -> y
