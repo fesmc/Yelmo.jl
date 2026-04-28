@@ -69,13 +69,14 @@ function YelmoMirror(p::YelmoParameters, time::Float64;
     buffers = (v2D=v2D, v3D=v3D, v3Dr=v3Dr)
 
     # 3. Metadata
+    vdir = joinpath(@__DIR__, "variables", "mirror")
     v_meta = (
-        bnd  = parse_variable_table("input/yelmo-variables-ybound.md","bnd"),
-        dta  = parse_variable_table("input/yelmo-variables-ydata.md","dta"),
-        dyn  = parse_variable_table("input/yelmo-variables-ydyn.md","dyn"),
-        mat  = parse_variable_table("input/yelmo-variables-ymat.md","mat"),
-        thrm = parse_variable_table("input/yelmo-variables-ytherm.md","thrm"),
-        tpo  = parse_variable_table("input/yelmo-variables-ytopo.md","tpo"),
+        bnd  = parse_variable_table(joinpath(vdir, "yelmo-variables-ybound.md"), "bnd"),
+        dta  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydata.md"),  "dta"),
+        dyn  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydyn.md"),   "dyn"),
+        mat  = parse_variable_table(joinpath(vdir, "yelmo-variables-ymat.md"),   "mat"),
+        thrm = parse_variable_table(joinpath(vdir, "yelmo-variables-ytherm.md"), "thrm"),
+        tpo  = parse_variable_table(joinpath(vdir, "yelmo-variables-ytopo.md"),  "tpo"),
     )
 
     # 4. Allocate and Fill Fields
