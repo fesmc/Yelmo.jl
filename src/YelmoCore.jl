@@ -13,6 +13,7 @@ export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+export compare_state, StateComparison
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -518,6 +519,99 @@ end
 function step!(y::YelmoModel, dt::Float64)
     y.time += dt
     return y
+end
+
+# ---------------------------------------------------------------------------
+# compare_state — backend-agnostic field-wise diff for regression tests
+# ---------------------------------------------------------------------------
+
+const _COMPARE_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
+
+"""
+    StateComparison
+
+Result of `compare_state(a, b; tol)`. `passes` is `true` iff every
+field present in both models agreed within `tol` (relative L∞).
+`failures` lists the per-field violations as
+`(group, name, max_abs_diff, rel_linf)` named tuples. `n_compared`
+counts fields actually compared; `n_skipped` counts fields skipped
+because they were absent from one side or had mismatched shapes.
+"""
+struct StateComparison
+    tol        :: Float64
+    failures   :: Vector{NamedTuple{(:group, :name, :max_abs_diff, :rel_linf),
+                                    Tuple{Symbol, Symbol, Float64, Float64}}}
+    n_compared :: Int
+    n_skipped  :: Int
+    passes     :: Bool
+end
+
+function Base.show(io::IO, c::StateComparison)
+    if c.passes
+        print(io, "StateComparison: passed ($(c.n_compared) fields, ",
+                  "$(c.n_skipped) skipped, tol=$(c.tol))")
+    else
+        print(io, "StateComparison: FAILED — $(length(c.failures)) of ",
+                  "$(c.n_compared) fields exceed tol=$(c.tol)")
+        for f in c.failures[1:min(5, length(c.failures))]
+            print(io, "\n  $(f.group).$(f.name): rel_linf=", f.rel_linf,
+                      " (max_abs_diff=", f.max_abs_diff, ")")
+        end
+        length(c.failures) > 5 &&
+            print(io, "\n  ...$(length(c.failures) - 5) more")
+    end
+end
+
+"""
+    compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel; tol=1e-3)
+        -> StateComparison
+
+Field-wise diff between two model states. Iterates over the six
+component groups (`bnd`, `dta`, `dyn`, `mat`, `thrm`, `tpo`); for
+each field present in *both* `a.<group>` and `b.<group>` with the
+same shape, computes `max|a - b| / max|b|` (or `max|a - b|` when the
+reference field is identically zero). A field passes if the result
+is `≤ tol`. Fields present only on one side, or with mismatched
+shapes, are skipped (not failures).
+
+Used to lockstep-validate `YelmoModel` against `YelmoMirror` (or
+against another `YelmoModel`).
+"""
+function compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel;
+                       tol::Float64 = 1e-3)
+    failures   = NamedTuple{(:group, :name, :max_abs_diff, :rel_linf),
+                            Tuple{Symbol, Symbol, Float64, Float64}}[]
+    n_compared = 0
+    n_skipped  = 0
+
+    for gname in _COMPARE_GROUPS
+        a_grp = getfield(a, gname)
+        b_grp = getfield(b, gname)
+        for k in keys(a_grp)
+            if !haskey(b_grp, k)
+                n_skipped += 1
+                continue
+            end
+            af = interior(a_grp[k])
+            bf = interior(b_grp[k])
+            if size(af) != size(bf)
+                n_skipped += 1
+                continue
+            end
+            n_compared += 1
+
+            max_abs_diff = Float64(maximum(abs.(af .- bf)))
+            max_ref      = Float64(maximum(abs.(bf)))
+            rel_linf     = max_ref > 0 ? max_abs_diff / max_ref : max_abs_diff
+
+            if rel_linf > tol
+                push!(failures, (group=gname, name=k,
+                                 max_abs_diff=max_abs_diff, rel_linf=rel_linf))
+            end
+        end
+    end
+
+    return StateComparison(tol, failures, n_compared, n_skipped, isempty(failures))
 end
 
 end # module YelmoCore
