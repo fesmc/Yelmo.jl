@@ -4,6 +4,9 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoPar: YelmoParameters, write_nml
+using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
+                   XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+import ..YelmoCore: init_state!, step!
 
 export YelmoMirror, init_state!, step!, yelmo_sync!
 export yelmo_get_var2D, yelmo_get_var2D!
@@ -14,14 +17,8 @@ export yelmo_set_var2D!, yelmo_set_var3D!
 const yelmopath = joinpath(@__DIR__, "..", "yelmo")
 const yelmolib = joinpath(@__DIR__, "..", "yelmo", "libyelmo", "include", "libyelmo_c_api.so")
 
-const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
-
-const XFACE_VARIABLES = ["ux_s","ux_b", "ux", r".*_acx$"]
-const YFACE_VARIABLES = ["uy_s","uy_b", "uy", r".*_acy$"]
-const ZFACE_VARIABLES = ["uz","uz_star","jvel_dzx","jvel_dzy","jvel_dzz"]
-
 # ---------------------------------------------------------------------------
-mutable struct YelmoMirror{B, DT, DY, M, TH, TP}
+mutable struct YelmoMirror{B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     alias::String
     calias::Vector{UInt8}
     rundir::String
@@ -91,27 +88,6 @@ function YelmoMirror(p::YelmoParameters, time::Float64;
 end
 
 # --- Grid Logic ---
-
-function yelmo_define_grids(g::NamedTuple)
-    return yelmo_define_grids(g.xc, g.yc, g.zeta_ac, g.zeta_r_ac)
-end
-
-function yelmo_define_grids(xc, yc, zeta_ac, zeta_r_ac)
-    Nx, Ny = length(xc), length(yc)
-    dx, dy = xc[2]-xc[1], yc[2]-yc[1]
-    xlims = (xc[1] - dx/2, xc[end] + dx/2)
-    ylims = (yc[1] - dy/2, yc[end] + dy/2)
-    
-    grid2d = RectilinearGrid(size=(Nx, Ny), x=xlims, y=ylims, topology=(Bounded, Bounded, Flat))
-    
-    grid3d_ice = RectilinearGrid(size=(Nx, Ny, length(zeta_ac)-1), 
-                                 x=xlims, y=ylims, z=zeta_ac, topology=(Bounded, Bounded, Bounded))
-
-    grid3d_rock = RectilinearGrid(size=(Nx, Ny, length(zeta_r_ac)-1), 
-                                  x=xlims, y=ylims, z=zeta_r_ac, topology=(Bounded, Bounded, Bounded))
-    
-    return grid2d, grid3d_ice, grid3d_rock
-end
 
 function yelmo_get_grid_info(calias::Vector{UInt8})
 
@@ -225,41 +201,12 @@ function yelmo_get_variable_group(vlist, g2d, g3d, g3r, buffers, calias::Vector{
 end
 
 function _get_var!(buffer::Union{Array{Float64},SubArray{Float64}}, meta, calias::Vector{UInt8})
-    #name = "$(meta.set)_$(meta.name)"
     if ndims(buffer) == 3
         yelmo_get_var3D!(buffer, meta.cname, calias)
     else
         yelmo_get_var2D!(buffer, meta.cname, calias)
     end
     return buffer
-end
-
-function _alloc_field(meta, g2d, g3d, g3r)
-    dims = meta.dimensions
-    if any(d -> d in (:zeta_rock, :zeta_rock_ac), dims)
-        return make_field(meta.name, g3r)
-    elseif any(d -> d in (:zeta, :zeta_ac), dims)
-        return make_field(meta.name, g3d)
-    else
-        return make_field(meta.name, g2d)
-    end
-end
-
-function make_field(varname::Union{AbstractString,Symbol}, grid::RectilinearGrid)
-    varname = String(varname)
-    if matches_patterns(varname, XFACE_VARIABLES)
-        return XFaceField(grid)
-    elseif matches_patterns(varname, YFACE_VARIABLES)
-        return YFaceField(grid)
-    elseif matches_patterns(varname, ZFACE_VARIABLES)
-        return ZFaceField(grid)
-    else
-        return CenterField(grid)
-    end
-end
-
-function matches_patterns(name, patterns)
-    any(p -> occursin(p, name), patterns)
 end
 
 function yelmo_sync!(ylmo::YelmoMirror)
