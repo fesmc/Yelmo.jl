@@ -129,24 +129,40 @@ function load_grids_from_restart(filename::AbstractString)
                              x=xlims, y=ylims,
                              topology=(Bounded, Bounded, Flat))
 
-    grid3d_ice = nothing
-    if haskey(ds, "zeta_ac")
-        zeta_ac = ds["zeta_ac"][:]
-        grid3d_ice = RectilinearGrid(size=(Nx, Ny, length(zeta_ac) - 1),
-                                     x=xlims, y=ylims, z=zeta_ac,
-                                     topology=(Bounded, Bounded, Bounded))
-    end
-
-    grid3d_rock = nothing
-    if haskey(ds, "zeta_rock_ac")
-        zeta_r_ac = ds["zeta_rock_ac"][:]
-        grid3d_rock = RectilinearGrid(size=(Nx, Ny, length(zeta_r_ac) - 1),
-                                      x=xlims, y=ylims, z=zeta_r_ac,
-                                      topology=(Bounded, Bounded, Bounded))
-    end
+    grid3d_ice = _build_3d_grid(ds, "zeta", "zeta_ac", Nx, Ny, xlims, ylims)
+    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims)
 
     close(ds)
     return grid2d, grid3d_ice, grid3d_rock
+end
+
+# Build a 3D RectilinearGrid using face-coordinates from `face_var` if
+# present, otherwise reconstruct them from cell-center coordinates in
+# `center_var` (`zeta_ac[i] = (zeta[i-1] + zeta[i]) / 2` for interior
+# faces, with the boundary faces clamped to the first/last center).
+function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims)
+    if haskey(ds, face_var)
+        z_face = Vector{Float64}(ds[face_var][:])
+    elseif haskey(ds, center_var)
+        z_center = Vector{Float64}(ds[center_var][:])
+        z_face = _faces_from_centers(z_center)
+    else
+        return nothing
+    end
+    return RectilinearGrid(size=(Nx, Ny, length(z_face) - 1),
+                           x=xlims, y=ylims, z=z_face,
+                           topology=(Bounded, Bounded, Bounded))
+end
+
+function _faces_from_centers(zc::AbstractVector)
+    N = length(zc)
+    zf = Vector{Float64}(undef, N + 1)
+    zf[1] = zc[1]
+    zf[end] = zc[end]
+    for i in 2:N
+        zf[i] = 0.5 * (zc[i-1] + zc[i])
+    end
+    return zf
 end
 
 function load_field_from_dataset_2D(ds::NCDataset, varname::Union{AbstractString,Symbol}, grid2d)
@@ -276,22 +292,31 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     tpo::TP
 end
 
+const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
+
 """
-    YelmoModel(restart_file, time; alias, rundir, p)
+    YelmoModel(restart_file, time; alias, rundir, p, groups, strict)
 
 Construct a `YelmoModel` whose grids and field values are read from a NetCDF
 restart file. Variable layout is taken from `src/variables/model/` markdown
 tables. The model parameters `p` are passed through verbatim and may be
 `nothing`, a `YelmoModelParameters`, or any user object.
+
+`groups` selects which component groups to load from the restart (default:
+all six). `strict=true` (default) errors if a variable in a loaded group
+is missing from the restart; `strict=false` silently skips missing
+variables, leaving the corresponding field at its default-allocated value.
 """
 function YelmoModel(restart_file::String, time::Float64;
                     alias::String = "ymodel1",
                     rundir::String = "./",
-                    p = nothing)
+                    p = nothing,
+                    groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
+                    strict::Bool = true)
 
     g, gt, gr = load_grids_from_restart(restart_file)
-    gt === nothing && error("Restart file $(restart_file) has no zeta_ac axis; cannot build ice grid.")
-    gr === nothing && error("Restart file $(restart_file) has no zeta_rock_ac axis; cannot build rock grid.")
+    gt === nothing && error("Restart file $(restart_file) has no ice vertical axis; cannot build ice grid.")
+    gr === nothing && error("Restart file $(restart_file) has no rock vertical axis; cannot build rock grid.")
 
     vdir = joinpath(@__DIR__, "variables", "model")
     v_meta = (
@@ -312,7 +337,7 @@ function YelmoModel(restart_file::String, time::Float64;
 
     y = YelmoModel(alias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 
-    load_state!(y, restart_file)
+    load_state!(y, restart_file; groups=groups, strict=strict)
 
     return y
 end
@@ -322,26 +347,30 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    load_state!(y::YelmoModel, restart_file) -> y
+    load_state!(y::YelmoModel, restart_file; groups, strict) -> y
 
-Populate every field in `y`'s component groups from variables of the same
-name in `restart_file`. Errors if any variable named in `y.v` is missing
-from the file (strict mode). Grids are not re-read; the file's grid is
-assumed to match `y.g`/`y.gt`/`y.gr`.
+Populate fields in `y`'s component groups from variables of the same name
+in `restart_file`. `groups` selects which groups to load (default: all six);
+`strict=true` (default) errors on any missing variable in a loaded group,
+`strict=false` skips missing variables. Grids are not re-read.
 """
-function load_state!(y::YelmoModel, restart_file::AbstractString)
+function load_state!(y::YelmoModel, restart_file::AbstractString;
+                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
+                     strict::Bool = true)
     ds = NCDataset(restart_file)
     try
-        for gname in (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
+        for gname in groups
             group_nt = getfield(y, gname)
             metas    = getfield(y.v, gname)
             for k in keys(metas)
                 meta = metas[k]
                 name_str = String(meta.name)
-                haskey(ds, name_str) || error(
-                    "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
-                    "file $(restart_file). Strict mode: every variable in the model " *
-                    "variable table must be present.")
+                if !haskey(ds, name_str)
+                    strict && error(
+                        "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
+                        "file $(restart_file). Pass `strict=false` to skip missing variables.")
+                    continue
+                end
                 _load_into_field!(group_nt[k], ds[name_str])
             end
         end
@@ -353,44 +382,62 @@ end
 
 # Field-shape-aware copy from NetCDF variable to a pre-allocated Field's
 # interior. Mirrors the staggered-grid handling in YelmoMirrorCore's
-# _get_var! family.
+# _get_var! family. Restart variables may carry a trailing singleton
+# `time` dimension; `_read_nc_*` strips it.
+#
+# Note: Oceananigans 2D fields on a Flat-z grid still have a 3D interior
+# array (with size 1 in the third dim), so we branch on that singleton,
+# not on `ndims`.
+
+_read_nc_2d(ncvar) = ndims(ncvar) == 2 ? ncvar[:, :]    : ncvar[:, :, 1]
+_read_nc_3d(ncvar) = ndims(ncvar) == 3 ? ncvar[:, :, :] : ncvar[:, :, :, 1]
+
+@inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
 function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Face, Center}
-    if ndims(ncvar) == 3
-        interior(field)[2:end, :, :] .= ncvar[:, :, :]
-        interior(field)[1, :, :]     .= ncvar[1, :, :]
+    int = interior(field)
+    if _is_3d_field(int)
+        data = _read_nc_3d(ncvar)
+        int[2:end, :, :] .= data
+        int[1, :, :]     .= @view data[1, :, :]
     else
-        interior(field)[2:end, :] .= ncvar[:, :]
-        interior(field)[1, :]     .= ncvar[1, :]
+        data = _read_nc_2d(ncvar)
+        int[2:end, :, 1] .= data
+        int[1, :, 1]     .= @view data[1, :]
     end
     return field
 end
 
 function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Face, Center}
-    if ndims(ncvar) == 3
-        interior(field)[:, 2:end, :] .= ncvar[:, :, :]
-        interior(field)[:, 1, :]     .= ncvar[:, 1, :]
+    int = interior(field)
+    if _is_3d_field(int)
+        data = _read_nc_3d(ncvar)
+        int[:, 2:end, :] .= data
+        int[:, 1, :]     .= @view data[:, 1, :]
     else
-        interior(field)[:, 2:end] .= ncvar[:, :]
-        interior(field)[:, 1]     .= ncvar[:, 1]
+        data = _read_nc_2d(ncvar)
+        int[:, 2:end, 1] .= data
+        int[:, 1, 1]     .= @view data[:, 1]
     end
     return field
 end
 
 function _load_into_field!(field::Field{Center, Center, Face}, ncvar) where {Face, Center}
-    if ndims(ncvar) == 3
-        interior(field)[:, :, :] .= ncvar[:, :, :]
+    int = interior(field)
+    if _is_3d_field(int)
+        int[:, :, :] .= _read_nc_3d(ncvar)
     else
-        interior(field)[:, :] .= ncvar[:, :]
+        int[:, :, 1] .= _read_nc_2d(ncvar)
     end
     return field
 end
 
 function _load_into_field!(field::Field{Center, Center, Center}, ncvar) where {Center}
-    if ndims(ncvar) == 3
-        interior(field)[:, :, :] .= ncvar[:, :, :]
+    int = interior(field)
+    if _is_3d_field(int)
+        int[:, :, :] .= _read_nc_3d(ncvar)
     else
-        interior(field)[:, :] .= ncvar[:, :]
+        int[:, :, 1] .= _read_nc_2d(ncvar)
     end
     return field
 end
