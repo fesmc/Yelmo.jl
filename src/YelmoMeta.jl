@@ -38,8 +38,18 @@ function parse_variable_table(filename::AbstractString,set::AbstractString)
         startswith(stripped, "# ")      && continue
         startswith(stripped, '|')       || continue
 
+        # Split on `|`, then drop the leading and trailing empty entries
+        # produced by markdown's outer `|` delimiters — but preserve
+        # empty internal columns (e.g. unitless variables with a blank
+        # units field). `filter!(!isempty, cols)` would drop those too
+        # and silently skip the row.
         cols = strip.(split(stripped, '|'))
-        filter!(!isempty, cols)
+        while !isempty(cols) && isempty(cols[1])
+            popfirst!(cols)
+        end
+        while !isempty(cols) && isempty(cols[end])
+            pop!(cols)
+        end
         length(cols) >= 5 || continue
 
         id        = parse(Int, cols[1])

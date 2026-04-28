@@ -12,6 +12,8 @@ export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+export compare_state, StateComparison
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -22,6 +24,13 @@ const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
 const XFACE_VARIABLES = ["ux_s", "ux_b", "ux", r".*_acx$"]
 const YFACE_VARIABLES = ["uy_s", "uy_b", "uy", r".*_acy$"]
 const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
+
+# Per-cell ice evolution mask values (`bnd.mask_ice`).
+# Stored as Float64 in the field so they round-trip through Oceananigans
+# CenterField storage; the values themselves are integers.
+const MASK_ICE_NONE    = 0  # H_ice forced to 0
+const MASK_ICE_FIXED   = 1  # H_ice held at its current value
+const MASK_ICE_DYNAMIC = 2  # H_ice evolves freely
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -88,6 +97,22 @@ end
 _alloc_group(vlist, g2d, g3d, g3r) =
     NamedTuple{keys(vlist)}(_alloc_field(vlist[k], g2d, g3d, g3r) for k in keys(vlist))
 
+"""
+Construct a 2D `CenterField` on `grid` with Dirichlet `value` boundary
+conditions on every non-Flat horizontal face (east/west/south/north).
+Used for ice-sheet fields like `H_ice` whose physical boundary
+condition is "no ice past the domain edge."
+"""
+function _dirichlet_2d_field(grid::RectilinearGrid, value::Real)
+    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
+        east  = ValueBoundaryCondition(value),
+        west  = ValueBoundaryCondition(value),
+        south = ValueBoundaryCondition(value),
+        north = ValueBoundaryCondition(value),
+    )
+    return CenterField(grid; boundary_conditions=bcs)
+end
+
 # ---------------------------------------------------------------------------
 # Abstract type
 # ---------------------------------------------------------------------------
@@ -116,8 +141,22 @@ Oceananigans `RectilinearGrid`s. `grid3d_ice` and `grid3d_rock` may be
 function load_grids_from_restart(filename::AbstractString)
     ds = NCDataset(filename)
 
-    xc = ds["xc"][:]
-    yc = ds["yc"][:]
+    xc = Vector{Float64}(ds["xc"][:])
+    yc = Vector{Float64}(ds["yc"][:])
+
+    # Yelmo's NetCDF convention stores horizontal coordinates in
+    # kilometres while velocities and thickness are in metres / m·yr⁻¹.
+    # Convert to metres on load so the grid spacing is consistent with
+    # the prognostic fields and CFL/advection arithmetic produces
+    # physical results without per-call rescaling.
+    x_units = lowercase(strip(get(ds["xc"].attrib, "units", "")))
+    y_units = lowercase(strip(get(ds["yc"].attrib, "units", "")))
+    if x_units == "km"
+        xc .*= 1000.0
+    end
+    if y_units == "km"
+        yc .*= 1000.0
+    end
 
     Nx = length(xc)
     Ny = length(yc)
@@ -341,10 +380,44 @@ function YelmoModel(restart_file::String, time::Float64;
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
 
+    # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
+    # boundary conditions on the domain edge. The upwind advection
+    # operator reads these via Oceananigans' standard halo machinery
+    # without per-cell branching in the kernel.
+    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = _dirichlet_2d_field(g, 0.0),)))
+
     y = YelmoModel(alias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
+
+    # Default mask_ice to all-dynamic before load_state!. If the restart
+    # file carries `mask_ice`, load_state! overwrites this; otherwise the
+    # post-load inference may overwrite based on `ice_allowed`.
+    fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
 
     load_state!(y, restart_file; groups=groups, strict=strict)
 
+    _infer_mask_ice!(y, restart_file)
+
+    return y
+end
+
+# Fill `bnd.mask_ice` based on what is actually in the restart file.
+#  - If the restart contains `mask_ice`, do nothing (load_state! has
+#    already placed its values into `y.bnd.mask_ice`).
+#  - Else if it contains `ice_allowed`, derive: allowed → DYNAMIC,
+#    not-allowed → NONE. Read directly from the file so this works
+#    even when `:bnd` was not in the loaded `groups`.
+#  - Else leave the all-dynamic default established before load_state!.
+function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString)
+    NCDataset(restart_file) do ds
+        haskey(ds, "mask_ice") && return  # already loaded
+        haskey(ds, "ice_allowed") || return  # nothing to infer from
+
+        ia = _read_nc_2d(ds["ice_allowed"])
+        m = interior(y.bnd.mask_ice)
+        @inbounds for j in axes(m, 2), i in axes(m, 1)
+            m[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
+        end
+    end
     return y
 end
 
@@ -457,9 +530,103 @@ function init_state!(y::YelmoModel, time::Float64; kwargs...)
     return y
 end
 
-function step!(y::YelmoModel, dt::Float64)
-    y.time += dt
-    return y
+# step!(::YelmoModel, dt) is provided by YelmoModelTopo, which orchestrates
+# the per-component physics chain. The generic function is declared here so
+# downstream modules (YelmoMirrorCore, YelmoModelTopo) can extend it via
+# `import ..YelmoCore: step!`.
+function step! end
+
+# ---------------------------------------------------------------------------
+# compare_state — backend-agnostic field-wise diff for regression tests
+# ---------------------------------------------------------------------------
+
+const _COMPARE_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
+
+"""
+    StateComparison
+
+Result of `compare_state(a, b; tol)`. `passes` is `true` iff every
+field present in both models agreed within `tol` (relative L∞).
+`failures` lists the per-field violations as
+`(group, name, max_abs_diff, rel_linf)` named tuples. `n_compared`
+counts fields actually compared; `n_skipped` counts fields skipped
+because they were absent from one side or had mismatched shapes.
+"""
+struct StateComparison
+    tol        :: Float64
+    failures   :: Vector{NamedTuple{(:group, :name, :max_abs_diff, :rel_linf),
+                                    Tuple{Symbol, Symbol, Float64, Float64}}}
+    n_compared :: Int
+    n_skipped  :: Int
+    passes     :: Bool
+end
+
+function Base.show(io::IO, c::StateComparison)
+    if c.passes
+        print(io, "StateComparison: passed ($(c.n_compared) fields, ",
+                  "$(c.n_skipped) skipped, tol=$(c.tol))")
+    else
+        print(io, "StateComparison: FAILED — $(length(c.failures)) of ",
+                  "$(c.n_compared) fields exceed tol=$(c.tol)")
+        for f in c.failures[1:min(5, length(c.failures))]
+            print(io, "\n  $(f.group).$(f.name): rel_linf=", f.rel_linf,
+                      " (max_abs_diff=", f.max_abs_diff, ")")
+        end
+        length(c.failures) > 5 &&
+            print(io, "\n  ...$(length(c.failures) - 5) more")
+    end
+end
+
+"""
+    compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel; tol=1e-3)
+        -> StateComparison
+
+Field-wise diff between two model states. Iterates over the six
+component groups (`bnd`, `dta`, `dyn`, `mat`, `thrm`, `tpo`); for
+each field present in *both* `a.<group>` and `b.<group>` with the
+same shape, computes `max|a - b| / max|b|` (or `max|a - b|` when the
+reference field is identically zero). A field passes if the result
+is `≤ tol`. Fields present only on one side, or with mismatched
+shapes, are skipped (not failures).
+
+Used to lockstep-validate `YelmoModel` against `YelmoMirror` (or
+against another `YelmoModel`).
+"""
+function compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel;
+                       tol::Float64 = 1e-3)
+    failures   = NamedTuple{(:group, :name, :max_abs_diff, :rel_linf),
+                            Tuple{Symbol, Symbol, Float64, Float64}}[]
+    n_compared = 0
+    n_skipped  = 0
+
+    for gname in _COMPARE_GROUPS
+        a_grp = getfield(a, gname)
+        b_grp = getfield(b, gname)
+        for k in keys(a_grp)
+            if !haskey(b_grp, k)
+                n_skipped += 1
+                continue
+            end
+            af = interior(a_grp[k])
+            bf = interior(b_grp[k])
+            if size(af) != size(bf)
+                n_skipped += 1
+                continue
+            end
+            n_compared += 1
+
+            max_abs_diff = Float64(maximum(abs.(af .- bf)))
+            max_ref      = Float64(maximum(abs.(bf)))
+            rel_linf     = max_ref > 0 ? max_abs_diff / max_ref : max_abs_diff
+
+            if rel_linf > tol
+                push!(failures, (group=gname, name=k,
+                                 max_abs_diff=max_abs_diff, rel_linf=rel_linf))
+            end
+        end
+    end
+
+    return StateComparison(tol, failures, n_compared, n_skipped, isempty(failures))
 end
 
 end # module YelmoCore

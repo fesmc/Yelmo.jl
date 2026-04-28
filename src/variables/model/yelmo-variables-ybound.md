@@ -22,3 +22,4 @@
 | 18 | H_ice_ref         | xc, yc      | m           | Reference ice thickness for relaxation routines        |
 | 19 | z_bed_ref         | xc, yc      | m           | Reference bedrock elevation for relaxation routines    |
 | 20 | domain_mask       | xc, yc      | -           | Domain for mask                                        |
+| 21 | mask_ice          | xc, yc      | -           | Per-cell ice evolution mask (0=no ice, 1=fixed, 2=dynamic) |
