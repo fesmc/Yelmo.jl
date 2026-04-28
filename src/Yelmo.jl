@@ -7,6 +7,7 @@ include("YelmoModelPar.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
 include("YelmoMirrorCoreFields.jl")
+include("topo/YelmoModelTopo.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
@@ -14,6 +15,7 @@ using .YelmoPar
 using .YelmoModelPar
 using .YelmoCore
 using .YelmoMirrorCore
+using .YelmoModelTopo
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -49,6 +51,9 @@ export YelmoMirror, yelmo_sync!  # Public API
 export yelmo_get_var2D, yelmo_get_var2D!    # Mainly internally used
 export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
+
+# YelmoModelTopo
+export topo_step!
 
 # YelmoIO
 export init_output
