@@ -4,7 +4,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using NCDatasets
 using ..YelmoMeta
-using ..YelmoCore: AbstractYelmoModel
+using ..YelmoCore: AbstractYelmoModel, matches_patterns
 
 export init_output
 export OutputSelection
@@ -54,10 +54,10 @@ function _selected(name::String, gname::Symbol, sel::OutputSelection)
     if sel.per_group !== nothing
         patterns = get(sel.per_group, gname, nothing)
         patterns === nothing && return false
-        return _name_matches(name, patterns)
+        return matches_patterns(name, patterns)
     end
-    sel.include !== nothing && !_name_matches(name, sel.include) && return false
-    sel.exclude !== nothing &&  _name_matches(name, sel.exclude) && return false
+    sel.include !== nothing && !matches_patterns(name, sel.include) && return false
+    sel.exclude !== nothing &&  matches_patterns(name, sel.exclude) && return false
     return true
 end
 
