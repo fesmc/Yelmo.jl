@@ -530,10 +530,11 @@ function init_state!(y::YelmoModel, time::Float64; kwargs...)
     return y
 end
 
-function step!(y::YelmoModel, dt::Float64)
-    y.time += dt
-    return y
-end
+# step!(::YelmoModel, dt) is provided by YelmoModelTopo, which orchestrates
+# the per-component physics chain. The generic function is declared here so
+# downstream modules (YelmoMirrorCore, YelmoModelTopo) can extend it via
+# `import ..YelmoCore: step!`.
+function step! end
 
 # ---------------------------------------------------------------------------
 # compare_state — backend-agnostic field-wise diff for regression tests

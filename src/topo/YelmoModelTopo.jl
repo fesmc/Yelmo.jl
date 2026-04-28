@@ -18,10 +18,27 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+import ..YelmoCore: step!
 
 export topo_step!, advect_thickness!
 
 include("advection.jl")
+
+"""
+    step!(y::YelmoModel, dt) -> y
+
+Pure-Julia model time-step. In milestone 2a this is `topo_step!`
+followed by stub no-ops for `dyn`, `mat`, `thrm` (which arrive in
+later milestones, each as their own per-component `<comp>_step!`
+called from here in fixed phase order).
+"""
+function step!(y::YelmoModel, dt::Float64)
+    topo_step!(y, dt)
+    # dyn_step!(y, dt)   — future milestone 3
+    # mat_step!(y, dt)   — future milestone 4
+    # therm_step!(y, dt) — future milestone 5
+    return y
+end
 
 # ---------------------------------------------------------------------------
 # Reference physical constants used by the diagnostic update. Yelmo Fortran
