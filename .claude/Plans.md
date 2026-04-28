@@ -1,0 +1,9 @@
+# Overview
+
+We want to port the Yelmo ice sheet model completely into Julia. Right now, there is a working "mirror", which can define a Julia instance of a YelmoMirror. This simply populates fields that match those in the Fortran version. Then there is an API to call the Fortran version and populate the Julia fields with (some) of the Fortran generated data. As BCs and some variables can change on the Julia, this information is also updated on the Fortran side before the model is called.
+
+Yelmo.jl needs a new YelmoCore.jl module, which defines the YelmoModel struct (as opposed to the YelmoMirror object). It can actually be populated in a very similar way to the YelmoMirror though, using YelmoMeta. YelmoModel needs to rely on parameters, but these are well defined right now in YelmoPar. The only issue is that as YelmoModel evolves, YelmoPar should stay consistent with YelmoMirror, while YelmoModel will need its own evolving set of parameters. Here probably then we should make sure to have an analogous YelmoModelPar.jl file to manage this separately, although for now, it can start out essentially identical to YelmoPar.jl.
+
+Next we need to build out the physics routines associated with each of the components of Yelmo (tpo,dyn,mat,thrm) as well as all the routines associated with helpers (bnd,dta,...). Each of these should probably be defined as modules like YelmoModelTopo.jl, and there should be subfolders with specific helper functions/modules as needed for more general physics.
+
+We should be able to benchmark the model performance against YelmoMirror output for various test cases.
