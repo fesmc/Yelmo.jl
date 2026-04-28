@@ -81,6 +81,8 @@ Base.@kwdef struct YtopoParams
     grad_lim            ::Float64 = 0.5
     grad_lim_zb         ::Float64 = 0.5
     dHdt_dyn_lim        ::Float64 = 100.0
+    H_min_grnd          ::Float64 = 5.0
+    H_min_flt           ::Float64 = 75.0
     margin2nd           ::Bool    = false
     margin_flt_subgrid  ::Bool    = false
     use_bmb             ::Bool    = true
@@ -112,8 +114,6 @@ Base.@kwdef struct YcalvParams
     dt_lsf          ::Float64 = -1.0
     calv_flt_method ::String  = "vm-l19"
     calv_grnd_method::String  = "zero"
-    H_min_grnd      ::Float64 = 5.0
-    H_min_flt       ::Float64 = 75.0
     sd_min          ::Float64 = 100.0
     sd_max          ::Float64 = 500.0
     calv_grnd_max   ::Float64 = 0.0
