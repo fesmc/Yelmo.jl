@@ -12,7 +12,7 @@
 
 using Oceananigans.Fields: interior
 
-export apply_tendency!, mbal_tendency!
+export apply_tendency!, mbal_tendency!, resid_tendency!
 
 # Tolerance for "ice is effectively zero". Mirrors the `TOL` parameter in
 # `mass_conservation.f90` (controls the `is_equal` test inside Fortran's
@@ -115,4 +115,155 @@ function mbal_tendency!(G_mb, H_ice, f_grnd, mbal, dt::Real)
     end
 
     return G_mb
+end
+
+# Saturated lookup: returns `H[i,j,1]` if (i,j) is in bounds, else 0.0.
+# Treats out-of-domain neighbors as ice-free, matching the spec's
+# "grid handles BC" simplification of the Fortran neighbor lookup.
+@inline function _h_or_zero(H::AbstractArray, i::Int, j::Int, nx::Int, ny::Int)
+    return (1 <= i <= nx && 1 <= j <= ny) ? H[i, j, 1] : 0.0
+end
+
+"""
+    resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
+                    H_ice_ref, H_min_flt, H_min_grnd, dt) -> G_resid
+
+Compute the residual mass-balance tendency `G_resid` [m/yr] that
+removes ice in cells where the dynamic + SMB update has produced an
+unphysical configuration (margins below the min-thickness threshold,
+isolated ice islands, margins thicker than their neighbors, ice in
+disallowed cells). The tendency is signed so that
+`apply_tendency!(H_ice, G_resid, dt)` would realise the cleanup.
+
+The factor of `1.1` on the rate is intentional: a downstream call to
+`apply_tendency!(adjust_mb=true)` clips the actual delta back to what
+was realised after the non-negativity clamp, so a slight overshoot in
+the input tendency produces the desired final state.
+
+Port of `calc_G_boundaries` in
+`yelmo/src/physics/mass_conservation.f90:609`. Simplifications vs the
+Fortran:
+
+  - The EISMINT-summit averaging block (lines 651-658) is dropped.
+  - The trailing per-BC border-zeroing switch (lines 761-805) is
+    dropped — Oceananigans' Dirichlet halo on `H_ice` already enforces
+    `H = 0` outside the domain. Out-of-domain neighbors are read as 0
+    via `_h_or_zero` so margin / island detection is consistent with
+    the BC.
+
+`H_ice_ref` is currently unused (kept in the signature so a future
+`boundaries == "fixed"` reintroduction does not need a signature
+change). `f_ice` is read for `calc_H_eff = H_ice / f_ice` at margins.
+"""
+function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
+                         H_ice_ref, H_min_flt::Real, H_min_grnd::Real,
+                         dt::Real)
+    H_in = interior(H_ice)
+    Fi   = interior(f_ice)
+    Fg   = interior(f_grnd)
+    Ia   = interior(ice_allowed)
+    G    = interior(G_resid)
+
+    nx = size(H_in, 1)
+    ny = size(H_in, 2)
+
+    H_min_tol = 1e-6
+
+    # Working copy of H. We mutate `H_new` through three sweeps; each
+    # sweep reads from a snapshot `H_tmp` of the previous state.
+    H_new = copy(H_in)
+
+    # ---- 1. Disallow ice where the boundary mask says so. -----------
+    @inbounds for j in 1:ny, i in 1:nx
+        if Ia[i, j, 1] == 0.0
+            H_new[i, j, 1] = 0.0
+        end
+    end
+
+    # ---- 2. Margin too-thin removal + sub-tolerance cleanup. --------
+    H_tmp = copy(H_new)
+    @inbounds for j in 1:ny, i in 1:nx
+        h_here = H_tmp[i, j, 1]
+
+        # 2a. Sub-tolerance cells unconditionally zeroed.
+        if h_here < H_min_tol
+            H_new[i, j, 1] = 0.0
+            continue
+        end
+
+        # 2b. Margin test against the snapshot.
+        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
+        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
+        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
+        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+
+        is_margin = (nW == 0.0) | (nE == 0.0) |
+                    (nS == 0.0) | (nN == 0.0)
+
+        if is_margin
+            f_here  = Fi[i, j, 1]
+            H_eff   = f_here > 0.0 ? h_here / f_here : h_here
+            fg_here = Fg[i, j, 1]
+            if fg_here == 0.0 && H_eff < H_min_flt
+                H_new[i, j, 1] = 0.0
+            elseif fg_here > 0.0 && H_eff < H_min_grnd
+                H_new[i, j, 1] = 0.0
+            end
+        end
+    end
+
+    # ---- 3. Island removal (cell with H>0 but every neighbor 0). ----
+    H_tmp = copy(H_new)
+    @inbounds for j in 1:ny, i in 1:nx
+        h_here = H_tmp[i, j, 1]
+        h_here > 0.0 || continue
+
+        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
+        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
+        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
+        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+
+        is_island = (nW == 0.0) & (nE == 0.0) &
+                    (nS == 0.0) & (nN == 0.0)
+
+        if is_island
+            H_new[i, j, 1] = 0.0
+        end
+    end
+
+    # ---- 4. Cap margin cells to the max thickness of neighbors. -----
+    H_tmp = copy(H_new)
+    @inbounds for j in 1:ny, i in 1:nx
+        h_here = H_tmp[i, j, 1]
+        h_here > 0.0 || continue
+
+        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
+        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
+        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
+        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+
+        is_margin = (nW == 0.0) | (nE == 0.0) |
+                    (nS == 0.0) | (nN == 0.0)
+
+        if is_margin
+            f_here = Fi[i, j, 1]
+            H_eff  = f_here > 0.0 ? h_here / f_here : h_here
+            H_max  = max(nW, nE, nS, nN)
+            if H_eff > H_max
+                H_new[i, j, 1] = H_max
+            end
+        end
+    end
+
+    # ---- 5. Convert the realized H delta to a tendency. -------------
+    if dt != 0.0
+        inv_dt = 1.0 / dt
+        @inbounds for j in 1:ny, i in 1:nx
+            G[i, j, 1] = 1.1 * (H_new[i, j, 1] - H_in[i, j, 1]) * inv_dt
+        end
+    else
+        fill!(G, 0.0)
+    end
+
+    return G_resid
 end
