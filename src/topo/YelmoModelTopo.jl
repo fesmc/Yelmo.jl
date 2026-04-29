@@ -107,7 +107,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
 
     # Residual cleanup tendency for margin/island regularisation.
     resid_tendency!(y.tpo.mb_resid, y.tpo.H_ice, y.tpo.f_ice, y.tpo.f_grnd,
-                    y.bnd.ice_allowed, y.bnd.H_ice_ref,
+                    y.bnd.ice_allowed,
                     y.p.ytopo.H_min_flt, y.p.ytopo.H_min_grnd, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.mb_resid, dt; adjust_mb=true)
 

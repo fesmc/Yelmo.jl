@@ -126,7 +126,7 @@ end
 
 """
     resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
-                    H_ice_ref, H_min_flt, H_min_grnd, dt) -> G_resid
+                    H_min_flt, H_min_grnd, dt) -> G_resid
 
 Compute the residual mass-balance tendency `G_resid` [m/yr] that
 removes ice in cells where the dynamic + SMB update has produced an
@@ -151,12 +151,18 @@ Fortran:
     via `_h_or_zero` so margin / island detection is consistent with
     the BC.
 
-`H_ice_ref` is currently unused (kept in the signature so a future
-`boundaries == "fixed"` reintroduction does not need a signature
-change). `f_ice` is read for `calc_H_eff = H_ice / f_ice` at margins.
+`f_ice` is read for `calc_H_eff = H_ice / f_ice` at margins.
 """
 function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
-                         H_ice_ref, H_min_flt::Real, H_min_grnd::Real,
+                         # `H_ice_ref` was previously here. The Fortran
+                         # `calc_G_boundaries` consumes it only in the
+                         # `boundaries == "fixed"` branch of the per-BC
+                         # border-zeroing switch (lines 787-793 of
+                         # mass_conservation.f90), which we drop here in
+                         # favor of Oceananigans' grid-level halo
+                         # handling. Re-add the argument when (if) that
+                         # BC mode is reintroduced.
+                         H_min_flt::Real, H_min_grnd::Real,
                          dt::Real)
     H_in = interior(H_ice)
     Fi   = interior(f_ice)
