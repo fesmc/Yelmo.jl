@@ -54,6 +54,7 @@ export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoModelTopo
 export topo_step!, advect_thickness!
+export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
 
 # YelmoIO
 export init_output
