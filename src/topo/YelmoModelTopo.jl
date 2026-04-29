@@ -25,11 +25,13 @@ import ..YelmoCore: step!
 
 export topo_step!, advect_thickness!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
-       calc_f_ice!
+       calc_f_ice!,
+       calc_H_grnd!, determine_grounded_fractions!
 
 include("advection.jl")
 include("mass_balance.jl")
 include("ice_fraction.jl")
+include("grounded.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -142,39 +144,36 @@ function _apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
 end
 
 # Recompute Phase-10 diagnostics from current state.
+#  - Refresh `H_grnd` (flotation diagnostic), then `f_grnd` via the
+#    CISM bilinear-interpolation subgrid scheme.
+#  - `z_srf` / `z_base` from the standard grounded vs. floating
+#    formulae, keyed off the binary `H_grnd > 0` test (subgrid
+#    `z_srf` would land in a later milestone).
 #  - `dHidt = (H_now - H_prev) / dt`           — total step rate.
 #  - `dHidt_dyn = (H_after_dyn - H_prev) / dt` — dynamic-only rate
 #    (post-advection / mask-pass, before SMB or mb_resid).
-#  - Grounded if `H * rho_ice/rho_sw > max(z_sl - z_bed, 0)`. Binary
-#    `f_grnd` (0/1) in v1; same field will hold fractional values
-#    later without schema change.
-#  - `z_srf` / `z_base` from the standard grounded vs. floating
-#    formulae.
 function _update_diagnostics!(y::YelmoModel,
                               H_prev::AbstractArray,
                               H_after_dyn::AbstractArray,
                               dt::Real)
+    calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
+                 _RHO_ICE, _RHO_SW)
+    determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd)
+
     H_ice     = interior(y.tpo.H_ice)
+    H_grnd    = interior(y.tpo.H_grnd)
     z_bed     = interior(y.bnd.z_bed)
     z_sl      = interior(y.bnd.z_sl)
     z_srf     = interior(y.tpo.z_srf)
     z_base    = interior(y.tpo.z_base)
-    f_grnd    = interior(y.tpo.f_grnd)
     dHidt     = interior(y.tpo.dHidt)
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
 
-    inv_dt   = dt > 0 ? 1.0 / dt : 0.0
+    inv_dt = dt > 0 ? 1.0 / dt : 0.0
     rho_ratio_iw = _RHO_ICE / _RHO_SW
-    rho_ratio_wi = _RHO_SW  / _RHO_ICE
 
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
-        depth_below_sl = z_sl[i, j, 1] - z_bed[i, j, 1]
-        H_floating     = depth_below_sl > 0 ? depth_below_sl * rho_ratio_wi : 0.0
-        is_grnd        = H_ice[i, j, 1] > H_floating
-
-        f_grnd[i, j, 1] = is_grnd ? 1.0 : 0.0
-
-        if is_grnd
+        if H_grnd[i, j, 1] > 0.0
             z_base[i, j, 1] = z_bed[i, j, 1]
             z_srf[i, j, 1]  = z_bed[i, j, 1] + H_ice[i, j, 1]
         else

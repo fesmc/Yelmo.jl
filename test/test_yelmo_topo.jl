@@ -259,7 +259,9 @@ end
     @test err_total < 1e-9
     @test err_net   < 1e-12
 
-    @test sort(unique(interior(y.tpo.f_grnd))) == [0.0, 1.0]  # binary mask
+    # `f_grnd` is now subgrid (CISM bilinear scheme) — admits values in [0,1].
+    f_grnd = interior(y.tpo.f_grnd)
+    @test all(0.0 .<= f_grnd .<= 1.0)
     @test sort(unique(interior(y.tpo.f_ice)))  ⊆ [0.0, 1.0]   # binary stub
     # f_ice is exactly H_ice > 0
     f_ice = interior(y.tpo.f_ice)
@@ -346,4 +348,98 @@ end
     f_ice = interior(y.tpo.f_ice)
     @test sort(unique(f_ice)) ⊆ [0.0, 1.0]
     @test all((f_ice .> 0) .== (H_ice .> 0))
+end
+
+# ------------------------------------------------------------------
+# Grounding helpers — kernel-level
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_H_grnd!" begin
+    Nx = 8
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 100e3), y=(0.0, 100e3),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice  = CenterField(g)
+    z_bed  = CenterField(g)
+    z_sl   = CenterField(g)
+    H_grnd = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+
+    # 1. Bed above sea level: H_grnd = H_ice (no flotation contribution).
+    fill!(interior(H_ice), 500.0)
+    fill!(interior(z_bed), 100.0)
+    fill!(interior(z_sl),    0.0)
+    calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw)
+    @test all(interior(H_grnd) .≈ 500.0)
+
+    # 2. Thin shelf in deep water: H_grnd = H_ice - depth * rho_sw/rho_ice < 0.
+    fill!(interior(H_ice),  100.0)
+    fill!(interior(z_bed), -500.0)
+    fill!(interior(z_sl),     0.0)
+    calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw)
+    expected = 100.0 - 500.0 * rho_sw / rho_ice
+    @test all(interior(H_grnd) .≈ expected)
+    @test all(interior(H_grnd) .< 0.0)
+
+    # 3. At flotation: H_ice * rho_ice = depth * rho_sw → H_grnd = 0.
+    depth = 200.0
+    H_flot = depth * rho_sw / rho_ice
+    fill!(interior(H_ice),  H_flot)
+    fill!(interior(z_bed), -depth)
+    fill!(interior(z_sl),    0.0)
+    calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw)
+    @test maximum(abs.(interior(H_grnd))) < 1e-12
+end
+
+@testset "tpo: determine_grounded_fractions!" begin
+    Nx = 12
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 100e3), y=(0.0, 100e3),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd = CenterField(g)
+    f_grnd = CenterField(g)
+
+    # 1. Uniformly grounded → f_grnd = 1 everywhere. Boundary corner
+    #    stencils mix the in-bounds value with out-of-domain zeros, but
+    #    the in-bounds magnitude (|f_flt|=100) keeps every corner mean
+    #    well below the negative snap threshold, so all four quadrants
+    #    classify as fully grounded even on the domain edge.
+    fill!(interior(H_grnd), 100.0)
+    determine_grounded_fractions!(f_grnd, H_grnd)
+    @test all(interior(f_grnd) .== 1.0)
+
+    # 2. Uniformly floating → f_grnd = 0 everywhere. Out-of-domain
+    #    zeros are non-negative, so "all corners ≥ 0" holds and every
+    #    quadrant returns 0.
+    fill!(interior(H_grnd), -100.0)
+    determine_grounded_fractions!(f_grnd, H_grnd)
+    @test all(interior(f_grnd) .== 0.0)
+
+    # 3. East-West split (W grounded, E floating). Cells well inside
+    #    each side keep f_grnd ∈ {0,1}; cells straddling the boundary
+    #    take fractional values. Every cell must end up in [0,1].
+    half = Nx ÷ 2
+    Hg = interior(H_grnd)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        Hg[i, j, 1] = i <= half ? 100.0 : -100.0
+    end
+    determine_grounded_fractions!(f_grnd, H_grnd)
+    fg = interior(f_grnd)
+    @test all(0.0 .<= fg .<= 1.0)
+    # Two columns into the grounded side → fully grounded.
+    @test all(view(fg, 1:half-1, :, 1) .== 1.0)
+    # Two columns into the floating side → fully floating.
+    @test all(view(fg, half+2:Nx, :, 1) .== 0.0)
+
+    # 4. Single floating cell embedded in a grounded sheet → that cell
+    #    has f_grnd < 1, and its 8-cell neighbourhood is partially
+    #    affected via the corner stencils. Cells two away are pristine.
+    fill!(interior(H_grnd), 100.0)
+    Hg[6, 6, 1] = -100.0
+    determine_grounded_fractions!(f_grnd, H_grnd)
+    @test fg[6, 6, 1] < 1.0
+    @test fg[6, 6, 1] >= 0.0
+    @test fg[3, 3, 1] == 1.0   # far from the perturbation
+    @test fg[9, 9, 1] == 1.0
 end
