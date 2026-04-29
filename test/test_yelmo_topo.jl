@@ -947,26 +947,17 @@ function _grounded_area_linear_unit_cell(α::Float64, β::Float64, γ::Float64)
     return abs(A) / 2.0
 end
 
-@testset "tpo: determine_grounded_fractions! — linear GL (bounded error)" begin
+@testset "tpo: determine_grounded_fractions! — linear GL (analytical)" begin
     # For each cell the analytical grounded fraction of a linear
     # `H_grnd(x,y) = a·x + b·y + c` is the area of
     # `{a·x + b·y + c ≥ 0} ∩ cell` divided by cell area, computable in
     # closed form by half-plane / unit-square clipping.
     #
-    # The CISM scheme is *not* exact on linear inputs: any linear
-    # function has the bilinear cross-coefficient `dd = NE+SW-NW-SE`
-    # identically zero, which trips the d=0 perturbation branch in
-    # `_calc_fraction_above_zero` (Fortran lines 2148-2158, mirrored in
-    # the Julia port). The perturbation introduces a bounded per-cell
-    # offset; empirically a few percent. The snap that maps near-zero
-    # corner stencils to ±_FRAC_FTOL adds a smaller contribution on
-    # grid-aligned linear GLs.
-    #
-    # We therefore test against a *bounded* error rather than machine
-    # precision. The bound below (5e-2 absolute per cell) is large
-    # enough to absorb the perturbation noise but small enough to
-    # catch sign errors, indexing bugs, or scenario-rotation breakage
-    # — any of those would push at least one cell well above 0.5.
+    # The stabilised kernel detects the linear case (bilinear cross-
+    # coefficient |dd| < _LINEAR_DD_TOL) and computes the grounded
+    # area by exact polygon clip — no perturbation, no snap. So the
+    # algorithm should reproduce the analytical fraction to floating-
+    # point precision for any linear `H_grnd`.
     #
     # Tested only on the inner (Nx-2)×(Ny-2) block: outermost cells
     # have corner stencils that read out-of-domain values as 0, so the
@@ -994,7 +985,7 @@ end
         ("oblique_c",       0.7, -2.3,   8.3),
     ]
 
-    tol = 5e-2
+    tol = 1e-12
 
     for (label, a, b, c) in cases
         Hg = interior(H_grnd)
@@ -1009,9 +1000,7 @@ end
 
         # Compare on the inner block where the 9-point corner stencil
         # is unaffected by the out-of-domain Dirichlet halo.
-        max_err  = 0.0
-        sum_err  = 0.0
-        n_cells  = 0
+        max_err = 0.0
         for j in 2:Nx-1, i in 2:Nx-1
             x_W = (i - 1) * dx
             y_S = (j - 1) * dx
@@ -1019,18 +1008,11 @@ end
             β = b * dx
             γ = a*x_W + b*y_S + c
             expected = _grounded_area_linear_unit_cell(α, β, γ)
-            err = abs(fg[i, j, 1] - expected)
-            max_err  = max(max_err, err)
-            sum_err += err
-            n_cells += 1
+            max_err = max(max_err, abs(fg[i, j, 1] - expected))
         end
-        mean_err = sum_err / n_cells
 
         @testset "linear: $label" begin
-            @test max_err  < tol
-            # Mean error is much tighter — perturbation noise is
-            # bounded but doesn't accumulate uniformly.
-            @test mean_err < tol / 2
+            @test max_err < tol
         end
     end
 end
@@ -1091,12 +1073,12 @@ end
         println("  rate[dx=$(spacings[k])→$(spacings[k+1])] = $(rates[k])")
     end
 
-    # Sanity bounds, deliberately generous to avoid spurious failures:
-    @test all(rel_errs .> 0.0)            # algorithm is non-trivially active
-    @test rel_errs[end] < 5e-3            # < 0.5% error at finest grid
-    @test rel_errs[end] < rel_errs[1]     # finer is better (monotone)
-    # First-step convergence rate should be at least near-linear; later
-    # rates may saturate as the per-cell perturbation noise (~1e-4)
-    # starts dominating the truncation error of the bilinear stencil.
-    @test rates[1] >= 0.7
+    # Bounds tuned to the stabilised kernel's actual behaviour: clean
+    # 2nd-order convergence all the way to the finest grid (no noise
+    # floor — the Fortran d=0 perturbation and corner snap have been
+    # replaced by analytical limits).
+    @test all(rel_errs .> 0.0)
+    @test rel_errs[end] < 1e-3              # < 0.1% error at finest grid
+    @test all(diff(rel_errs) .< 0.0)        # strictly monotone refinement
+    @test all(1.7 .<= rates .<= 2.3)        # all rates ~ 2nd-order
 end
