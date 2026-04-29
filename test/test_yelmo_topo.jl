@@ -255,8 +255,10 @@ end
     bmb       = interior(y.tpo.bmb)
     mb_resid  = interior(y.tpo.mb_resid)
 
+    fmb       = interior(y.tpo.fmb)
+
     err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
     @test err_total < 1e-9
     @test err_net   < 1e-12
 
@@ -304,9 +306,10 @@ end
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
 
-    # Zero BMB inputs so the only mass change comes from SMB.
+    # Zero BMB / FMB inputs so the only mass change comes from SMB.
     fill!(interior(y.thrm.bmb_grnd), 0.0)
     fill!(interior(y.bnd.bmb_shlf),  0.0)
+    fill!(interior(y.bnd.fmb_shlf),  0.0)
 
     # Prescribe 1 m/yr melt over the whole domain.
     smb_rate = -1.0
@@ -339,14 +342,16 @@ end
     bmb       = interior(y.tpo.bmb)
     mb_resid  = interior(y.tpo.mb_resid)
 
+    fmb       = interior(y.tpo.fmb)
+
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
-    # Interior dHidt should equal smb_rate (no advection, no resid, no bmb).
+    # Interior dHidt should equal smb_rate (no advection, no resid, no bmb, no fmb).
     err_dh_interior = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .- smb_rate))
     @test err_dh_interior < 1e-9
 
@@ -383,10 +388,11 @@ end
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
 
-    # Zero SMB; bmb_grnd is the only mass sink. bmb_shlf is irrelevant
-    # (nothing floats) but zero it for clarity.
+    # Zero SMB / FMB inputs; bmb_grnd is the only mass sink. bmb_shlf is
+    # irrelevant (nothing floats) but zero it for clarity.
     fill!(interior(y.bnd.smb_ref),   0.0)
     fill!(interior(y.bnd.bmb_shlf),  0.0)
+    fill!(interior(y.bnd.fmb_shlf),  0.0)
 
     bmb_rate = -1.5
     fill!(interior(y.thrm.bmb_grnd), bmb_rate)
@@ -414,10 +420,12 @@ end
     bmb       = interior(y.tpo.bmb)
     mb_resid  = interior(y.tpo.mb_resid)
 
+    fmb       = interior(y.tpo.fmb)
+
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
@@ -488,6 +496,101 @@ end
         H_ice, H_grnd, f_grnd, "pmpt")
     @test_throws ErrorException calc_bmb_total!(bmb, bmb_grnd, bmb_shlf,
         H_ice, H_grnd, f_grnd, "bogus")
+end
+
+# ------------------------------------------------------------------
+# Frontal mass balance — kernel-level (calc_fmb_total!)
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_fmb_total!" begin
+    Nx = 6
+    dx = 16e3
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    fmb       = CenterField(g)
+    fmb_shlf  = CenterField(g)
+    bmb_shlf  = CenterField(g)
+    H_ice     = CenterField(g)
+    H_grnd    = CenterField(g)
+    f_ice     = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+
+    # 1. Method 0 = pass-through: fmb = fmb_shlf, regardless of state.
+    fill!(interior(fmb_shlf), -2.0)
+    fill!(interior(bmb_shlf), -3.0)
+    fill!(interior(H_ice),    1000.0)
+    fill!(interior(H_grnd),   500.0)
+    fill!(interior(f_ice),    1.0)
+    calc_fmb_total!(fmb, fmb_shlf, bmb_shlf, H_ice, H_grnd, f_ice,
+                    0, 1.0, rho_ice, rho_sw, dx)
+    @test all(interior(fmb) .≈ -2.0)
+
+    # 2. Method 2, no marine-ice cells (H_grnd ≥ H_ice everywhere) →
+    #    fmb = 0 even where fmb_shlf is nonzero.
+    fill!(interior(H_grnd),   1000.0)
+    calc_fmb_total!(fmb, fmb_shlf, bmb_shlf, H_ice, H_grnd, f_ice,
+                    2, 1.0, rho_ice, rho_sw, dx)
+    @test all(interior(fmb) .== 0.0)
+
+    # 3. Method 2 with floating ice and a single ice-free neighbour.
+    #    Only the cell adjacent to the gap has nonzero fmb. Submerged
+    #    front depth dz = H_eff * rho_ice/rho_sw → area_flt = 1*dz*dx,
+    #    fmb = fmb_shlf * (area_flt / dx^2) = fmb_shlf * dz / dx.
+    fill!(interior(H_ice),  1000.0)
+    fill!(interior(H_grnd), -100.0)   # floating everywhere
+    fill!(interior(f_ice),    1.0)
+    fill!(interior(fmb_shlf), -5.0)
+    interior(H_ice)[3, 3, 1] = 0.0    # carve a single ice-free cell
+    interior(f_ice)[3, 3, 1] = 0.0
+    calc_fmb_total!(fmb, fmb_shlf, bmb_shlf, H_ice, H_grnd, f_ice,
+                    2, 1.0, rho_ice, rho_sw, dx)
+    F = interior(fmb)
+    H_eff = 1000.0
+    dz = H_eff * rho_ice / rho_sw
+    expected_neighbour = -5.0 * (dz * dx) / (dx * dx)
+    # The four orthogonal neighbours of (3,3) each see exactly one
+    # ice-free neighbour (the gap).
+    @test F[2, 3, 1] ≈ expected_neighbour
+    @test F[4, 3, 1] ≈ expected_neighbour
+    @test F[3, 2, 1] ≈ expected_neighbour
+    @test F[3, 4, 1] ≈ expected_neighbour
+    # The gap cell itself has H_ice=0 → not marine-ice → fmb=0.
+    @test F[3, 3, 1] == 0.0
+    # A cell two away from the gap on the interior has all ice neighbours
+    # (and is not on the domain boundary), so fmb = 0.
+    @test F[2, 2, 1] == 0.0
+
+    # 4. Method 1: bmb_eff comes from the ice-free neighbours' bmb_shlf.
+    #    With uniform bmb_shlf = -3, neighbour mean is -3, so
+    #    fmb = -3 * (dz/dx) * fmb_scale.
+    fmb_scale = 0.5
+    calc_fmb_total!(fmb, fmb_shlf, bmb_shlf, H_ice, H_grnd, f_ice,
+                    1, fmb_scale, rho_ice, rho_sw, dx)
+    expected_method1 = -3.0 * dz / dx * fmb_scale
+    F = interior(fmb)
+    @test F[2, 3, 1] ≈ expected_method1
+    @test F[4, 3, 1] ≈ expected_method1
+
+    # 5. Grounded marine ice (H_grnd in (0, H_ice)): dz uses the
+    #    submerged-only depth max((H_eff - H_grnd)*rho_ice/rho_sw, 0).
+    fill!(interior(H_ice),  1000.0)
+    fill!(interior(H_grnd),  200.0)   # grounded but partially submerged
+    fill!(interior(f_ice),    1.0)
+    fill!(interior(fmb_shlf), -5.0)
+    interior(H_ice)[3, 3, 1] = 0.0
+    interior(f_ice)[3, 3, 1] = 0.0
+    calc_fmb_total!(fmb, fmb_shlf, bmb_shlf, H_ice, H_grnd, f_ice,
+                    2, 1.0, rho_ice, rho_sw, dx)
+    F = interior(fmb)
+    dz_grnd = max((1000.0 - 200.0) * rho_ice / rho_sw, 0.0)
+    expected_grnd = -5.0 * dz_grnd / dx
+    @test F[2, 3, 1] ≈ expected_grnd
+
+    # 6. Unknown method errors.
+    @test_throws ErrorException calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
+        H_ice, H_grnd, f_ice, 99, 1.0, rho_ice, rho_sw, dx)
 end
 
 # ------------------------------------------------------------------

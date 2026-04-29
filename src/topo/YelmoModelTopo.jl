@@ -27,13 +27,14 @@ export topo_step!, advect_thickness!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
-       calc_bmb_total!
+       calc_bmb_total!, calc_fmb_total!
 
 include("advection.jl")
 include("mass_balance.jl")
 include("ice_fraction.jl")
 include("grounded.jl")
 include("basal.jl")
+include("frontal.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -79,12 +80,16 @@ Advance topography state by `dt` years. Phase order matches Fortran's
    `calc_bmb_total!`, then realise via `mbal_tendency!` + `apply_tendency!`.
    Skipped (`bmb = 0`) if `y.p.ytopo.use_bmb == false`.
 8. Refresh `f_ice`.
-9. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
+9. FMB: `calc_fmb_total!` + `mbal_tendency!` + `apply_tendency!`.
+   Skipped (`fmb = 0`) if `y.p.ytopo.use_bmb == false` — Fortran
+   gates FMB on the same `use_bmb` flag.
 10. Refresh `f_ice`.
-11. `mb_net = smb + bmb + mb_resid`.
-12. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
+11. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
+12. Refresh `f_ice`.
+13. `mb_net = smb + bmb + fmb + mb_resid`.
+14. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
     `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
-13. Advance `y.time`.
+15. Advance `y.time`.
 """
 function topo_step!(y::YelmoModel, dt::Float64)
     H_prev = copy(interior(y.tpo.H_ice))
@@ -127,7 +132,26 @@ function topo_step!(y::YelmoModel, dt::Float64)
     end
     apply_tendency!(y.tpo.H_ice, y.tpo.bmb, dt; adjust_mb=true)
 
-    # BMB may have moved margins; refresh f_ice before resid cleanup.
+    # BMB may have moved margins; refresh f_ice before FMB.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Frontal mass balance at marine margins. Fortran gates this on
+    # `use_bmb` too — same flag, same intent (turn off at-shelf melt
+    # for EISMINT-style runs).
+    if y.p.ytopo.use_bmb
+        calc_fmb_total!(y.tpo.fmb_ref,
+                        y.bnd.fmb_shlf, y.bnd.bmb_shlf,
+                        y.tpo.H_ice, y.tpo.H_grnd, y.tpo.f_ice,
+                        y.p.ytopo.fmb_method, y.p.ytopo.fmb_scale,
+                        _RHO_ICE, _RHO_SW, _dx(y.g))
+        mbal_tendency!(y.tpo.fmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.fmb_ref, dt)
+    else
+        fill!(interior(y.tpo.fmb_ref), 0.0)
+        fill!(interior(y.tpo.fmb),     0.0)
+    end
+    apply_tendency!(y.tpo.H_ice, y.tpo.fmb, dt; adjust_mb=true)
+
+    # FMB may have moved margins; refresh f_ice before resid cleanup.
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 
     # Residual cleanup tendency for margin/island regularisation.
@@ -142,6 +166,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     # Net mass balance applied this step.
     interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+
                               interior(y.tpo.bmb) .+
+                              interior(y.tpo.fmb) .+
                               interior(y.tpo.mb_resid)
 
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
