@@ -413,9 +413,9 @@ function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString)
         haskey(ds, "ice_allowed") || return  # nothing to infer from
 
         ia = _read_nc_2d(ds["ice_allowed"])
-        m = interior(y.bnd.mask_ice)
-        @inbounds for j in axes(m, 2), i in axes(m, 1)
-            m[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
+        mask_ice = interior(y.bnd.mask_ice)
+        @inbounds for j in axes(mask_ice, 2), i in axes(mask_ice, 1)
+            mask_ice[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
         end
     end
     return y
