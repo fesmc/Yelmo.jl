@@ -126,16 +126,16 @@ end
 # Per-cell post-step pass keyed off bnd.mask_ice. Stored values are
 # Float64 representations of the Int constants from YelmoCore.
 function _apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
-    H = interior(y.tpo.H_ice)
-    mask = interior(y.bnd.mask_ice)
-    @inbounds for j in axes(H, 2), i in axes(H, 1)
-        m = mask[i, j, 1]
+    H_ice    = interior(y.tpo.H_ice)
+    mask_ice = interior(y.bnd.mask_ice)
+    @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
+        m = mask_ice[i, j, 1]
         if m == Float64(MASK_ICE_NONE)
-            H[i, j, 1] = 0.0
+            H_ice[i, j, 1] = 0.0
         elseif m == Float64(MASK_ICE_FIXED)
-            H[i, j, 1] = H_prev[i, j, 1]
+            H_ice[i, j, 1] = H_prev[i, j, 1]
         else  # MASK_ICE_DYNAMIC (default)
-            H[i, j, 1] = max(H[i, j, 1], 0.0)
+            H_ice[i, j, 1] = max(H_ice[i, j, 1], 0.0)
         end
     end
     return y
@@ -154,36 +154,36 @@ function _update_diagnostics!(y::YelmoModel,
                               H_prev::AbstractArray,
                               H_after_dyn::AbstractArray,
                               dt::Real)
-    H        = interior(y.tpo.H_ice)
-    z_bed    = interior(y.bnd.z_bed)
-    z_sl     = interior(y.bnd.z_sl)
-    z_srf    = interior(y.tpo.z_srf)
-    z_base   = interior(y.tpo.z_base)
-    f_grnd   = interior(y.tpo.f_grnd)
-    dHidt    = interior(y.tpo.dHidt)
-    dHidt_dy = interior(y.tpo.dHidt_dyn)
+    H_ice     = interior(y.tpo.H_ice)
+    z_bed     = interior(y.bnd.z_bed)
+    z_sl      = interior(y.bnd.z_sl)
+    z_srf     = interior(y.tpo.z_srf)
+    z_base    = interior(y.tpo.z_base)
+    f_grnd    = interior(y.tpo.f_grnd)
+    dHidt     = interior(y.tpo.dHidt)
+    dHidt_dyn = interior(y.tpo.dHidt_dyn)
 
     inv_dt   = dt > 0 ? 1.0 / dt : 0.0
     rho_ratio_iw = _RHO_ICE / _RHO_SW
     rho_ratio_wi = _RHO_SW  / _RHO_ICE
 
-    @inbounds for j in axes(H, 2), i in axes(H, 1)
+    @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
         depth_below_sl = z_sl[i, j, 1] - z_bed[i, j, 1]
         H_floating     = depth_below_sl > 0 ? depth_below_sl * rho_ratio_wi : 0.0
-        is_grnd        = H[i, j, 1] > H_floating
+        is_grnd        = H_ice[i, j, 1] > H_floating
 
         f_grnd[i, j, 1] = is_grnd ? 1.0 : 0.0
 
         if is_grnd
             z_base[i, j, 1] = z_bed[i, j, 1]
-            z_srf[i, j, 1]  = z_bed[i, j, 1] + H[i, j, 1]
+            z_srf[i, j, 1]  = z_bed[i, j, 1] + H_ice[i, j, 1]
         else
-            z_base[i, j, 1] = z_sl[i, j, 1] - rho_ratio_iw * H[i, j, 1]
-            z_srf[i, j, 1]  = z_base[i, j, 1] + H[i, j, 1]
+            z_base[i, j, 1] = z_sl[i, j, 1] - rho_ratio_iw * H_ice[i, j, 1]
+            z_srf[i, j, 1]  = z_base[i, j, 1] + H_ice[i, j, 1]
         end
 
-        dHidt[i, j, 1]    = (H[i, j, 1]            - H_prev[i, j, 1]) * inv_dt
-        dHidt_dy[i, j, 1] = (H_after_dyn[i, j, 1]  - H_prev[i, j, 1]) * inv_dt
+        dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
+        dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
     end
 
     return y

@@ -145,9 +145,9 @@ end
     # stages didn't exist; the test was written against that.)
     fill!(interior(y.bnd.smb_ref), 0.0)
 
-    H        = interior(y.tpo.H_ice)
+    H_ice    = interior(y.tpo.H_ice)
     mask_ice = interior(y.bnd.mask_ice)
-    Nx, Ny   = size(H, 1), size(H, 2)
+    Nx, Ny   = size(H_ice, 1), size(H_ice, 2)
 
     # Set up a known checkerboard region with all three mask values
     # and a known H_ice value, then take one step and verify per-cell
@@ -165,7 +165,7 @@ end
     patch_i = 9:13
     patch_j = 9:13
     for j in patch_j, i in patch_i
-        H[i, j, 1] = 100.0
+        H_ice[i, j, 1] = 100.0
         interior(y.bnd.ice_allowed)[i, j, 1] = 1.0
         interior(y.bnd.z_bed)[i, j, 1] = 100.0
         interior(y.bnd.z_sl)[i, j, 1]  = 0.0
@@ -177,7 +177,7 @@ end
     pre_value = 100.0
     for (idx, (i, j)) in enumerate(test_cells)
         mask_val = (idx - 1) % 3  # cycle through 0, 1, 2
-        H[i, j, 1]        = pre_value
+        H_ice[i, j, 1]    = pre_value
         mask_ice[i, j, 1] = Float64(mask_val)
         expected_H = mask_val == MASK_ICE_NONE  ? 0.0       :
                      mask_val == MASK_ICE_FIXED ? pre_value :
@@ -197,12 +197,12 @@ end
     # Cells with MASK_ICE_DYNAMIC must be ≥ 0 and finite.
     for ((i, j), (mask_val, expected_H)) in expected
         if mask_val == MASK_ICE_NONE
-            @test H[i, j, 1] == 0.0
+            @test H_ice[i, j, 1] == 0.0
         elseif mask_val == MASK_ICE_FIXED
-            @test H[i, j, 1] == pre_value
+            @test H_ice[i, j, 1] == pre_value
         else  # MASK_ICE_DYNAMIC
-            @test H[i, j, 1] >= 0.0
-            @test isfinite(H[i, j, 1])
+            @test H_ice[i, j, 1] >= 0.0
+            @test isfinite(H_ice[i, j, 1])
         end
     end
 end
@@ -247,14 +247,14 @@ end
 
     # Mass-conservation accounting on the *last* step, per cell.
     # `dHidt` should equal `dHidt_dyn + mb_net` to within roundoff.
-    H_now    = interior(y.tpo.H_ice)
-    dHidt    = interior(y.tpo.dHidt)
-    dHidt_dy = interior(y.tpo.dHidt_dyn)
-    mb_net   = interior(y.tpo.mb_net)
-    smb      = interior(y.tpo.smb)
-    mb_resid = interior(y.tpo.mb_resid)
+    H_now     = interior(y.tpo.H_ice)
+    dHidt     = interior(y.tpo.dHidt)
+    dHidt_dyn = interior(y.tpo.dHidt_dyn)
+    mb_net    = interior(y.tpo.mb_net)
+    smb       = interior(y.tpo.smb)
+    mb_resid  = interior(y.tpo.mb_resid)
 
-    err_total = maximum(abs.(dHidt .- (dHidt_dy .+ mb_net)))
+    err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
     err_net   = maximum(abs.(mb_net .- (smb .+ mb_resid)))
     @test err_total < 1e-9
     @test err_net   < 1e-12
@@ -262,8 +262,8 @@ end
     @test sort(unique(interior(y.tpo.f_grnd))) == [0.0, 1.0]  # binary mask
     @test sort(unique(interior(y.tpo.f_ice)))  ⊆ [0.0, 1.0]   # binary stub
     # f_ice is exactly H_ice > 0
-    fi = interior(y.tpo.f_ice)
-    @test all((fi .> 0) .== (H_now .> 0))
+    f_ice = interior(y.tpo.f_ice)
+    @test all((f_ice .> 0) .== (H_now .> 0))
 end
 
 # ------------------------------------------------------------------
@@ -325,15 +325,15 @@ end
     @test err < 1e-9   # SMB is realised exactly cell-by-cell
 
     # Per-cell mass-balance accounting on the final step.
-    dHidt    = interior(y.tpo.dHidt)
-    dHidt_dy = interior(y.tpo.dHidt_dyn)
-    mb_net   = interior(y.tpo.mb_net)
-    smb      = interior(y.tpo.smb)
-    mb_resid = interior(y.tpo.mb_resid)
+    dHidt     = interior(y.tpo.dHidt)
+    dHidt_dyn = interior(y.tpo.dHidt_dyn)
+    mb_net    = interior(y.tpo.mb_net)
+    smb       = interior(y.tpo.smb)
+    mb_resid  = interior(y.tpo.mb_resid)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
-                             (view(dHidt_dy, 2:Nx-1, 2:Ny-1, 1) .+
-                              view(mb_net,   2:Nx-1, 2:Ny-1, 1))))
+                             (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
+                              view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
     err_net   = maximum(abs.(mb_net .- (smb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
@@ -343,7 +343,7 @@ end
     @test err_dh_interior < 1e-9
 
     # f_ice should be binary 0/1 and exactly mirror H_ice > 0.
-    fi = interior(y.tpo.f_ice)
-    @test sort(unique(fi)) ⊆ [0.0, 1.0]
-    @test all((fi .> 0) .== (H_ice .> 0))
+    f_ice = interior(y.tpo.f_ice)
+    @test sort(unique(f_ice)) ⊆ [0.0, 1.0]
+    @test all((f_ice .> 0) .== (H_ice .> 0))
 end
