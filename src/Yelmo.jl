@@ -56,7 +56,7 @@ export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 export topo_step!, advect_thickness!
 export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
 export calc_H_grnd!, determine_grounded_fractions!
-export calc_bmb_total!, calc_fmb_total!
+export calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!
 
 # YelmoIO
 export init_output

@@ -256,11 +256,14 @@ end
     mb_resid  = interior(y.tpo.mb_resid)
 
     fmb       = interior(y.tpo.fmb)
+    dmb       = interior(y.tpo.dmb)
 
     err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
     @test err_total < 1e-9
     @test err_net   < 1e-12
+    # DMB is a no-op in v1 (dmb_method = 0).
+    @test all(dmb .== 0.0)
 
     # `f_grnd` is now subgrid (CISM bilinear scheme) — admits values in [0,1].
     f_grnd = interior(y.tpo.f_grnd)
@@ -343,11 +346,12 @@ end
     mb_resid  = interior(y.tpo.mb_resid)
 
     fmb       = interior(y.tpo.fmb)
+    dmb       = interior(y.tpo.dmb)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
@@ -421,11 +425,12 @@ end
     mb_resid  = interior(y.tpo.mb_resid)
 
     fmb       = interior(y.tpo.fmb)
+    dmb       = interior(y.tpo.dmb)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
@@ -591,6 +596,41 @@ end
     # 6. Unknown method errors.
     @test_throws ErrorException calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
         H_ice, H_grnd, f_ice, 99, 1.0, rho_ice, rho_sw, dx)
+end
+
+# ------------------------------------------------------------------
+# Subgrid discharge mass balance — kernel-level (calc_mb_discharge!)
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_mb_discharge!" begin
+    Nx = 4
+    dx = 16e3
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    dmb         = CenterField(g)
+    H_ice       = CenterField(g)
+    z_srf       = CenterField(g)
+    z_bed_sd    = CenterField(g)
+    dist_grline = CenterField(g)
+    dist_margin = CenterField(g)
+    f_ice       = CenterField(g)
+
+    # Prefill `dmb` with a sentinel; method 0 should overwrite to 0.
+    fill!(interior(dmb), 99.0)
+    fill!(interior(H_ice), 1000.0)
+    fill!(interior(f_ice),    1.0)
+
+    calc_mb_discharge!(dmb, H_ice, z_srf, z_bed_sd,
+                       dist_grline, dist_margin, f_ice,
+                       0,                # method
+                       dx, 60.0, 100.0, 300.0, 3.0, 1.0)
+    @test all(interior(dmb) .== 0.0)
+
+    # Any non-zero method errors with the deferred-implementation note.
+    @test_throws ErrorException calc_mb_discharge!(dmb, H_ice, z_srf, z_bed_sd,
+        dist_grline, dist_margin, f_ice,
+        1, dx, 60.0, 100.0, 300.0, 3.0, 1.0)
 end
 
 # ------------------------------------------------------------------
