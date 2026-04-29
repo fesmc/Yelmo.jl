@@ -903,3 +903,200 @@ end
     @test fg[3, 3, 1] == 1.0   # far from the perturbation
     @test fg[9, 9, 1] == 1.0
 end
+
+# ------------------------------------------------------------------
+# Analytical benchmarks for determine_grounded_fractions!
+# ------------------------------------------------------------------
+
+# Tier 1 helper: Sutherland-Hodgman clip of the unit square against the
+# half-plane {α·u + β·v + γ ≥ 0}, then shoelace area. Returns the area
+# in [0, 1] of the grounded sub-region.
+function _grounded_area_linear_unit_cell(α::Float64, β::Float64, γ::Float64)
+    @inline f(p) = α * p[1] + β * p[2] + γ
+    poly = NTuple{2,Float64}[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    out  = NTuple{2,Float64}[]
+    n = length(poly)
+    for k in 1:n
+        p1 = poly[k]
+        p2 = poly[mod1(k + 1, n)]
+        f1 = f(p1)
+        f2 = f(p2)
+        in1 = f1 >= 0.0
+        in2 = f2 >= 0.0
+        if in1 && in2
+            push!(out, p2)
+        elseif in1 && !in2
+            t = f1 / (f1 - f2)
+            push!(out, (p1[1] + t*(p2[1] - p1[1]),
+                        p1[2] + t*(p2[2] - p1[2])))
+        elseif !in1 && in2
+            t = f1 / (f1 - f2)
+            push!(out, (p1[1] + t*(p2[1] - p1[1]),
+                        p1[2] + t*(p2[2] - p1[2])))
+            push!(out, p2)
+        end
+    end
+    isempty(out) && return 0.0
+    A = 0.0
+    m = length(out)
+    for k in 1:m
+        x1, y1 = out[k]
+        x2, y2 = out[mod1(k + 1, m)]
+        A += x1*y2 - x2*y1
+    end
+    return abs(A) / 2.0
+end
+
+@testset "tpo: determine_grounded_fractions! — linear GL (bounded error)" begin
+    # For each cell the analytical grounded fraction of a linear
+    # `H_grnd(x,y) = a·x + b·y + c` is the area of
+    # `{a·x + b·y + c ≥ 0} ∩ cell` divided by cell area, computable in
+    # closed form by half-plane / unit-square clipping.
+    #
+    # The CISM scheme is *not* exact on linear inputs: any linear
+    # function has the bilinear cross-coefficient `dd = NE+SW-NW-SE`
+    # identically zero, which trips the d=0 perturbation branch in
+    # `_calc_fraction_above_zero` (Fortran lines 2148-2158, mirrored in
+    # the Julia port). The perturbation introduces a bounded per-cell
+    # offset; empirically a few percent. The snap that maps near-zero
+    # corner stencils to ±_FRAC_FTOL adds a smaller contribution on
+    # grid-aligned linear GLs.
+    #
+    # We therefore test against a *bounded* error rather than machine
+    # precision. The bound below (5e-2 absolute per cell) is large
+    # enough to absorb the perturbation noise but small enough to
+    # catch sign errors, indexing bugs, or scenario-rotation breakage
+    # — any of those would push at least one cell well above 0.5.
+    #
+    # Tested only on the inner (Nx-2)×(Ny-2) block: outermost cells
+    # have corner stencils that read out-of-domain values as 0, so the
+    # algorithm sees a different `H_grnd` near the boundary than the
+    # analytical function suggests.
+
+    Nx = 12
+    dx = 1.0
+    L  = Nx * dx
+    g  = RectilinearGrid(size=(Nx, Nx),
+                         x=(0.0, L), y=(0.0, L),
+                         topology=(Bounded, Bounded, Flat))
+    H_grnd = CenterField(g)
+    f_grnd = CenterField(g)
+
+    # (label, a, b, c) such that f(x,y) = a*x + b*y + c.
+    cases = [
+        ("vertical_GL",     1.0,  0.0, -5.5),
+        ("vertical_offset", 1.0,  0.0, -6.3),
+        ("horizontal",      0.0,  1.0, -5.7),
+        ("diag_45",         1.0,  1.0, -10.5),
+        ("anti_diag",       1.0, -1.0,  -1.3),
+        ("oblique_a",       2.0,  1.0, -16.7),
+        ("oblique_b",      -1.0,  3.0, -10.4),
+        ("oblique_c",       0.7, -2.3,   8.3),
+    ]
+
+    tol = 5e-2
+
+    for (label, a, b, c) in cases
+        Hg = interior(H_grnd)
+        @inbounds for j in 1:Nx, i in 1:Nx
+            xc = (i - 0.5) * dx
+            yc = (j - 0.5) * dx
+            Hg[i, j, 1] = a*xc + b*yc + c
+        end
+
+        determine_grounded_fractions!(f_grnd, H_grnd)
+        fg = interior(f_grnd)
+
+        # Compare on the inner block where the 9-point corner stencil
+        # is unaffected by the out-of-domain Dirichlet halo.
+        max_err  = 0.0
+        sum_err  = 0.0
+        n_cells  = 0
+        for j in 2:Nx-1, i in 2:Nx-1
+            x_W = (i - 1) * dx
+            y_S = (j - 1) * dx
+            α = a * dx
+            β = b * dx
+            γ = a*x_W + b*y_S + c
+            expected = _grounded_area_linear_unit_cell(α, β, γ)
+            err = abs(fg[i, j, 1] - expected)
+            max_err  = max(max_err, err)
+            sum_err += err
+            n_cells += 1
+        end
+        mean_err = sum_err / n_cells
+
+        @testset "linear: $label" begin
+            @test max_err  < tol
+            # Mean error is much tighter — perturbation noise is
+            # bounded but doesn't accumulate uniformly.
+            @test mean_err < tol / 2
+        end
+    end
+end
+
+@testset "tpo: determine_grounded_fractions! — circular GL (convergence)" begin
+    # Smooth nonlinear flotation field with an analytically known
+    # grounded area: H_grnd(x,y) = R² − (x−x₀)² − (y−y₀)². The grounded
+    # set is a disk of radius R, area π·R². The CISM scheme is not
+    # exact here (bilinear is not exact for r²), but the error should
+    # converge with refinement.
+    #
+    # The disk is centred well inside the domain so that boundary
+    # cells (which read out-of-domain f_flt as 0) never see grounded
+    # ice — the contamination is confined to a region with f_grnd = 0
+    # anyway.
+
+    R   = 4.0
+    x0  = 5.0
+    y0  = 5.0
+    L   = 10.0
+    A_exact = π * R^2
+
+    spacings = Float64[]
+    rel_errs = Float64[]
+    for Nx in (20, 40, 80, 160)
+        dx = L / Nx
+        g  = RectilinearGrid(size=(Nx, Nx),
+                             x=(0.0, L), y=(0.0, L),
+                             topology=(Bounded, Bounded, Flat))
+        H_grnd = CenterField(g)
+        f_grnd = CenterField(g)
+
+        Hg = interior(H_grnd)
+        @inbounds for j in 1:Nx, i in 1:Nx
+            x = (i - 0.5) * dx
+            y = (j - 0.5) * dx
+            Hg[i, j, 1] = R^2 - (x - x0)^2 - (y - y0)^2
+        end
+        determine_grounded_fractions!(f_grnd, H_grnd)
+
+        A_est   = sum(interior(f_grnd)) * dx * dx
+        rel_err = abs(A_est - A_exact) / A_exact
+        push!(spacings, dx)
+        push!(rel_errs, rel_err)
+    end
+
+    # Convergence rates between successive resolutions:
+    #   rate_k = log(err_k / err_{k+1}) / log(dx_k / dx_{k+1})
+    # For dx halving each step, log(dx_k / dx_{k+1}) = log(2).
+    rates = [log(rel_errs[k] / rel_errs[k+1]) /
+             log(spacings[k]  / spacings[k+1])  for k in 1:length(rel_errs)-1]
+
+    println("circular-GL convergence:")
+    for k in 1:length(rel_errs)
+        println("  Nx=$(round(Int, L/spacings[k]))  dx=$(spacings[k])  rel_err=$(rel_errs[k])")
+    end
+    for k in 1:length(rates)
+        println("  rate[dx=$(spacings[k])→$(spacings[k+1])] = $(rates[k])")
+    end
+
+    # Sanity bounds, deliberately generous to avoid spurious failures:
+    @test all(rel_errs .> 0.0)            # algorithm is non-trivially active
+    @test rel_errs[end] < 5e-3            # < 0.5% error at finest grid
+    @test rel_errs[end] < rel_errs[1]     # finer is better (monotone)
+    # First-step convergence rate should be at least near-linear; later
+    # rates may saturate as the per-cell perturbation noise (~1e-4)
+    # starts dominating the truncation error of the bilinear stencil.
+    @test rates[1] >= 0.7
+end
