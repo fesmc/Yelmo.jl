@@ -57,6 +57,7 @@ export topo_step!, advect_thickness!
 export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
 export calc_H_grnd!, determine_grounded_fractions!
 export calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!
+export set_tau_relax!, calc_G_relaxation!
 
 # YelmoIO
 export init_output

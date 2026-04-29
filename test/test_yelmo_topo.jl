@@ -257,13 +257,16 @@ end
 
     fmb       = interior(y.tpo.fmb)
     dmb       = interior(y.tpo.dmb)
+    mb_relax  = interior(y.tpo.mb_relax)
 
     err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
+                                        mb_relax .+ mb_resid)))
     @test err_total < 1e-9
     @test err_net   < 1e-12
-    # DMB is a no-op in v1 (dmb_method = 0).
-    @test all(dmb .== 0.0)
+    # DMB and relaxation are no-ops by default (dmb_method = 0, topo_rel = 0).
+    @test all(dmb      .== 0.0)
+    @test all(mb_relax .== 0.0)
 
     # `f_grnd` is now subgrid (CISM bilinear scheme) — admits values in [0,1].
     f_grnd = interior(y.tpo.f_grnd)
@@ -347,11 +350,13 @@ end
 
     fmb       = interior(y.tpo.fmb)
     dmb       = interior(y.tpo.dmb)
+    mb_relax  = interior(y.tpo.mb_relax)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
+                                        mb_relax .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
@@ -426,11 +431,13 @@ end
 
     fmb       = interior(y.tpo.fmb)
     dmb       = interior(y.tpo.dmb)
+    mb_relax  = interior(y.tpo.mb_relax)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
+                                        mb_relax .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
@@ -631,6 +638,176 @@ end
     @test_throws ErrorException calc_mb_discharge!(dmb, H_ice, z_srf, z_bed_sd,
         dist_grline, dist_margin, f_ice,
         1, dx, 60.0, 100.0, 300.0, 3.0, 1.0)
+end
+
+# ------------------------------------------------------------------
+# Relaxation helpers — kernel-level (set_tau_relax! + calc_G_relaxation!)
+# ------------------------------------------------------------------
+
+@testset "tpo: set_tau_relax!" begin
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 60e3), y=(0.0, 60e3),
+                        topology=(Bounded, Bounded, Flat))
+    tau_relax = CenterField(g)
+    H_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    mask_grz  = CenterField(g)
+    H_ref     = CenterField(g)
+
+    fill!(interior(H_ice), 1000.0)
+    fill!(interior(H_ref), 1000.0)
+    tau = 10.0
+
+    # topo_rel = 0 → no relaxation anywhere (sentinel = -1).
+    fill!(interior(f_grnd), 1.0)
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 0, tau)
+    @test all(interior(tau_relax) .== -1.0)
+
+    # topo_rel = 1 → tau where f_grnd == 0 (floating) OR H_ref == 0.
+    fill!(interior(f_grnd),  1.0)   # all grounded
+    fill!(interior(H_ref),   1000.0)
+    interior(f_grnd)[3, 3, 1] = 0.0   # one floating cell
+    interior(H_ref)[5, 5, 1]  = 0.0   # one ice-free-reference cell
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 1, tau)
+    T = interior(tau_relax)
+    @test T[3, 3, 1] == tau
+    @test T[5, 5, 1] == tau
+    @test T[2, 2, 1] == -1.0   # grounded with H_ref > 0
+
+    # topo_rel = 2 → tau on floating + on grounded cells with a
+    # floating orthogonal neighbour.
+    fill!(interior(f_grnd), 1.0)
+    fill!(interior(H_ref),  1000.0)
+    interior(f_grnd)[3, 3, 1] = 0.0   # one floating cell
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 2, tau)
+    T = interior(tau_relax)
+    @test T[3, 3, 1] == tau     # floating itself
+    @test T[2, 3, 1] == tau     # grounded, has floating neighbour to E
+    @test T[4, 3, 1] == tau     # grounded, has floating neighbour to W
+    @test T[3, 2, 1] == tau     # grounded, has floating neighbour to N
+    @test T[3, 4, 1] == tau     # grounded, has floating neighbour to S
+    @test T[2, 2, 1] == -1.0    # diagonal neighbour: not on the GZ
+    @test T[1, 1, 1] == -1.0    # corner, no floating neighbour
+
+    # topo_rel = 3 → tau everywhere.
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 3, tau)
+    @test all(interior(tau_relax) .== tau)
+
+    # topo_rel = 4 → not yet ported.
+    @test_throws ErrorException set_tau_relax!(tau_relax, H_ice, f_grnd,
+        mask_grz, H_ref, 4, tau)
+end
+
+@testset "tpo: calc_G_relaxation!" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 40e3), y=(0.0, 40e3),
+                        topology=(Bounded, Bounded, Flat))
+    dHdt      = CenterField(g)
+    H_ice     = CenterField(g)
+    H_ref     = CenterField(g)
+    tau_relax = CenterField(g)
+
+    fill!(interior(H_ice),  500.0)
+    fill!(interior(H_ref), 1000.0)
+
+    # tau > 0: dHdt = (H_ref - H_ice) / tau.
+    fill!(interior(tau_relax), 50.0)
+    fill!(interior(dHdt), 99.0)   # sentinel
+    calc_G_relaxation!(dHdt, H_ice, H_ref, tau_relax, 1.0)
+    @test all(interior(dHdt) .≈ (1000.0 - 500.0) / 50.0)
+
+    # tau == 0 with dt > 0: impose H_ref in a single step → dHdt = (H_ref-H_ice)/dt.
+    fill!(interior(tau_relax), 0.0)
+    calc_G_relaxation!(dHdt, H_ice, H_ref, tau_relax, 2.5)
+    @test all(interior(dHdt) .≈ (1000.0 - 500.0) / 2.5)
+
+    # tau == 0 with dt == 0: fall-back denominator is 1.0.
+    calc_G_relaxation!(dHdt, H_ice, H_ref, tau_relax, 0.0)
+    @test all(interior(dHdt) .≈ 1000.0 - 500.0)
+
+    # tau < 0: no relaxation (dHdt = 0).
+    fill!(interior(tau_relax), -1.0)
+    fill!(interior(dHdt), 99.0)
+    calc_G_relaxation!(dHdt, H_ice, H_ref, tau_relax, 1.0)
+    @test all(interior(dHdt) .== 0.0)
+
+    # Mixed mask: one cell on, one off.
+    fill!(interior(tau_relax), -1.0)
+    interior(tau_relax)[2, 2, 1] = 100.0
+    calc_G_relaxation!(dHdt, H_ice, H_ref, tau_relax, 1.0)
+    G = interior(dHdt)
+    @test G[2, 2, 1] ≈ (1000.0 - 500.0) / 100.0
+    @test G[1, 1, 1] == 0.0
+    @test G[3, 3, 1] == 0.0
+end
+
+# ------------------------------------------------------------------
+# Relaxation integration test (Phase 8)
+# ------------------------------------------------------------------
+
+@testset "tpo: relaxation conservation (slab + H_ref)" begin
+    @assert isfile(RESTART_PATH)
+
+    # Use YelmoModelPar.ytopo_params explicitly — Yelmo re-exports the
+    # mirror module's `ytopo_params` at top level (not the model's), so
+    # build the model-flavoured params struct via its own helper.
+    p_ytopo = Yelmo.YelmoModelPar.ytopo_params(
+        topo_rel       = 3,         # relax all cells
+        topo_rel_tau   = 5.0,       # 5-yr timescale
+        topo_rel_field = "H_ref",
+    )
+    p = YelmoModelParameters("tpo-relax-test"; ytopo = p_ytopo)
+
+    y = YelmoModel(RESTART_PATH, 0.0;
+                   p      = p,
+                   rundir = mktempdir(; prefix="tpo_relax_test_"),
+                   alias  = "tpo-relax-test",
+                   groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+                   strict = false)
+
+    # Slab geometry; everything zeroed except the relaxation target.
+    H_ice = interior(y.tpo.H_ice)
+    fill!(H_ice, 500.0)
+    fill!(interior(y.dyn.ux_bar), 0.0)
+    fill!(interior(y.dyn.uy_bar), 0.0)
+    fill!(interior(y.bnd.mask_ice),   Float64(MASK_ICE_DYNAMIC))
+    fill!(interior(y.bnd.ice_allowed), 1.0)
+    fill!(interior(y.bnd.z_bed), 100.0)
+    fill!(interior(y.bnd.z_sl),    0.0)
+    fill!(interior(y.bnd.smb_ref),   0.0)
+    fill!(interior(y.bnd.bmb_shlf),  0.0)
+    fill!(interior(y.bnd.fmb_shlf),  0.0)
+    fill!(interior(y.thrm.bmb_grnd), 0.0)
+
+    # Reference thickness 1000 m → ice should grow toward it.
+    fill!(interior(y.bnd.H_ice_ref), 1000.0)
+
+    Nx, Ny = size(H_ice, 1), size(H_ice, 2)
+    H_init = copy(H_ice)
+
+    step!(y, 1.0)
+
+    # After one step of 1 yr with tau = 5 yr toward H_ref = 1000 m:
+    # dHdt = (1000 - 500) / 5 = 100 m/yr → ΔH = 100 m → H_new = 600 m.
+    interior_view = view(H_ice, 2:Nx-1, 2:Ny-1, 1)
+    @test all(abs.(interior_view .- 600.0) .< 1e-9)
+
+    # mb_relax should be exactly 100 m/yr in the interior.
+    @test all(abs.(view(interior(y.tpo.mb_relax), 2:Nx-1, 2:Ny-1, 1) .- 100.0)
+              .< 1e-9)
+
+    # mb_net accounting still balances (smb=bmb=fmb=dmb=mb_resid=0).
+    smb      = interior(y.tpo.smb)
+    bmb      = interior(y.tpo.bmb)
+    fmb      = interior(y.tpo.fmb)
+    dmb      = interior(y.tpo.dmb)
+    mb_relax = interior(y.tpo.mb_relax)
+    mb_resid = interior(y.tpo.mb_resid)
+    mb_net   = interior(y.tpo.mb_net)
+    @test maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
+                                  mb_relax .+ mb_resid))) < 1e-12
 end
 
 # ------------------------------------------------------------------

@@ -27,7 +27,8 @@ export topo_step!, advect_thickness!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
-       calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!
+       calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!,
+       set_tau_relax!, calc_G_relaxation!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -36,6 +37,7 @@ include("grounded.jl")
 include("basal.jl")
 include("frontal.jl")
 include("discharge.jl")
+include("relaxation.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -88,15 +90,25 @@ Advance topography state by `dt` years. Phase order matches Fortran's
 11. DMB: `calc_mb_discharge!` (v1 stub: only `dmb_method = 0`) +
     `mbal_tendency!` + `apply_tendency!`.
 12. Refresh `f_ice`.
-13. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
-14. Refresh `f_ice`.
-15. `mb_net = smb + bmb + fmb + dmb + mb_resid`.
-16. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
+13. Optional relaxation toward `H_ref`/`H_ice_n` via `set_tau_relax!`
+    + `calc_G_relaxation!`. Skipped when `topo_rel == 0`. Errors on
+    `topo_rel == 4` (depends on un-ported `mask_grz`). When
+    `topo_rel == -1`, the timescale field is read from `bnd.tau_relax`.
+14. Refresh `f_ice` after relaxation.
+15. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
+16. Refresh `f_ice`.
+17. `mb_net = smb + bmb + fmb + dmb + mb_relax + mb_resid`.
+18. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
     `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
-17. Advance `y.time`.
+19. Advance `y.time`.
 """
 function topo_step!(y::YelmoModel, dt::Float64)
     H_prev = copy(interior(y.tpo.H_ice))
+
+    # Snapshot the start-of-step thickness into `H_ice_n` so that
+    # `topo_rel_field == "H_ice_n"` (relax-toward-previous) has a
+    # meaningful target. Fortran does the same in calc_ytopo_pc.
+    interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
         advect_thickness!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
@@ -170,8 +182,38 @@ function topo_step!(y::YelmoModel, dt::Float64)
     mbal_tendency!(y.tpo.dmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.dmb_ref, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.dmb, dt; adjust_mb=true)
 
-    # DMB may have moved margins; refresh f_ice before resid cleanup.
+    # DMB may have moved margins; refresh f_ice before relaxation.
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Optional relaxation toward a reference state (Fortran phase 8).
+    # Skipped entirely when `topo_rel == 0`.
+    if y.p.ytopo.topo_rel != 0
+        if y.p.ytopo.topo_rel == -1
+            interior(y.tpo.tau_relax) .= interior(y.bnd.tau_relax)
+        else
+            set_tau_relax!(y.tpo.tau_relax, y.tpo.H_ice, y.tpo.f_grnd,
+                           y.tpo.mask_grz, y.bnd.H_ice_ref,
+                           y.p.ytopo.topo_rel, y.p.ytopo.topo_rel_tau)
+        end
+
+        H_ref = if y.p.ytopo.topo_rel_field == "H_ref"
+            y.bnd.H_ice_ref
+        elseif y.p.ytopo.topo_rel_field == "H_ice_n"
+            y.tpo.H_ice_n
+        else
+            error("topo_step!: unknown topo_rel_field = \"$(y.p.ytopo.topo_rel_field)\". " *
+                  "Supported: \"H_ref\", \"H_ice_n\".")
+        end
+
+        calc_G_relaxation!(y.tpo.mb_relax, y.tpo.H_ice, H_ref,
+                           y.tpo.tau_relax, dt)
+        apply_tendency!(y.tpo.H_ice, y.tpo.mb_relax, dt; adjust_mb=true)
+
+        # Refresh f_ice after relaxation.
+        calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    else
+        fill!(interior(y.tpo.mb_relax), 0.0)
+    end
 
     # Residual cleanup tendency for margin/island regularisation.
     resid_tendency!(y.tpo.mb_resid, y.tpo.H_ice, y.tpo.f_ice, y.tpo.f_grnd,
@@ -187,6 +229,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
                               interior(y.tpo.bmb) .+
                               interior(y.tpo.fmb) .+
                               interior(y.tpo.dmb) .+
+                              interior(y.tpo.mb_relax) .+
                               interior(y.tpo.mb_resid)
 
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
