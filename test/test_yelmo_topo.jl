@@ -252,10 +252,11 @@ end
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
     mb_net    = interior(y.tpo.mb_net)
     smb       = interior(y.tpo.smb)
+    bmb       = interior(y.tpo.bmb)
     mb_resid  = interior(y.tpo.mb_resid)
 
     err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
-    err_net   = maximum(abs.(mb_net .- (smb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
     @test err_total < 1e-9
     @test err_net   < 1e-12
 
@@ -303,6 +304,10 @@ end
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
 
+    # Zero BMB inputs so the only mass change comes from SMB.
+    fill!(interior(y.thrm.bmb_grnd), 0.0)
+    fill!(interior(y.bnd.bmb_shlf),  0.0)
+
     # Prescribe 1 m/yr melt over the whole domain.
     smb_rate = -1.0
     fill!(interior(y.bnd.smb_ref), smb_rate)
@@ -331,16 +336,17 @@ end
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
     mb_net    = interior(y.tpo.mb_net)
     smb       = interior(y.tpo.smb)
+    bmb       = interior(y.tpo.bmb)
     mb_resid  = interior(y.tpo.mb_resid)
 
     err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
                              (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
                               view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
-    err_net   = maximum(abs.(mb_net .- (smb .+ mb_resid)))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
     @test err_total < 1e-6
     @test err_net   < 1e-12
 
-    # Interior dHidt should equal smb_rate (no advection, no resid).
+    # Interior dHidt should equal smb_rate (no advection, no resid, no bmb).
     err_dh_interior = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .- smb_rate))
     @test err_dh_interior < 1e-9
 
@@ -348,6 +354,140 @@ end
     f_ice = interior(y.tpo.f_ice)
     @test sort(unique(f_ice)) ⊆ [0.0, 1.0]
     @test all((f_ice .> 0) .== (H_ice .> 0))
+end
+
+# ------------------------------------------------------------------
+# BMB conservation test (Phase 4)
+# ------------------------------------------------------------------
+
+@testset "tpo: BMB conservation (slab + uniform basal melt)" begin
+    @assert isfile(RESTART_PATH)
+
+    y = YelmoModel(RESTART_PATH, 0.0;
+                   rundir = mktempdir(; prefix="tpo_bmb_test_"),
+                   alias  = "tpo-bmb-test",
+                   groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+                   strict = false)
+
+    H_ice = interior(y.tpo.H_ice)
+    fill!(H_ice, 1000.0)
+
+    fill!(interior(y.dyn.ux_bar), 0.0)
+    fill!(interior(y.dyn.uy_bar), 0.0)
+
+    fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
+    fill!(interior(y.bnd.ice_allowed), 1.0)
+
+    # Bed well above sea level → grounded everywhere so the `pmp`
+    # default reduces to `bmb = bmb_grnd` (f_grnd = 1).
+    fill!(interior(y.bnd.z_bed), 100.0)
+    fill!(interior(y.bnd.z_sl),    0.0)
+
+    # Zero SMB; bmb_grnd is the only mass sink. bmb_shlf is irrelevant
+    # (nothing floats) but zero it for clarity.
+    fill!(interior(y.bnd.smb_ref),   0.0)
+    fill!(interior(y.bnd.bmb_shlf),  0.0)
+
+    bmb_rate = -1.5
+    fill!(interior(y.thrm.bmb_grnd), bmb_rate)
+
+    Nx, Ny  = size(H_ice, 1), size(H_ice, 2)
+    H_init  = copy(H_ice)
+
+    n_steps = 3
+    dt      = 1.0
+    for _ in 1:n_steps
+        step!(y, dt)
+    end
+
+    interior_view = view(H_ice,  2:Nx-1, 2:Ny-1, 1)
+    initial_view  = view(H_init, 2:Nx-1, 2:Ny-1, 1)
+
+    expected = initial_view .+ n_steps * dt * bmb_rate
+    err = maximum(abs.(interior_view .- expected))
+    @test err < 1e-9
+
+    dHidt     = interior(y.tpo.dHidt)
+    dHidt_dyn = interior(y.tpo.dHidt_dyn)
+    mb_net    = interior(y.tpo.mb_net)
+    smb       = interior(y.tpo.smb)
+    bmb       = interior(y.tpo.bmb)
+    mb_resid  = interior(y.tpo.mb_resid)
+
+    err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
+                             (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
+                              view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
+    err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ mb_resid)))
+    @test err_total < 1e-6
+    @test err_net   < 1e-12
+
+    # bmb_ref/bmb interior should match the prescribed grounded rate.
+    bmb_ref = interior(y.tpo.bmb_ref)
+    @test maximum(abs.(view(bmb_ref, 2:Nx-1, 2:Ny-1, 1) .- bmb_rate)) < 1e-12
+    @test maximum(abs.(view(bmb,     2:Nx-1, 2:Ny-1, 1) .- bmb_rate)) < 1e-12
+
+    err_dh_interior = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .- bmb_rate))
+    @test err_dh_interior < 1e-9
+end
+
+# ------------------------------------------------------------------
+# BMB combiner — kernel-level (calc_bmb_total!)
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_bmb_total!" begin
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 60e3), y=(0.0, 60e3),
+                        topology=(Bounded, Bounded, Flat))
+    bmb      = CenterField(g)
+    bmb_grnd = CenterField(g)
+    bmb_shlf = CenterField(g)
+    H_ice    = CenterField(g)
+    H_grnd   = CenterField(g)
+    f_grnd   = CenterField(g)
+
+    fill!(interior(bmb_grnd), -1.0)
+    fill!(interior(bmb_shlf), -10.0)
+    fill!(interior(H_ice),  1000.0)
+    fill!(interior(H_grnd),  500.0)
+    fill!(interior(f_grnd),    1.0)
+
+    # Fully grounded: every method picks bmb_grnd.
+    for method in ("fcmp", "fmp", "pmp", "nmp")
+        calc_bmb_total!(bmb, bmb_grnd, bmb_shlf, H_ice, H_grnd, f_grnd, method)
+        @test all(interior(bmb) .≈ -1.0)
+    end
+
+    # Fully floating (H_grnd ≤ 0, f_grnd == 0): every method picks bmb_shlf.
+    fill!(interior(H_grnd), -500.0)
+    fill!(interior(f_grnd),    0.0)
+    for method in ("fcmp", "fmp", "pmp", "nmp")
+        calc_bmb_total!(bmb, bmb_grnd, bmb_shlf, H_ice, H_grnd, f_grnd, method)
+        @test all(interior(bmb) .≈ -10.0)
+    end
+
+    # Partial f_grnd = 0.5: pmp blends 50/50.
+    fill!(interior(H_grnd), -100.0)
+    fill!(interior(f_grnd),    0.5)
+    calc_bmb_total!(bmb, bmb_grnd, bmb_shlf, H_ice, H_grnd, f_grnd, "pmp")
+    @test all(interior(bmb) .≈ 0.5 * -1.0 + 0.5 * -10.0)
+
+    # nmp leaves bmb_grnd at f_grnd > 0; only fully-floating cells get bmb_shlf.
+    calc_bmb_total!(bmb, bmb_grnd, bmb_shlf, H_ice, H_grnd, f_grnd, "nmp")
+    @test all(interior(bmb) .≈ -1.0)
+
+    # Bare grounded land (H_grnd > 0, H_ice == 0) is forced to 0.
+    fill!(interior(H_grnd),  500.0)
+    fill!(interior(f_grnd),    1.0)
+    fill!(interior(H_ice),    0.0)
+    calc_bmb_total!(bmb, bmb_grnd, bmb_shlf, H_ice, H_grnd, f_grnd, "pmp")
+    @test all(interior(bmb) .== 0.0)
+
+    # Unsupported / unknown methods error.
+    @test_throws ErrorException calc_bmb_total!(bmb, bmb_grnd, bmb_shlf,
+        H_ice, H_grnd, f_grnd, "pmpt")
+    @test_throws ErrorException calc_bmb_total!(bmb, bmb_grnd, bmb_shlf,
+        H_ice, H_grnd, f_grnd, "bogus")
 end
 
 # ------------------------------------------------------------------

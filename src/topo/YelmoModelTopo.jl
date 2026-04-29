@@ -26,12 +26,14 @@ import ..YelmoCore: step!
 export topo_step!, advect_thickness!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
-       calc_H_grnd!, determine_grounded_fractions!
+       calc_H_grnd!, determine_grounded_fractions!,
+       calc_bmb_total!
 
 include("advection.jl")
 include("mass_balance.jl")
 include("ice_fraction.jl")
 include("grounded.jl")
+include("basal.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -60,7 +62,8 @@ const _RHO_SW  = 1028.0  # kg / m^3
 """
     topo_step!(y::YelmoModel, dt) -> y
 
-Advance topography state by `dt` years. In milestone 2b:
+Advance topography state by `dt` years. Phase order matches Fortran's
+`calc_ytopo_pc` predictor/corrector body (yelmo_topography.f90:172):
 
 1. Snapshot `H_ice` (used for the fixed-mask post-step and for the
    total `dHidt` denominator).
@@ -69,19 +72,19 @@ Advance topography state by `dt` years. In milestone 2b:
 3. Apply the `bnd.mask_ice` post-step pass (no-ice → 0; fixed →
    prior value; dynamic → clamped non-negative).
 4. Recompute binary `f_ice` from the post-advection `H_ice`.
-5. Pre-clip `bnd.smb_ref` into `tpo.smb` via `mbal_tendency!`, then
-   apply via `apply_tendency!(adjust_mb=true)` so `tpo.smb` reflects
-   the realised SMB rate.
-6. Recompute binary `f_ice` again (margins may have moved).
-7. Compute `tpo.mb_resid` via `resid_tendency!` and apply via
-   `apply_tendency!(adjust_mb=true)` so `tpo.mb_resid` reflects the
-   realised cleanup rate.
-8. Recompute binary `f_ice` once more.
-9. Combine: `tpo.mb_net = tpo.smb + tpo.mb_resid`.
-10. Update diagnostics: `dHidt` from the original snapshot, plus
-    `dHidt_dyn` from a snapshot taken right after step (3) — so the
-    dynamic and total rates can diverge once SMB/resid land.
-11. Advance `y.time`.
+5. SMB: `mbal_tendency!(smb, …, smb_ref)` + `apply_tendency!(adjust_mb)`.
+6. Refresh `f_ice`.
+7. BMB: refresh `H_grnd` and `f_grnd_bmb` from current state, combine
+   `thrm.bmb_grnd` and `bnd.bmb_shlf` into `tpo.bmb_ref` via
+   `calc_bmb_total!`, then realise via `mbal_tendency!` + `apply_tendency!`.
+   Skipped (`bmb = 0`) if `y.p.ytopo.use_bmb == false`.
+8. Refresh `f_ice`.
+9. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
+10. Refresh `f_ice`.
+11. `mb_net = smb + bmb + mb_resid`.
+12. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
+    `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
+13. Advance `y.time`.
 """
 function topo_step!(y::YelmoModel, dt::Float64)
     H_prev = copy(interior(y.tpo.H_ice))
@@ -103,8 +106,28 @@ function topo_step!(y::YelmoModel, dt::Float64)
     mbal_tendency!(y.tpo.smb, y.tpo.H_ice, y.tpo.f_grnd, y.bnd.smb_ref, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.smb, dt; adjust_mb=true)
 
-    # SMB may have grown / shrunk margins; refresh f_ice before the
-    # margin-aware residual cleanup reads it.
+    # SMB may have grown / shrunk margins; refresh f_ice before BMB.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Basal mass balance: refresh H_grnd and f_grnd_bmb from the *current*
+    # state (Fortran does the same — predictor/corrector iterations can
+    # leave H_ice in a different state than the last diagnostic refresh).
+    if y.p.ytopo.use_bmb
+        calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
+                     _RHO_ICE, _RHO_SW)
+        determine_grounded_fractions!(y.tpo.f_grnd_bmb, y.tpo.H_grnd)
+
+        calc_bmb_total!(y.tpo.bmb_ref, y.thrm.bmb_grnd, y.bnd.bmb_shlf,
+                        y.tpo.H_ice, y.tpo.H_grnd, y.tpo.f_grnd_bmb,
+                        y.p.ytopo.bmb_gl_method)
+        mbal_tendency!(y.tpo.bmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.bmb_ref, dt)
+    else
+        fill!(interior(y.tpo.bmb_ref), 0.0)
+        fill!(interior(y.tpo.bmb),     0.0)
+    end
+    apply_tendency!(y.tpo.H_ice, y.tpo.bmb, dt; adjust_mb=true)
+
+    # BMB may have moved margins; refresh f_ice before resid cleanup.
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 
     # Residual cleanup tendency for margin/island regularisation.
@@ -117,7 +140,9 @@ function topo_step!(y::YelmoModel, dt::Float64)
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 
     # Net mass balance applied this step.
-    interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+ interior(y.tpo.mb_resid)
+    interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+
+                              interior(y.tpo.bmb) .+
+                              interior(y.tpo.mb_resid)
 
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
 
