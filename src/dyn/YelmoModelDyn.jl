@@ -30,10 +30,12 @@ import ..YelmoCore: dyn_step!
 export dyn_step!,
        calc_driving_stress!, calc_driving_stress_gl!,
        calc_lateral_bc_stress_2D!,
+       calc_cb_ref!, calc_c_bed!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
 
 include("driving_stress.jl")
 include("lateral_stress.jl")
+include("basal_dragging.jl")
 include("diagnostics.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
@@ -118,6 +120,34 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                                y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
                                y.tpo.z_srf, y.bnd.z_sl,
                                y.c.rho_ice, y.c.rho_sw, y.c.g)
+
+    # 5a. Effective pressure N_eff (milestone 3b, deferred — current
+    #     value comes from the restart load until calc_ydyn_neff!
+    #     lands in the next commit).
+    # TODO(3b commit 2): calc_ydyn_neff!(y)
+
+    # 5b. Reference till-friction coefficient `cb_tgt`.
+    calc_cb_ref!(y.dyn.cb_tgt,
+                 y.bnd.z_bed, y.bnd.z_bed_sd, y.bnd.z_sl, y.bnd.H_sed,
+                 y.p.ytill.f_sed, y.p.ytill.sed_min, y.p.ytill.sed_max,
+                 y.p.ytill.cf_ref, y.p.ytill.cf_min,
+                 y.p.ytill.z0, y.p.ytill.z1,
+                 y.p.ytill.n_sd,
+                 y.p.ytill.scale_zb, y.p.ytill.scale_sed)
+
+    # 5c. If `till_method == 1`, set the active friction coefficient
+    #     `cb_ref` to the freshly-computed `cb_tgt`. Other till_method
+    #     values leave `cb_ref` at its restart-loaded / externally-
+    #     supplied value (Fortran convention — see yelmo_dynamics.f90:131).
+    if y.p.ytill.method == 1
+        interior(y.dyn.cb_ref) .= interior(y.dyn.cb_tgt)
+    end
+
+    # 5d. Basal drag coefficient `c_bed = c · N_eff`.
+    calc_c_bed!(y.dyn.c_bed,
+                y.dyn.cb_ref, y.dyn.N_eff, y.thrm.T_prime_b,
+                y.p.ytill.is_angle, y.p.ytill.cf_ref,
+                y.p.ydyn.T_frz, y.p.ydyn.scale_T)
 
     # 6. Solver dispatch. 3a only handles "fixed".
     solver = y.p.ydyn.solver
