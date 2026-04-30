@@ -16,6 +16,7 @@ import Pkg; Pkg.activate(".")
 
 using Test
 using Yelmo
+using Yelmo.YelmoModelPar: ydyn_params
 using Oceananigans: interior
 using NCDatasets
 
@@ -30,12 +31,20 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # The Yelmo Fortran restart does not carry every variable in the
     # model variable tables (no `dta` group, missing `bnd::domain_mask`).
     # Skip `dta` and relax strict-mode for the remaining groups in v0.
-    # No `p` is passed — the constructor should auto-build defaults and
-    # emit a warning.
-    y = @test_logs (:warn, r"No parameters supplied") match_mode=:any YelmoModel(
+    #
+    # `ydyn.solver = "fixed"` because milestone 3a only supports the
+    # no-velocity-update path; the SIA/SSA/hybrid/DIVA solvers land in
+    # 3c–3f. This test exercises the scaffolding round-trip, not the
+    # physics — leaving the solver at its default `"diva"` would error
+    # in `dyn_step!`.
+    p = YelmoModelParameters("ymodel-v0";
+                             ydyn = ydyn_params(solver="fixed"))
+
+    y = YelmoModel(
         RESTART_PATH, 0.0;
         rundir = rundir,
         alias  = "ymodel-v0",
+        p      = p,
         groups = (:bnd, :dyn, :mat, :thrm, :tpo),
         strict = false,
     )
@@ -45,6 +54,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     @test y.time  == 0.0
     @test y.p isa YelmoModelParameters
     @test y.p.name == "ymodel-v0"
+    @test y.p.ydyn.solver == "fixed"
 
     # Sanity checks on a few loaded fields — values should be non-trivial,
     # i.e. came from the restart, not the default-initialised allocation.
