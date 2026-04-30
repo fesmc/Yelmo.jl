@@ -28,7 +28,9 @@ export topo_step!, advect_tracer!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
        calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!,
-       set_tau_relax!, calc_G_relaxation!
+       set_tau_relax!, calc_G_relaxation!,
+       calc_calving_equil_ac!, calc_calving_threshold_ac!,
+       calc_calving_vonmises_m16_ac!, merge_calving_rates!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -38,6 +40,7 @@ include("basal.jl")
 include("frontal.jl")
 include("discharge.jl")
 include("relaxation.jl")
+include("calving_ac.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
