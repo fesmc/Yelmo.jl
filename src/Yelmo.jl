@@ -86,6 +86,7 @@ export update_diagnostics!
 # YelmoModelDyn
 export dyn_step!
 export calc_driving_stress!, calc_driving_stress_gl!
+export calc_lateral_bc_stress_2D!
 
 # YelmoIO
 export init_output

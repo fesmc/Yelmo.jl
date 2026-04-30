@@ -28,9 +28,11 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel
 import ..YelmoCore: dyn_step!
 
 export dyn_step!,
-       calc_driving_stress!, calc_driving_stress_gl!
+       calc_driving_stress!, calc_driving_stress_gl!,
+       calc_lateral_bc_stress_2D!
 
 include("driving_stress.jl")
+include("lateral_stress.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
@@ -104,6 +106,12 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                                 y.c.rho_ice, y.c.rho_sw, y.c.g,
                                 y.p.ydyn.taud_gl_method, 1)
     end
+
+    # 4. Lateral boundary stress at the ice front (Pa·m).
+    calc_lateral_bc_stress_2D!(y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+                               y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
+                               y.tpo.z_srf, y.bnd.z_sl,
+                               y.c.rho_ice, y.c.rho_sw, y.c.g)
 
     # 6. Solver dispatch. 3a only handles "fixed".
     solver = y.p.ydyn.solver
