@@ -227,6 +227,156 @@ end
     @test all(interior(fb) .== 1.0)
 end
 
+# ----------------------------------------------------------------------
+# Group 1b: Bed-roughness chain analytical benchmarks (milestone 3b)
+# ----------------------------------------------------------------------
+
+@testset "dyn: calc_cb_ref! — scale_zb=0 ⇒ uniform cf_ref" begin
+    Nx, Ny = 5, 4
+    g = _bounded_2d(Nx, Ny; dx=1.0)
+    cb_ref = CenterField(g)
+    z_bed  = CenterField(g); fill!(interior(z_bed),    100.0)
+    z_sd   = CenterField(g); fill!(interior(z_sd),      50.0)
+    z_sl   = CenterField(g); fill!(interior(z_sl),       0.0)
+    H_sed  = CenterField(g); fill!(interior(H_sed),    150.0)
+
+    # scale_zb=0 ignores z_bed and writes cf_ref everywhere. scale_sed=0
+    # leaves it alone. n_sd=1 means no Gaussian sampling.
+    # Signature: f_sed, H_sed_min, H_sed_max, cf_ref, cf_min, z0, z1,
+    #            n_sd, scale_zb, scale_sed
+    calc_cb_ref!(cb_ref, z_bed, z_sd, z_sl, H_sed,
+                 0.5, 100.0, 200.0, 0.8, 0.05, -700.0, 700.0,
+                 1, 0, 0)   # n_sd=1, scale_zb=0, scale_sed=0
+    @test all(interior(cb_ref) .== 0.8)
+end
+
+@testset "dyn: calc_cb_ref! — scale_zb=1 linear, n_sd=1, scale_sed=0" begin
+    # 1D-y constant z_bed gradient covering [-1500, +1500] linearly →
+    # λ_lin spans 0 to 1 across z0=-700, z1=+700, clamped at the ends.
+    Nx, Ny = 1, 7
+    g = _bounded_2d(Nx, Ny; dx=1.0)
+    cb_ref = CenterField(g)
+    z_bed  = CenterField(g)
+    z_sd   = CenterField(g); fill!(interior(z_sd), 0.0)
+    z_sl   = CenterField(g); fill!(interior(z_sl), 0.0)
+    H_sed  = CenterField(g); fill!(interior(H_sed), 0.0)
+
+    interior(z_bed)[1, :, 1] .= [-1500.0, -700.0, -300.0, 0.0, 300.0, 700.0, 1500.0]
+
+    cf_ref, cf_min = 1.0, 0.1
+    z0, z1 = -700.0, 700.0
+    calc_cb_ref!(cb_ref, z_bed, z_sd, z_sl, H_sed,
+                 0.5, 100.0, 200.0, cf_ref, cf_min, z0, z1,
+                 1, 1, 0)   # n_sd=1, scale_zb=1 (linear), scale_sed=0
+    expected = [cf_min, cf_min, 0.5*0.4 + 0.5*cf_min, 0.5, 0.5+0.5*0.4, cf_ref, cf_ref]
+    # Note: at z=-300, λ=(–300–(–700))/1400=400/1400≈0.286, so
+    # cb_ref = cf_ref·λ = 0.286 (above cf_min=0.1, no floor).
+    @test interior(cb_ref)[1, 1, 1] ≈ cf_min  atol=1e-12
+    @test interior(cb_ref)[1, 2, 1] ≈ cf_min  atol=1e-12
+    @test interior(cb_ref)[1, 3, 1] ≈ 400/1400 atol=1e-12
+    @test interior(cb_ref)[1, 4, 1] ≈ 0.5     atol=1e-12
+    @test interior(cb_ref)[1, 5, 1] ≈ 1000/1400 atol=1e-12
+    @test interior(cb_ref)[1, 6, 1] ≈ cf_ref  atol=1e-12
+    @test interior(cb_ref)[1, 7, 1] ≈ cf_ref  atol=1e-12
+end
+
+@testset "dyn: calc_cb_ref! — n_sd>1 weights normalised" begin
+    # Single-cell uniform z_bed with z_bed_sd = 0 should give the same
+    # answer as n_sd = 1 — sampling around 0 always lands on z_bed.
+    Nx, Ny = 1, 1
+    g = _bounded_2d(Nx, Ny; dx=1.0)
+    cb_ref_a = CenterField(g)
+    cb_ref_b = CenterField(g)
+    z_bed = CenterField(g); fill!(interior(z_bed), 200.0)
+    z_sd  = CenterField(g); fill!(interior(z_sd),    0.0)
+    z_sl  = CenterField(g); fill!(interior(z_sl),    0.0)
+    H_sed = CenterField(g); fill!(interior(H_sed),   0.0)
+
+    for n_sd in (1, 5, 10)
+        cf = CenterField(g)
+        # n_sd=n_sd, scale_zb=1 (linear), scale_sed=0
+        calc_cb_ref!(cf, z_bed, z_sd, z_sl, H_sed,
+                     0.5, 100.0, 200.0, 1.0, 0.05, -700.0, 700.0,
+                     n_sd, 1, 0)
+        @test interior(cf)[1, 1, 1] ≈ (200.0 - (-700.0)) / 1400.0  atol=1e-12
+    end
+end
+
+@testset "dyn: calc_c_bed! — is_angle and scale_T paths" begin
+    Nx, Ny = 4, 3
+    g = _bounded_2d(Nx, Ny; dx=1.0)
+    cb = CenterField(g);  fill!(interior(cb), 30.0)   # degrees if is_angle
+    N  = CenterField(g);  fill!(interior(N),  1e7)
+    Tp = CenterField(g);  fill!(interior(Tp), -1.5)   # half-frozen vs T_frz=-3
+    c  = CenterField(g)
+
+    # Plain scalar path, no thermal scaling.
+    calc_c_bed!(c, cb, N, Tp, false, 40.0, -3.0, 0)
+    @test all(interior(c) .≈ 30.0 * 1e7)
+
+    # Angle path, no thermal scaling.
+    calc_c_bed!(c, cb, N, Tp, true, 40.0, -3.0, 0)
+    @test all(interior(c) .≈ tan(30.0 * π/180) * 1e7)
+
+    # Angle path, thermal scaling: λ = (-1.5 - (-3))/(0 - (-3)) = 0.5
+    # → c_bed = 0.5·tan(30°)·N + 0.5·tan(40°)·N
+    calc_c_bed!(c, cb, N, Tp, true, 40.0, -3.0, 1)
+    expected = 0.5 * tan(30.0 * π/180) * 1e7 + 0.5 * tan(40.0 * π/180) * 1e7
+    @test all(interior(c) .≈ expected)
+
+    # T_frz >= 0 errors when scale_T=1.
+    @test_throws ErrorException calc_c_bed!(c, cb, N, Tp, true, 40.0, 0.0, 1)
+end
+
+@testset "dyn: N_eff helpers — overburden / two-value edge cases" begin
+    # _neff_overburden via a YelmoModel-free internal call. Use the
+    # public dispatcher with a one-cell synthetic state instead.
+    rho_ice = 910.0
+    g_grav  = 9.81
+
+    # Grounded full cell, 1 km thick → ρ_i g H = 8.927 MPa.
+    H = 1000.0
+    expected = rho_ice * g_grav * H
+    @test Yelmo.YelmoModelDyn._neff_overburden(H, 1.0, 1.0, rho_ice, g_grav) ≈ expected
+    # Floating cell → 0.
+    @test Yelmo.YelmoModelDyn._neff_overburden(H, 1.0, 0.0, rho_ice, g_grav) == 0.0
+    # Partially-covered cell → H_eff = 0 → 0.
+    @test Yelmo.YelmoModelDyn._neff_overburden(H, 0.5, 1.0, rho_ice, g_grav) == 0.0
+
+    # Two-valued blend: f_pmp = 0 → P0; f_pmp = 1 → δ·P0; in between linear.
+    P0 = rho_ice * g_grav * H
+    δ  = 0.1
+    @test Yelmo.YelmoModelDyn._neff_two_value(0.0, H, 1.0, 1.0, δ, rho_ice, g_grav) ≈ P0
+    @test Yelmo.YelmoModelDyn._neff_two_value(1.0, H, 1.0, 1.0, δ, rho_ice, g_grav) ≈ δ * P0
+    @test Yelmo.YelmoModelDyn._neff_two_value(0.5, H, 1.0, 1.0, δ, rho_ice, g_grav) ≈
+            0.5 * P0 + 0.5 * δ * P0
+end
+
+@testset "dyn: N_eff till — saturated and dry water-layer limits" begin
+    # van Pelt-Bueler till: at s = H_w/H_w_max = 0, the formula
+    #   N_eff = N0 · (δ P0 / N0)^0 · 10^(e0/Cc) capped at P0
+    # collapses to N_eff = min(N0 · 10^(e0/Cc), P0). Because the
+    # exponent is capped at 10, and 10^10 > P0/N0 for our defaults,
+    # the result equals P0.
+    rho_ice, g_grav = 910.0, 9.81
+    H, H_w_max = 1500.0, 2.0
+    N0, δ, e0, Cc = 1000.0, 0.04, 0.69, 0.12
+    P0 = rho_ice * g_grav * H
+
+    # Dry till (H_w = 0): saturated case s = 0 → N_eff capped at P0.
+    @test Yelmo.YelmoModelDyn._neff_till(0.0, H, 1.0, 1.0, H_w_max,
+                                          N0, δ, e0, Cc, rho_ice, g_grav) ≈ P0
+
+    # Saturated till (H_w = H_w_max): s = 1 → q1 = 0 → 10^q1 = 1
+    # → N_eff = N0 · (δ P0 / N0) = δ · P0.
+    @test Yelmo.YelmoModelDyn._neff_till(H_w_max, H, 1.0, 1.0, H_w_max,
+                                          N0, δ, e0, Cc, rho_ice, g_grav) ≈ δ * P0
+
+    # Floating cell → 0.
+    @test Yelmo.YelmoModelDyn._neff_till(0.5, H, 1.0, 0.0, H_w_max,
+                                          N0, δ, e0, Cc, rho_ice, g_grav) == 0.0
+end
+
 # ======================================================================
 # Group 2: ISMIP-HOM-A driving-stress shape
 # ======================================================================
@@ -256,13 +406,21 @@ end
     # diagnostic outputs (driving stress, lateral stress, ice flux,
     # magnitudes, surface / basal slices, `f_vbvs`).
     p_nml = Yelmo.YelmoModelPar.read_nml(NML_PATH)
+    # `ydyn.scale_T` is forced to 0 here even though the namelist says
+    # 1: the restart's saved `c_bed` was generated with no thermal
+    # scaling (verified by `c_bed / N_eff = tan(cb_ref°)` exactly
+    # across all grounded cells). This namelist-vs-restart drift will
+    # be eliminated once the YelmoMirror benchmark fixtures land in
+    # milestone 3c (regenerated from current namelist + source).
     p = Yelmo.YelmoModelPar.YelmoModelParameters("dyn-consistency";
             yelmo           = p_nml.yelmo,
             ytopo           = p_nml.ytopo,
             ycalv           = p_nml.ycalv,
-            ydyn            = ydyn_params(solver = "fixed",
+            ydyn            = ydyn_params(solver         = "fixed",
                                           taud_lim       = p_nml.ydyn.taud_lim,
-                                          taud_gl_method = p_nml.ydyn.taud_gl_method),
+                                          taud_gl_method = p_nml.ydyn.taud_gl_method,
+                                          T_frz          = p_nml.ydyn.T_frz,
+                                          scale_T        = 0),
             ytill           = p_nml.ytill,
             yneff           = p_nml.yneff,
             ymat            = p_nml.ymat,
@@ -286,7 +444,9 @@ end
                    :qq_acx, :qq_acy, :qq,
                    :uxy_bar, :uxy_b, :uxy_s, :uxy_i_bar,
                    :uz_b, :uz_s, :ux_s, :uy_s,
-                   :f_vbvs)
+                   :f_vbvs,
+                   # 3b additions: bed-roughness chain.
+                   :N_eff, :cb_tgt, :cb_ref, :c_bed)
     snap = NamedTuple{snap_fields}(copy(interior(getfield(y.dyn, k))) for k in snap_fields)
 
     # Refresh tpo diagnostics first so dyn reads the right
@@ -335,4 +495,15 @@ end
     # f_vbvs — element-wise ratio.
     err = _rel_linf_inner(interior(y.dyn.f_vbvs), snap.f_vbvs)
     @test err < 1e-3
+
+    # --- Bed-roughness chain (milestone 3b). The restart's `N_eff`
+    # was computed via yneff.method = 3 (van Pelt-Bueler till) using
+    # `H_w` from thrm; recompute should match to Float32 rounding.
+    # `cb_tgt` and `cb_ref` (linear z_bed scaling, n_sd = 10) come
+    # from the same z_bed / z_bed_sd / H_sed inputs, and `c_bed =
+    # tan(cb_ref°) · N_eff` (`scale_T = 0` per the override above).
+    for k in (:N_eff, :cb_tgt, :cb_ref, :c_bed)
+        err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @test err < 1e-3
+    end
 end
