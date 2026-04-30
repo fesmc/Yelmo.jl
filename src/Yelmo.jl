@@ -58,7 +58,7 @@ export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
 export compare_state, StateComparison
 
 # YelmoMirrorCore
-export YelmoMirror, yelmo_sync!  # Public API
+export YelmoMirror, yelmo_sync!, yelmo_write_restart!  # Public API
 export yelmo_get_var2D, yelmo_get_var2D!    # Mainly internally used
 export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
