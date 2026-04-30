@@ -5,30 +5,39 @@ benchmarks (BUELER, EISMINT, ISMIP-HOM, slab, trough, MISMIP+, CalvingMIP).
 
 ## How it works
 
-1. Each benchmark is described by a [`BenchmarkSpec`](helpers.jl) — namelist path,
-   synthetic-grid axes, run length / output cadence, and an
-   `setup_initial_state!` callback that seeds H_ice and boundary fields after
-   YelmoMirror is constructed.
-2. [`regenerate.jl`](regenerate.jl) runs each spec via YelmoMirror and writes a
-   NetCDF restart fixture into [`fixtures/`](fixtures/) at every output time.
-   Requires `libyelmo_c_api.so` to be present and to expose `yelmo_init_grid`
-   (already in the API) and `yelmo_restart_write` (added for this milestone).
-3. CI never invokes `regenerate.jl` — fixtures are pre-committed under
-   `fixtures/`. Tests load them via [`load_fixture`](helpers.jl), which calls
-   the existing `YelmoModel(restart_file, time; …)` constructor.
+Each benchmark uses one of two backends, dispatched on the spec type:
+
+  - **Analytical** (`AnalyticalSpec` in [`analytical.jl`](analytical.jl)) —
+    write the closed-form solution directly to a NetCDF restart. No
+    YelmoMirror, no Fortran library. Used for benchmarks with closed-form
+    solutions (BUELER-A, BUELER-B Halfar, etc.).
+  - **YelmoMirror** (`BenchmarkSpec` in [`helpers.jl`](helpers.jl)) — drive
+    YelmoMirror with a Yelmo namelist + synthetic-grid axes + an
+    `setup_initial_state!` callback, and write a restart at each output time.
+    Used for benchmarks without analytical solutions (EISMINT, ISMIP-HOM,
+    slab, trough, MISMIP+, CalvingMIP). Requires `libyelmo_c_api.so` to expose
+    `yelmo_init_grid` (already in the API) and `yelmo_restart_write` (added
+    for this milestone).
+
+Both backends produce restart-format NetCDFs that the existing
+`YelmoModel(restart_file, time; …)` constructor can load. CI never invokes
+[`regenerate.jl`](regenerate.jl) — fixtures are pre-committed under
+[`fixtures/`](fixtures/). Tests load them via `load_fixture` /
+`load_analytical_fixture`.
 
 ## Layout
 
 ```
 test/benchmarks/
 ├── README.md
-├── helpers.jl              # BenchmarkSpec + run_mirror_benchmark! + load_fixture
+├── helpers.jl              # YelmoBenchmarks module umbrella
+│                           #   + BenchmarkSpec + run_mirror_benchmark! + load_fixture
+├── analytical.jl           # AnalyticalSpec + write_analytical_fixture!
 ├── bueler.jl               # Halfar / Bueler analytical solutions
-├── regenerate.jl           # entry point (run YelmoMirror → fixtures)
+├── regenerate.jl           # entry point (dispatches on spec type)
 ├── test_smoke.jl           # smoke test (loads fixture, basic checks)
 ├── specs/
-│   ├── yelmo_BUELER-B.nml  # Yelmo namelist for BUELER-B
-│   └── bueler_b_smoke.jl   # BenchmarkSpec definition
+│   └── bueler_b_smoke.jl   # AnalyticalSpec definition
 └── fixtures/
     ├── README.md
     └── bueler_b_smoke__t1000.nc   # ← committed binary (see fixtures/README.md)

@@ -1,30 +1,35 @@
 # ----------------------------------------------------------------------
-# BUELER-B smoke benchmark.
+# BUELER-B smoke benchmark — analytical Halfar fixture.
 #
-# Halfar similarity solution (Bueler et al. 2005), pure decay (λ = 0):
-# initial dome H₀ = 3600 m, R₀ = 750 km, evolved at fixed-temperature
-# isothermal SIA from t = 0 yr (analytical IC) to t = 1000 yr.
-# Produces one fixture: `bueler_b_smoke__t1000.nc`.
+# BUELER-B has a closed-form analytical solution (the Halfar
+# similarity profile, Bueler et al. 2005 Eqs. 10–11), so the
+# "fixture" is just the analytical state at the chosen output time.
+# We don't need YelmoMirror to produce it — the
+# `bueler_test_BC!` Julia port from `bueler.jl` is the source of
+# truth.
 #
-# Grid: 31×31 cells at 50 km resolution, spanning ±750 km from the
-# dome centre. Total ~50 KB fixture.
+# Fixture: 31×31 grid at dx = 50 km, isothermal SIA dome with
+# H₀ = 3600 m, R₀ = 750 km, λ = 0 (no mass balance), evaluated at
+# t = 1000 yr after the analytical IC at t = 0.
 #
-# This is the smoke benchmark for the scaffolding PR — the first
-# fixture under `test/benchmarks/fixtures/`. Real EISMINT and
-# ISMIP-HOM benchmarks (with full lockstep against YelmoModel's
-# velocity solver) land with milestone 3c.
+# Validation by milestone:
+#   - **scaffolding (this PR)**: smoke test loads the fixture via
+#     YelmoModel and checks dome geometry / radial symmetry. Proves
+#     the scaffolding (analytical writer + YelmoModel loader)
+#     round-trips cleanly.
+#   - **3c (SIA solver)**: lockstep test loads the t=0 IC via the
+#     same path, runs YelmoModel's SIA solver to t=1000, compares
+#     against the analytical Halfar at t=1000. Validates the SIA
+#     solver against the analytical reference.
 # ----------------------------------------------------------------------
 
-using Oceananigans: interior
-
-# Synthetic 31×31 grid, dx = 50 km, centered on the dome at (0, 0).
-# Cell centres span -750 km to +750 km in 50 km steps.
-const _BUELER_B_DX_KM = 50.0
-const _BUELER_B_R0_KM = 750.0
-const _BUELER_B_NX    = Int(2 * _BUELER_B_R0_KM / _BUELER_B_DX_KM) + 1   # 31
+using NCDatasets
 
 # Halfar / BUELER-B physical parameters (mirror the Fortran defaults
 # in `yelmo_benchmarks.f90:233-238`).
+const _BUELER_B_DX_KM   = 50.0
+const _BUELER_B_R0_KM   = 750.0
+const _BUELER_B_NX      = Int(2 * _BUELER_B_R0_KM / _BUELER_B_DX_KM) + 1   # 31
 const _BUELER_B_H0      = 3600.0    # initial dome thickness [m]
 const _BUELER_B_LAMBDA  = 0.0       # no mass balance
 const _BUELER_B_N       = 3.0
@@ -33,52 +38,68 @@ const _BUELER_B_RHO_ICE = 910.0
 const _BUELER_B_G       = 9.81
 
 function _bueler_b_axes()
-    half_km = _BUELER_B_R0_KM
-    xc = collect(range(-half_km * 1e3, half_km * 1e3; length=_BUELER_B_NX))
-    return xc, copy(xc)   # symmetric in y
+    half_m = _BUELER_B_R0_KM * 1e3
+    xc = collect(range(-half_m, half_m; length=_BUELER_B_NX))
+    return xc, copy(xc)
 end
 
-function _bueler_b_setup!(ymirror, t0::Float64)
-    # Compute the analytical Halfar IC at t = 0 yr (the BUELER-B spec
-    # treats `time_init` as elapsed-since-IC, so we always seed at 0).
-    xc_m = collect(Yelmo.Oceananigans.Grids.xnodes(ymirror.g, Yelmo.Oceananigans.Grids.Center()))
-    yc_m = collect(Yelmo.Oceananigans.Grids.ynodes(ymirror.g, Yelmo.Oceananigans.Grids.Center()))
+# Write the analytical Halfar state at `time` into a freshly-opened
+# NetCDF dataset. Coordinates are already laid down by
+# `write_analytical_fixture!`; we just `defVar` the state fields we
+# care about. For BUELER-B these are `H_ice` (the analytical Halfar
+# profile), `z_bed` (flat at 0), and `smb_ref` (the analytical mass
+# balance — exactly 0 for λ = 0).
+function _bueler_b_write_fields!(ds::NCDataset, time::Float64)
+    xc_m = ds["xc"][:] .* 1e3   # convert km back to metres
+    yc_m = ds["yc"][:] .* 1e3
+    Nx, Ny = length(xc_m), length(yc_m)
 
-    H = @view interior(ymirror.tpo.H_ice)[:, :, 1]
-    smb_view = @view interior(ymirror.bnd.smb_ref)[:, :, 1]
-    bueler_test_BC!(H, smb_view, xc_m, yc_m, 0.0;
-                    R0 = _BUELER_B_R0_KM, H0 = _BUELER_B_H0,
-                    lambda = _BUELER_B_LAMBDA, n = _BUELER_B_N,
-                    A = _BUELER_B_A,
-                    rho_ice = _BUELER_B_RHO_ICE, g = _BUELER_B_G)
+    H    = zeros(Nx, Ny)
+    smb  = zeros(Nx, Ny)
+    bueler_test_BC!(H, smb, xc_m, yc_m, time;
+                    R0     = _BUELER_B_R0_KM,
+                    H0     = _BUELER_B_H0,
+                    lambda = _BUELER_B_LAMBDA,
+                    n      = _BUELER_B_N,
+                    A      = _BUELER_B_A,
+                    rho_ice = _BUELER_B_RHO_ICE,
+                    g      = _BUELER_B_G)
 
-    # Boundary fields: flat bed, no ocean, no shelf, cold surface.
-    fill!(interior(ymirror.bnd.z_bed),       0.0)
-    fill!(interior(ymirror.bnd.z_sl),        0.0)
-    fill!(interior(ymirror.bnd.bmb_shlf),    0.0)
-    fill!(interior(ymirror.bnd.fmb_shlf),    0.0)
-    fill!(interior(ymirror.bnd.T_shlf),    273.15)
-    fill!(interior(ymirror.bnd.H_sed),       0.0)
-    fill!(interior(ymirror.bnd.T_srf),     223.15)
-    fill!(interior(ymirror.bnd.Q_geo),      42.0)
-    # smb_ref already populated by bueler_test_BC! (= 0 for λ = 0).
+    H_var = defVar(ds, "H_ice", Float64, ("xc", "yc"))
+    H_var[:, :] = H
+    H_var.attrib["units"]     = "m"
+    H_var.attrib["long_name"] = "Ice thickness (analytical Halfar)"
 
-    # Push everything we just set back to the Fortran side.
-    yelmo_sync!(ymirror)
+    smb_var = defVar(ds, "smb_ref", Float64, ("xc", "yc"))
+    smb_var[:, :] = smb
+    smb_var.attrib["units"]     = "m/yr"
+    smb_var.attrib["long_name"] = "Surface mass balance (analytical)"
+
+    z_bed_var = defVar(ds, "z_bed", Float64, ("xc", "yc"))
+    z_bed_var[:, :] = zeros(Nx, Ny)
+    z_bed_var.attrib["units"]     = "m"
+    z_bed_var.attrib["long_name"] = "Bedrock elevation (flat)"
+
+    # Provenance
+    ds.attrib["benchmark"]     = "BUELER-B"
+    ds.attrib["solution_type"] = "analytical-halfar"
+    ds.attrib["time_yr"]       = time
+    ds.attrib["R0_km"]         = _BUELER_B_R0_KM
+    ds.attrib["H0_m"]          = _BUELER_B_H0
+    ds.attrib["lambda"]        = _BUELER_B_LAMBDA
+    ds.attrib["n_glen"]        = _BUELER_B_N
+    ds.attrib["A_Pa-3yr-1"]    = _BUELER_B_A
 
     return nothing
 end
 
 const BUELER_B_SMOKE_SPEC = let
     xc, yc = _bueler_b_axes()
-    BenchmarkSpec(
-        name           = "bueler_b_smoke",
-        namelist_path  = abspath(joinpath(@__DIR__, "yelmo_BUELER-B.nml")),
-        grid           = (xc = xc, yc = yc, grid_name = "EISMINT-EXT"),
-        end_time       = 1000.0,            # yr
-        output_times   = [1000.0],          # final-snapshot only
-        setup_initial_state! = _bueler_b_setup!,
-        time_init      = 0.0,
-        dt             = 10.0,
+    AnalyticalSpec(
+        name          = "bueler_b_smoke",
+        output_times  = [1000.0],
+        xc            = xc,
+        yc            = yc,
+        write_fields! = _bueler_b_write_fields!,
     )
 end

@@ -30,9 +30,11 @@ using Yelmo
 using Oceananigans: interior
 
 include("bueler.jl")
+include("analytical.jl")
 
-export BenchmarkSpec
+export BenchmarkSpec, AnalyticalSpec
 export run_mirror_benchmark!, load_fixture
+export write_analytical_fixture!, load_analytical_fixture
 export bueler_test_BC!, bueler_gamma
 
 # Registry callback signature: `(ymirror, time)` → mutate `ymirror`
@@ -151,42 +153,64 @@ function run_mirror_benchmark!(spec::BenchmarkSpec;
     # 1. Build YelmoMirror with synthetic grid.
     p = Yelmo.YelmoPar.read_nml(spec.namelist_path)
     rundir = mktempdir(; prefix="bench_$(spec.name)_")
-    ymirror = YelmoMirror(p, spec.time_init;
-                          grid    = spec.grid,
-                          alias   = _alias(spec),
-                          rundir  = rundir,
-                          overwrite = true)
+    # Yelmo Fortran reads `input/yelmo_phys_const.nml` (and other
+    # input files) as a CWD-relative path. Symlink the yelmo source
+    # tree's `input/` into the rundir so the Fortran lookup resolves
+    # regardless of where Julia was invoked from. Then `cd` to rundir
+    # for the actual YelmoMirror call.
+    yelmo_input = abspath(joinpath(dirname(Yelmo.YelmoMirrorCore.yelmolib),
+                                   "..", "..", "input"))
+    isdir(yelmo_input) || error(
+        "run_mirror_benchmark!: yelmo input directory not found at $yelmo_input. " *
+        "Expected the Yelmo Fortran source tree to be available alongside libyelmo.")
+    symlink(yelmo_input, joinpath(rundir, "input"))
 
-    # 2. Apply the spec's initial-state setup (sets H_ice, bnd fields
-    #    in Julia and pushes them back to Fortran).
-    spec.setup_initial_state!(ymirror, spec.time_init)
-
-    # 3. Initialise Fortran state derivatives from the now-set inputs.
-    init_state!(ymirror, spec.time_init)
-
-    # 4. Time-step loop. Step in `spec.dt` increments; whenever we
-    #    cross an `output_time` (within `dt/2` to be safe), write a
-    #    fixture.
-    t = spec.time_init
-    next_out = 1
-    while next_out <= length(out_times)
-        target = out_times[next_out]
-        # Step until we're at or past `target`.
-        while t < target - 1e-9
-            dt_step = min(spec.dt, target - t)
-            step!(ymirror, dt_step)
-            t = ymirror.time
-        end
-        # Write the fixture at this time.
-        yelmo_write_restart!(ymirror, paths[next_out]; time=t)
-        next_out += 1
+    cwd_orig = pwd()
+    cd(rundir)
+    ymirror = try
+        YelmoMirror(p, spec.time_init;
+                    grid      = spec.grid,
+                    alias     = _alias(spec),
+                    rundir    = rundir,
+                    overwrite = true)
+    catch
+        cd(cwd_orig)
+        rethrow()
     end
 
-    # Optional: continue stepping past the last output if end_time is
-    # later (no further fixtures, just end-state cleanup).
-    while ymirror.time < spec.end_time - 1e-9
-        dt_step = min(spec.dt, spec.end_time - ymirror.time)
-        step!(ymirror, dt_step)
+    try
+        # 2. Apply the spec's initial-state setup (sets H_ice, bnd
+        #    fields in Julia and pushes them back to Fortran).
+        spec.setup_initial_state!(ymirror, spec.time_init)
+
+        # 3. Initialise Fortran state derivatives from the now-set
+        #    inputs.
+        init_state!(ymirror, spec.time_init)
+
+        # 4. Time-step loop. Step in `spec.dt` increments; whenever
+        #    we cross an `output_time` write a fixture.
+        t = spec.time_init
+        next_out = 1
+        while next_out <= length(out_times)
+            target = out_times[next_out]
+            while t < target - 1e-9
+                dt_step = min(spec.dt, target - t)
+                step!(ymirror, dt_step)
+                t = ymirror.time
+            end
+            yelmo_write_restart!(ymirror, paths[next_out]; time=t)
+            next_out += 1
+        end
+
+        # 5. Optional: continue stepping past the last output if
+        #    end_time is later (no further fixtures, just end-state
+        #    cleanup so step! invariants don't drift).
+        while ymirror.time < spec.end_time - 1e-9
+            dt_step = min(spec.dt, spec.end_time - ymirror.time)
+            step!(ymirror, dt_step)
+        end
+    finally
+        cd(cwd_orig)
     end
 
     return paths
