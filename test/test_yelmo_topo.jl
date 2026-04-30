@@ -2301,3 +2301,167 @@ end
     @test_throws ErrorException calc_grounded_fractions!(f_grnd_a, f_grnd_acx,
         f_grnd_acy, nothing, H_grnd, 99)
 end
+
+# ------------------------------------------------------------------
+# Dynamics-only thickness/cover fields (ssa_lat_bc dispatch)
+# ------------------------------------------------------------------
+
+@testset "tpo: extend_floating_slab! — single-cell seed" begin
+    # 7x7 grid; one grounded cell at (4, 4) surrounded by ocean.
+    # After 2 iterations the slab should reach 2 cells in each
+    # direction (a 5x5 cross / square).
+    Nx = 7
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 7.0), y=(0.0, 7.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice  = CenterField(g)
+    f_grnd = CenterField(g)
+
+    fill!(interior(H_ice), 0.0)
+    fill!(interior(f_grnd), 0.0)
+
+    # Seed: grounded ice cell at (4, 4).
+    interior(H_ice)[4, 4, 1]  = 1000.0
+    interior(f_grnd)[4, 4, 1] = 1.0
+
+    extend_floating_slab!(H_ice, f_grnd; H_slab=1.0, n_ext=2)
+    H = interior(H_ice)
+
+    # Direct neighbours of (4,4) get the slab in iter 1.
+    @test H[3, 4, 1] == 1.0
+    @test H[5, 4, 1] == 1.0
+    @test H[4, 3, 1] == 1.0
+    @test H[4, 5, 1] == 1.0
+
+    # Two cells out (in iter 2): direct neighbours of slab cells.
+    @test H[2, 4, 1] == 1.0
+    @test H[6, 4, 1] == 1.0
+    @test H[4, 2, 1] == 1.0
+    @test H[4, 6, 1] == 1.0
+
+    # Diagonal of seed: not direct, but adjacent to a slab cell after
+    # iter 1, so iter 2 picks it up.
+    @test H[3, 3, 1] == 1.0
+    @test H[5, 5, 1] == 1.0
+
+    # Cells > 2 from seed stay 0.
+    @test H[1, 4, 1] == 0.0
+    @test H[7, 4, 1] == 0.0
+
+    # The seed itself unchanged.
+    @test H[4, 4, 1] == 1000.0
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — default (pass-through)" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # H_ice = 100 at (2,2), 50 at (2,3) [partial f_ice], 0 elsewhere.
+    interior(H_ice)[2, 2, 1] = 100.0
+    interior(f_ice)[2, 2, 1] = 1.0
+    interior(H_ice)[2, 3, 1] = 50.0
+    interior(f_ice)[2, 3, 1] = 0.5
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "floating")
+
+    @test interior(H_ice_dyn) == interior(H_ice)
+    @test interior(f_ice_dyn) == interior(f_ice)
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — slab" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # (2,2): fully covered, 100 m. (2,3): partial cover (f<1) but
+    # H_ice = 50. (3,3): ice-free.
+    interior(H_ice)[2, 2, 1] = 100.0
+    interior(f_ice)[2, 2, 1] = 1.0
+    interior(H_ice)[2, 3, 1] = 50.0
+    interior(f_ice)[2, 3, 1] = 0.5
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "slab")
+    Hd = interior(H_ice_dyn)
+
+    # Fully-covered cell unchanged.
+    @test Hd[2, 2, 1] == 100.0
+    # Partial-cover cell bumped to 1.0.
+    @test Hd[2, 3, 1] == 1.0
+    # Ice-free cells (f_ice = 0) get f_ice < 1 → also bumped to 1.0.
+    @test Hd[1, 1, 1] == 1.0
+    @test Hd[3, 3, 1] == 1.0
+
+    # f_ice_dyn binary from H_ice_dyn — every cell now has H > 0 → 1.
+    @test all(interior(f_ice_dyn) .== 1.0)
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — slab-ext" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # Single grounded ice cell at (3, 3); rest is ocean.
+    interior(H_ice)[3, 3, 1] = 1000.0
+    interior(f_ice)[3, 3, 1] = 1.0
+    interior(f_grnd)[3, 3, 1] = 1.0
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "slab-ext";
+                             H_slab=1.0, n_ext=1)
+    Hd = interior(H_ice_dyn)
+
+    # Seed unchanged.
+    @test Hd[3, 3, 1] == 1000.0
+
+    # Direct neighbours got the slab from extend_floating_slab!.
+    @test Hd[2, 3, 1] == 1.0
+    @test Hd[4, 3, 1] == 1.0
+    @test Hd[3, 2, 1] == 1.0
+    @test Hd[3, 4, 1] == 1.0
+
+    # 2 cells away (n_ext=1): unchanged.
+    @test Hd[1, 3, 1] == 0.0
+    @test Hd[5, 3, 1] == 0.0
+end

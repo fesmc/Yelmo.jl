@@ -78,6 +78,7 @@ export calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
 export calc_gradient_acx!, calc_gradient_acy!
 export calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
        calc_f_grnd_pinning_points!, calc_grounded_fractions!
+export extend_floating_slab!, calc_dynamic_ice_fields!
 
 # YelmoIO
 export init_output

@@ -40,7 +40,8 @@ export topo_step!, advect_tracer!,
        calc_z_srf!,
        calc_gradient_acx!, calc_gradient_acy!,
        calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
-       calc_f_grnd_pinning_points!, calc_grounded_fractions!
+       calc_f_grnd_pinning_points!, calc_grounded_fractions!,
+       extend_floating_slab!, calc_dynamic_ice_fields!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -57,6 +58,7 @@ include("distances.jl")
 include("bed_mask.jl")
 include("surface.jl")
 include("gradients.jl")
+include("dynamic_thickness.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -370,6 +372,10 @@ function _update_diagnostics!(y::YelmoModel,
 
     calc_ice_front!(y.tpo.mask_frnt, y.tpo.f_ice, y.tpo.f_grnd,
                     y.bnd.z_bed, y.bnd.z_sl)
+
+    # Dynamics-only thickness/cover fields, dispatched on
+    # `ydyn.ssa_lat_bc`. Default ("floating") is pass-through.
+    calc_dynamic_ice_fields!(y)
 
     return y
 end
