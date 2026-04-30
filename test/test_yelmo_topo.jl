@@ -2007,3 +2007,297 @@ end
     @test M[1, 1, 1] == 0.0
     @test M[6, 6, 1] == 0.0
 end
+
+# ------------------------------------------------------------------
+# Gradients, gl_sep dispatch, pinning points
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_gradient_acx! — interior linear field" begin
+    # Linear field var = a·x: gradient should equal a everywhere
+    # interior. Boundary faces with default Neumann clamp BC give 0
+    # (halo = first-interior, so the difference vanishes).
+    Nx = 8
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    var   = CenterField(g)
+    f_ice = CenterField(g)
+    dvardx = XFaceField(g)
+
+    a = 2.5
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = a * (i - 0.5) * dx
+    end
+
+    calc_gradient_acx!(dvardx, var, f_ice, dx)
+
+    # Interior x-faces (i = 2:Nx) sit between fully covered cells;
+    # gradient = a.
+    Dx = interior(dvardx)
+    @test all(Dx[i, j, 1] ≈ a for j in 1:Nx, i in 2:Nx)
+
+    # West and east boundary faces: Neumann clamp ⇒ gradient = 0.
+    @test all(Dx[1,    j, 1] == 0.0 for j in 1:Nx)
+    @test all(Dx[Nx+1, j, 1] == 0.0 for j in 1:Nx)
+end
+
+@testset "tpo: calc_gradient_acy! — interior linear field" begin
+    Nx = 6
+    dy = 2.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dy), y=(0.0, Nx*dy),
+                        topology=(Bounded, Bounded, Flat))
+    var   = CenterField(g)
+    f_ice = CenterField(g)
+    dvardy = YFaceField(g)
+
+    b = -1.5
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = b * (j - 0.5) * dy
+    end
+
+    calc_gradient_acy!(dvardy, var, f_ice, dy)
+    Dy = interior(dvardy)
+    @test all(Dy[i, j, 1] ≈ b for j in 2:Nx, i in 1:Nx)
+    @test all(Dy[i, 1,    1] == 0.0 for i in 1:Nx)
+    @test all(Dy[i, Nx+1, 1] == 0.0 for i in 1:Nx)
+end
+
+@testset "tpo: calc_gradient_acx! — grad_lim clamp + zero_outside" begin
+    Nx = 4
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    var   = CenterField(g)
+    f_ice = CenterField(g)
+    dvardx = XFaceField(g)
+
+    # Steep ramp.
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = 100.0 * i
+    end
+
+    # Without clamp, raw gradient = 100/dx = 100. With grad_lim=10,
+    # output is clamped to 10.
+    calc_gradient_acx!(dvardx, var, f_ice, dx; grad_lim=10.0)
+    @test all(interior(dvardx)[i, j, 1] <= 10.0 + 1e-9
+              for j in 1:Nx, i in 1:Nx+1)
+    @test all(interior(dvardx)[i, j, 1] >= -10.0 - 1e-9
+              for j in 1:Nx, i in 1:Nx+1)
+
+    # zero_outside path: mark (3, j) as ice-free. Faces (3, j) and
+    # (4, j) read aa-cell (3, *) with f_ice < 1, so V=0 substitution
+    # fires.
+    @inbounds for j in 1:Nx
+        interior(f_ice)[3, j, 1] = 0.5  # < 1 ⇒ partial cover
+    end
+    calc_gradient_acx!(dvardx, var, f_ice, dx; zero_outside=true)
+    Dx = interior(dvardx)
+    # Face i=3 between aa-cells (2) and (3). With zero_outside, V0 =
+    # var[2] = 200, V1 = 0 → grad = -200/1 = -200.
+    @test Dx[3, 2, 1] ≈ -200.0
+    # Face i=4 between aa-cells (3) and (4). V0 = 0, V1 = var[4] = 400 →
+    # grad = 400.
+    @test Dx[4, 2, 1] ≈ 400.0
+end
+
+@testset "tpo: calc_f_grnd_subgrid_linear!" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd      = CenterField(g)
+    f_grnd      = CenterField(g)
+    f_grnd_acx  = XFaceField(g)
+    f_grnd_acy  = YFaceField(g)
+
+    # Set a linear ramp of H_grnd along x: H_grnd[i, j] = i - 3.
+    # i=1: -2 (floating), i=2: -1, i=3: 0 (border), i=4: +1 (grnd), i=5: +2.
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+    Fa  = interior(f_grnd)
+    Fx  = interior(f_grnd_acx)
+
+    # aa-node is binary: H_grnd > 0 → 1 else 0.
+    @test Fa[1, 1, 1] == 0.0   # H_grnd = -2
+    @test Fa[3, 1, 1] == 0.0   # H_grnd = 0 (treated as floating: > 0 fails)
+    @test Fa[4, 1, 1] == 1.0   # H_grnd = 1
+    @test Fa[5, 1, 1] == 1.0
+
+    # x-face fractions. Face i=4 sits between aa (3) and (4):
+    #   H_grnd_left = 0 (floating per >0 test, but the formula treats
+    #     H1=0, H2=1 → H1<=0 && H2>0 branch → -H2/(H1-H2) = -1/(0-1) = 1.0).
+    @test Fx[4, 1, 1] ≈ 1.0
+
+    # Face i=5 between aa(4) and aa(5): both grounded → 1.
+    @test Fx[5, 1, 1] == 1.0
+
+    # Face i=2 between aa(1)=-2 and aa(2)=-1: both floating → 0.
+    @test Fx[2, 1, 1] == 0.0
+
+    # Face i=3 between aa(2)=-1 and aa(3)=0: H1=-1, H2=0. Formula:
+    # H1<=0 && H2>0 false (H2==0 fails > 0); both <=0 → 0.
+    @test Fx[3, 1, 1] == 0.0
+end
+
+@testset "tpo: calc_f_grnd_subgrid_area! — area-based" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd     = CenterField(g)
+    f_grnd     = CenterField(g)
+    f_grnd_acx = XFaceField(g)
+    f_grnd_acy = YFaceField(g)
+
+    # Smooth linear ramp again, but this time area-based should give
+    # *fractional* aa values for cells near the GL.
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                              gz_nx = 11)
+    Fa = interior(f_grnd)
+
+    # Fully floating away from GL.
+    @test Fa[1, 3, 1] == 0.0
+    # Fully grounded away from GL.
+    @test Fa[5, 3, 1] == 1.0
+
+    # Cell at GL (i=3) — fractional, ~0.5 by symmetry.
+    @test 0.4 < Fa[3, 3, 1] < 0.6
+
+    # Adjacent cells should also have intermediate fractions.
+    @test 0 < Fa[2, 3, 1] < 1.0 || Fa[2, 3, 1] == 0.0
+    @test 0 < Fa[4, 3, 1] < 1.0 || Fa[4, 3, 1] == 1.0
+end
+
+@testset "tpo: calc_f_grnd_pinning_points!" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd_pin = CenterField(g)
+    H_ice      = CenterField(g)
+    f_ice      = CenterField(g)
+    z_bed      = CenterField(g)
+    z_bed_sd   = CenterField(g)
+    z_sl       = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+    rho_ratio = rho_ice / rho_sw
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(f_ice), 1.0)
+
+    # Cell (1,1): floating (z_base above z_bed), σ > 0 → fractional pinning.
+    H = 500.0
+    interior(H_ice)[1, 1, 1] = H
+    interior(z_bed)[1, 1, 1] = -2000.0
+    interior(z_bed_sd)[1, 1, 1] = 1000.0
+    z_base = -rho_ratio * H            # ≈ -442.6
+
+    # Cell (2,1): floating, σ = 0 → f_grnd_pin = 0.
+    interior(H_ice)[2, 1, 1] = H
+    interior(z_bed)[2, 1, 1] = -2000.0
+    interior(z_bed_sd)[2, 1, 1] = 0.0
+
+    # Cell (3,1): clearly grounded (z_base below z_bed) → 0.
+    interior(H_ice)[3, 1, 1] = H
+    interior(z_bed)[3, 1, 1] = 100.0
+    interior(z_bed_sd)[3, 1, 1] = 1000.0
+
+    # Cell (4,1): floating, σ very small → expect ~0.
+    interior(H_ice)[4, 1, 1] = H
+    interior(z_bed)[4, 1, 1] = -2000.0
+    interior(z_bed_sd)[4, 1, 1] = 1.0
+
+    calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                z_bed, z_bed_sd, z_sl,
+                                rho_ice, rho_sw)
+    Fp = interior(f_grnd_pin)
+
+    # Cell 1: P&D 2012 Eq. 13:
+    #   f = 0.5 · max(0, 1 − (z_base − z_bed) / σ)
+    #     = 0.5 · max(0, 1 − (-442.6 − -2000)/1000) = 0.5·max(0, 1 − 1.557) = 0
+    # (positive expression: above-cap distance > σ, so floor at 0.)
+    @test Fp[1, 1, 1] == 0.0
+
+    # Cell 2: σ=0 → f_grnd_pin = 0 by definition.
+    @test Fp[2, 1, 1] == 0.0
+
+    # Cell 3: grounded (bed above shelf draft) → not in the floating
+    # branch → 0.
+    @test Fp[3, 1, 1] == 0.0
+
+    # Cell 4: σ tiny, large draft-to-bed gap → 0.
+    @test Fp[4, 1, 1] == 0.0
+
+    # Now test a positive case: shallow shelf above a shallow bed
+    # with finite spread.
+    interior(H_ice)[1, 2, 1] = 200.0
+    interior(z_bed)[1, 2, 1] = -250.0
+    interior(z_bed_sd)[1, 2, 1] = 1000.0
+    # z_base = -rho_ratio·200 = -177.04
+    # f = 0.5·max(0, 1 − (-177.04 - -250)/1000)
+    #   = 0.5·max(0, 1 − 0.073) = 0.5 · 0.927 = 0.463
+    calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                z_bed, z_bed_sd, z_sl,
+                                rho_ice, rho_sw)
+    Fp = interior(f_grnd_pin)
+    expected = 0.5 * (1.0 - ((-rho_ratio * 200.0) - (-250.0)) / 1000.0)
+    @test Fp[1, 2, 1] ≈ expected
+end
+
+@testset "tpo: calc_grounded_fractions! — gl_sep dispatch" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd     = CenterField(g)
+    f_grnd_a   = CenterField(g)
+    f_grnd_b   = CenterField(g)
+    f_grnd_c   = CenterField(g)
+    f_grnd_acx = XFaceField(g)
+    f_grnd_acy = YFaceField(g)
+    f_grnd_ab  = CenterField(g)
+
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    # gl_sep == 1 → linear; aa is binary {0, 1}.
+    calc_grounded_fractions!(f_grnd_a, f_grnd_acx, f_grnd_acy, nothing,
+                             H_grnd, 1)
+    Fa = interior(f_grnd_a)
+    @test Fa[1, 3, 1] == 0.0
+    @test Fa[5, 3, 1] == 1.0
+    @test Fa[3, 3, 1] == 0.0   # H_grnd=0 → not >0 → floating per binary
+
+    # gl_sep == 2 → area; aa cell at GL is fractional ≈ 0.5.
+    calc_grounded_fractions!(f_grnd_b, f_grnd_acx, f_grnd_acy, nothing,
+                             H_grnd, 2; gz_nx = 11)
+    Fb = interior(f_grnd_b)
+    @test 0.4 < Fb[3, 3, 1] < 0.6
+
+    # gl_sep == 3 → CISM-quad; aa at GL is also fractional but via
+    # bilinear interpolation (different number than gl_sep=2 in general).
+    calc_grounded_fractions!(f_grnd_c, f_grnd_acx, f_grnd_acy, f_grnd_ab,
+                             H_grnd, 3)
+    Fc = interior(f_grnd_c)
+    @test 0.0 <= Fc[3, 3, 1] <= 1.0
+    @test Fc[1, 3, 1] == 0.0
+    @test Fc[5, 3, 1] == 1.0
+
+    # Bogus gl_sep errors.
+    @test_throws ErrorException calc_grounded_fractions!(f_grnd_a, f_grnd_acx,
+        f_grnd_acy, nothing, H_grnd, 99)
+end

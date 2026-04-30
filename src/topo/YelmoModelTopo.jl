@@ -37,7 +37,10 @@ export topo_step!, advect_tracer!,
        calving_step!,
        calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
        calc_grounding_line_zone!, gen_mask_bed!, calc_ice_front!,
-       calc_z_srf!
+       calc_z_srf!,
+       calc_gradient_acx!, calc_gradient_acy!,
+       calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
+       calc_f_grnd_pinning_points!, calc_grounded_fractions!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -53,6 +56,7 @@ include("calving.jl")
 include("distances.jl")
 include("bed_mask.jl")
 include("surface.jl")
+include("gradients.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -289,7 +293,18 @@ function _update_diagnostics!(y::YelmoModel,
                               dt::Real)
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
                  y.c.rho_ice, y.c.rho_sw)
-    determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd)
+
+    # `gl_sep` dispatch: linear / area / CISM-quad subgrid grounded
+    # fractions. `f_grnd_ab` only populated by gl_sep == 3.
+    calc_grounded_fractions!(y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy,
+                             y.tpo.f_grnd_ab, y.tpo.H_grnd,
+                             y.p.ytopo.gl_sep;
+                             gz_nx = y.p.ytopo.gz_nx)
+
+    # Subgrid pinning-point fraction over floating ice (uses z_bed_sd).
+    calc_f_grnd_pinning_points!(y.tpo.f_grnd_pin, y.tpo.H_ice, y.tpo.f_ice,
+                                y.bnd.z_bed, y.bnd.z_bed_sd, y.bnd.z_sl,
+                                y.c.rho_ice, y.c.rho_sw)
 
     calc_z_srf!(y.tpo.z_srf, y.tpo.H_ice, y.tpo.f_ice,
                 y.bnd.z_bed, y.bnd.z_sl, y.c.rho_ice, y.c.rho_sw)
@@ -312,8 +327,37 @@ function _update_diagnostics!(y::YelmoModel,
         dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
     end
 
-    # Distance-to-feature fields (metres) and bed-state masks.
+    # Margin-aware horizontal gradients on staggered ac-faces.
+    # `dHidx`/`dHidy` use `zero_outside` so partially-covered cells
+    # collapse to 0 (matches Fortran's `zero_outside=.TRUE.` for
+    # ice-thickness gradients).
     dx = _dx(y.g)
+    dy = _dy(y.g)
+    grad_lim  = y.p.ytopo.grad_lim
+    margin2nd = y.p.ytopo.margin2nd
+
+    calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,  y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+    calc_gradient_acy!(y.tpo.dzsdy, y.tpo.z_srf,  y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+
+    calc_gradient_acx!(y.tpo.dHidx, y.tpo.H_ice,  y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = true)
+    calc_gradient_acy!(y.tpo.dHidy, y.tpo.H_ice,  y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = true)
+
+    calc_gradient_acx!(y.tpo.dzbdx, y.tpo.z_base, y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+    calc_gradient_acy!(y.tpo.dzbdy, y.tpo.z_base, y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+
+    # Distance-to-feature fields (metres) and bed-state masks.
     calc_distance_to_grounding_line!(y.tpo.dist_grline, y.tpo.f_grnd, dx)
     calc_distance_to_ice_margin!(y.tpo.dist_margin,  y.tpo.f_ice,  dx)
 

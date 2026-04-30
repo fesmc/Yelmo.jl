@@ -75,6 +75,9 @@ export calving_step!
 export calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
        calc_grounding_line_zone!, gen_mask_bed!, calc_ice_front!,
        calc_z_srf!
+export calc_gradient_acx!, calc_gradient_acy!
+export calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
+       calc_f_grnd_pinning_points!, calc_grounded_fractions!
 
 # YelmoIO
 export init_output
