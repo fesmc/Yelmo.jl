@@ -29,10 +29,12 @@ import ..YelmoCore: dyn_step!
 
 export dyn_step!,
        calc_driving_stress!, calc_driving_stress_gl!,
-       calc_lateral_bc_stress_2D!
+       calc_lateral_bc_stress_2D!,
+       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
 
 include("driving_stress.jl")
 include("lateral_stress.jl")
+include("diagnostics.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
@@ -86,6 +88,10 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #    by the `duxydt` diagnostic in step 9).
     interior(y.dyn.ux_bar_prev) .= interior(y.dyn.ux_bar)
     interior(y.dyn.uy_bar_prev) .= interior(y.dyn.uy_bar)
+    # Snapshot the magnitude too — the post-solver recompute
+    # overwrites `uxy_bar` in place; we need the pre-step value
+    # for `duxydt`.
+    uxy_prev = copy(interior(y.dyn.uxy_bar))
 
     # 2. Driving stress on ac-staggered faces.
     calc_driving_stress!(y.dyn.taud_acx, y.dyn.taud_acy,
@@ -121,6 +127,56 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
               "Milestone 3a only supports \"fixed\". " *
               "SIA / SSA / hybrid / DIVA land in milestones 3c–3f.")
+    end
+
+    # 7. Underflow clip on the velocity fields (matches Fortran's
+    #    `where (abs(.) < TOL_UNDERFLOW) . = 0`).
+    _clip_underflow!(y.dyn.ux)
+    _clip_underflow!(y.dyn.uy)
+    _clip_underflow!(y.dyn.ux_bar)
+    _clip_underflow!(y.dyn.uy_bar)
+
+    # 9. Post-solver diagnostics (steps 8 / Jacobian + uz + strain rate
+    #    are deferred to milestone 3h).
+    dx_g = _dx(y.g)
+    dy_g = _dy(y.g)
+
+    # Ice flux on ac-staggered faces.
+    calc_ice_flux!(y.dyn.qq_acx, y.dyn.qq_acy,
+                   y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.H_ice,
+                   dx_g, dy_g)
+
+    # Stress + flux + velocity magnitudes at aa-cells.
+    calc_magnitude_from_staggered!(y.dyn.qq,        y.dyn.qq_acx,   y.dyn.qq_acy,   y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.taub,      y.dyn.taub_acx, y.dyn.taub_acy, y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.taud,      y.dyn.taud_acx, y.dyn.taud_acy, y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.uxy_b,     y.dyn.ux_b,     y.dyn.uy_b,     y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.uxy_i_bar, y.dyn.ux_i_bar, y.dyn.uy_i_bar, y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.uxy_bar,   y.dyn.ux_bar,   y.dyn.uy_bar,   y.tpo.f_ice)
+
+    # 3D per-layer magnitude — the kernel naturally loops over k.
+    calc_magnitude_from_staggered!(y.dyn.uxy, y.dyn.ux, y.dyn.uy, y.tpo.f_ice)
+
+    # Surface / basal velocity slices. Fortran:
+    #   uz_b  = uz(:, :, 1)
+    #   ux_s  = ux(:, :, nz_aa);  uy_s  = uy(:, :, nz_aa)
+    #   uz_s  = uz(:, :, nz_ac);  uxy_s = uxy(:, :, nz_aa)
+    @views interior(y.dyn.uz_b)[:, :, 1]  .= interior(y.dyn.uz)[:, :, 1]
+    @views interior(y.dyn.ux_s)[:, :, 1]  .= interior(y.dyn.ux)[:, :, end]
+    @views interior(y.dyn.uy_s)[:, :, 1]  .= interior(y.dyn.uy)[:, :, end]
+    @views interior(y.dyn.uz_s)[:, :, 1]  .= interior(y.dyn.uz)[:, :, end]
+    @views interior(y.dyn.uxy_s)[:, :, 1] .= interior(y.dyn.uxy)[:, :, end]
+
+    # Basal-to-surface velocity ratio.
+    calc_vel_ratio!(y.dyn.f_vbvs, y.dyn.uxy_b, y.dyn.uxy_s)
+
+    # Time derivative of depth-averaged velocity magnitude.
+    duxydt_int  = interior(y.dyn.duxydt)
+    uxy_bar_int = interior(y.dyn.uxy_bar)
+    if abs(dt) > TOL
+        @. duxydt_int = (uxy_bar_int - uxy_prev) / dt
+    else
+        fill!(duxydt_int, 0.0)
     end
 
     return y

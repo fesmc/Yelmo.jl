@@ -36,9 +36,33 @@ export compare_state, StateComparison
 
 const VERTICAL_DIMS = (:zeta, :zeta_ac, :zeta_rock, :zeta_rock_ac)
 
-const XFACE_VARIABLES = ["ux_s", "ux_b", "ux", r".*_acx$"]
-const YFACE_VARIABLES = ["uy_s", "uy_b", "uy", r".*_acy$"]
+# Substring patterns that map a variable name to an XFace / YFace /
+# ZFace allocation. `matches_patterns` uses `occursin`, so e.g. `"ux"`
+# matches `"ux_bar"`, `"ux_b"`, `"duxdz"`, etc. — the storage convention
+# from Yelmo Fortran is that derivatives live on the same staggered
+# grid as the parent variable (`duxdz` is acx-staggered like `ux`),
+# so the substring rule does the right thing for those.
+const XFACE_VARIABLES = ["ux", r".*_acx$"]
+const YFACE_VARIABLES = ["uy", r".*_acy$"]
 const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
+
+# Exceptions to the substring rule: names that overlap a face pattern
+# but physically live at aa-cell centres. The override is checked
+# *before* the face patterns in `make_field`, so a match here wins.
+#
+#   - `"uxy"` catches the horizontal-velocity *magnitude* family
+#     (`uxy`, `uxy_b`, `uxy_s`, `uxy_bar`, `uxy_i_bar`) and its
+#     time derivative `duxydt`, plus the corresponding observations
+#     `pd_uxy_s` and `pd_err_uxy_s`. These are scalar magnitudes on
+#     aa-cells, not staggered components.
+#   - `r"^uz_b$"` / `r"^uz_s$"` catch the 2D slices of the 3D `uz`
+#     field. `uz` itself stays on z-faces (per the Yelmo Fortran
+#     layout for vertical velocity), but its bottom (`uz_b`) and top
+#     (`uz_s`) 2D slices are emitted at aa-cell centres in the
+#     schema. The patterns are anchored regex to avoid a false
+#     substring match against `uz_star` (which is a genuine 3D
+#     ZFace field and *should* keep its face allocation).
+const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 
 # Per-cell ice evolution mask values (`bnd.mask_ice`) — defined in
 # YelmoConst and re-exported here for back-compat with existing call
@@ -135,7 +159,12 @@ end
 
 function make_field(varname::Union{AbstractString,Symbol}, grid::RectilinearGrid)
     varname = String(varname)
-    if matches_patterns(varname, XFACE_VARIABLES)
+    # Override list wins: a name on `CENTER_OVERRIDES` allocates as a
+    # CenterField even if it matches one of the face patterns by
+    # substring (see the documentation alongside `CENTER_OVERRIDES`).
+    if matches_patterns(varname, CENTER_OVERRIDES)
+        return neumann_2d_field(grid)
+    elseif matches_patterns(varname, XFACE_VARIABLES)
         return XFaceField(grid)
     elseif matches_patterns(varname, YFACE_VARIABLES)
         return YFaceField(grid)
