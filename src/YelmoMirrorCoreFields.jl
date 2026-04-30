@@ -8,7 +8,7 @@ using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
                    XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 import ..YelmoCore: init_state!, step!
 
-export YelmoMirror, init_state!, step!, yelmo_sync!
+export YelmoMirror, init_state!, step!, yelmo_sync!, yelmo_write_restart!
 export yelmo_get_var2D, yelmo_get_var2D!
 export yelmo_get_var3D, yelmo_get_var3D!
 export yelmo_set_var2D!, yelmo_set_var3D!
@@ -45,15 +45,53 @@ function YelmoMirror(filename::String, time::Float64;
     return YelmoMirror(p, time; alias, rundir, overwrite)
 end
 
-function YelmoMirror(p::YelmoParameters, time::Float64; 
+"""
+    YelmoMirror(p, time; grid=nothing, alias, rundir, overwrite)
+
+Construct a `YelmoMirror` from a `YelmoParameters` set. The optional
+`grid` keyword switches grid-construction strategy:
+
+  - `grid === nothing` (default): the underlying Fortran `yelmo_init`
+    runs with `grid_def="file"` and reads grid + topography from a
+    NetCDF file identified by the namelist's `&yelmo_masks` /
+    `&yelmo_init_topo` blocks. Required for real-domain runs (e.g.
+    Greenland-16km) where the grid lives on disk.
+
+  - `grid` is a NamedTuple with at least `xc::Vector` and `yc::Vector`
+    (cell centres in metres) plus optional `grid_name::String` (default
+    `"synthetic"`), `lon`, `lat`, `area`: the grid is constructed
+    synthetically via `yelmo_init_grid_fromaxes` (C API
+    `:yelmo_init_grid`) and `yelmo_init` then runs with
+    `grid_def="none"` to skip its own grid setup. Used for
+    Fortran-internally-generated benchmarks (BUELER, EISMINT,
+    ISMIP-HOM, slab, trough, MISMIP+, CalvingMIP) where no grid file
+    exists. The namelist must set `init_topo_load = .false.` so
+    `yelmo_init` doesn't try to load topography from a missing file.
+
+For lon/lat/area defaults: lon and lat default to zero arrays (a
+flat Cartesian grid; lon/lat aren't physically meaningful for
+benchmarks), area defaults to `dx · dy` (uniform spacing inferred
+from xc/yc).
+"""
+function YelmoMirror(p::YelmoParameters, time::Float64;
+    grid::Union{Nothing,NamedTuple}=nothing,
     alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
 
     calias = Vector{UInt8}("$(alias)\0")
 
-    # 1. Fortran Init
+    # 1. Fortran Init. Two paths:
+    #    - default (grid=nothing): yelmo_init(grid_def="file") reads
+    #      everything from disk.
+    #    - synthetic (grid=NamedTuple): construct the grid via
+    #      yelmo_init_grid_fromaxes first, then yelmo_init(grid_def="none").
     filename = joinpath(rundir, p.name * ".nml")
     write_nml(filename, p; overwrite)
-    _init_yelmomirror(filename, time, calias)
+    if grid === nothing
+        _init_yelmomirror(filename, time, calias)
+    else
+        _yelmo_init_grid_fromaxes(grid, calias)
+        _init_yelmomirror(filename, time, calias; grid_def="none")
+    end
 
     # 2. Grid Setup
     ginfo = yelmo_get_grid_info(calias)
@@ -387,11 +425,80 @@ end
 
 # --- Internal Helper for Init ---
 
-function _init_yelmomirror(filename::String, time::Float64, calias::Vector{UInt8})
-    grid_def = "file"
+function _init_yelmomirror(filename::String, time::Float64, calias::Vector{UInt8};
+                           grid_def::String="file")
     ccall((:yelmo_init, yelmolib), Cvoid,
         (Ptr{UInt8}, Ptr{UInt8}, Float64, Ptr{UInt8}),
         filename * "\0", grid_def * "\0", time, calias)
+end
+
+# Synthetic-grid path. Wraps the C API entry name "yelmo_init_grid"
+# (declared in yelmo_c_api.f90 as `yelmo_init_grid_fromaxes_wrapper`),
+# which sets the persistent `ylmo%grd` from explicit axes before
+# `yelmo_init(grid_def="none")` runs. `grid` requires `xc` and `yc`
+# (Vectors of cell-centre coordinates in metres); `grid_name`, `lon`,
+# `lat`, and `area` are optional and have sensible synthetic-Cartesian
+# defaults.
+function _yelmo_init_grid_fromaxes(grid::NamedTuple, calias::Vector{UInt8})
+    haskey(grid, :xc) && haskey(grid, :yc) ||
+        error("YelmoMirror synthetic grid requires `grid.xc` and `grid.yc` (cell centres in metres).")
+
+    xc = collect(Float64, grid.xc)
+    yc = collect(Float64, grid.yc)
+    nx, ny = length(xc), length(yc)
+
+    grid_name = String(get(grid, :grid_name, "synthetic"))
+
+    # lon/lat default to zero (no geographic meaning on a Cartesian
+    # synthetic grid; consumers like the benchmark drivers don't read
+    # them). area defaults to dx·dy from the xc/yc spacing.
+    lon  = collect(Float64, get(grid, :lon,  zeros(nx, ny)))
+    lat  = collect(Float64, get(grid, :lat,  zeros(nx, ny)))
+    area = if haskey(grid, :area)
+        collect(Float64, grid.area)
+    else
+        dx = nx >= 2 ? abs(xc[2] - xc[1]) : 1.0
+        dy = ny >= 2 ? abs(yc[2] - yc[1]) : 1.0
+        fill(dx * dy, nx, ny)
+    end
+
+    size(lon)  == (nx, ny) || error("grid.lon must have shape ($nx, $ny); got $(size(lon))")
+    size(lat)  == (nx, ny) || error("grid.lat must have shape ($nx, $ny); got $(size(lat))")
+    size(area) == (nx, ny) || error("grid.area must have shape ($nx, $ny); got $(size(area))")
+
+    # The Fortran-side signature is:
+    #   yelmo_init_grid_fromaxes_wrapper(grid_name, nx, ny,
+    #                                    xc, yc, lon, lat, area, alias)
+    # with `nx, ny` declared `integer(c_int), intent(in)` (no `value`),
+    # so they're passed by reference — use `Ref{Cint}` here, mirroring
+    # the existing `yelmo_get_grid_sizes` ccall convention. The array
+    # arrays are `type(c_ptr), value` on the Fortran side, so `Ptr`s
+    # are correct.
+    nx_ref = Ref{Cint}(nx)
+    ny_ref = Ref{Cint}(ny)
+    ccall((:yelmo_init_grid, yelmolib), Cvoid,
+        (Ptr{UInt8}, Ref{Cint}, Ref{Cint},
+         Ptr{Cdouble}, Ptr{Cdouble},
+         Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble},
+         Ptr{UInt8}),
+        grid_name * "\0", nx_ref, ny_ref,
+        xc, yc, lon, lat, area,
+        calias)
+    return nothing
+end
+
+# Restart-write — wraps the C API entry name "yelmo_restart_write"
+# (declared in yelmo_c_api.f90, paired with `yelmo_restart_write` in
+# yelmo_io.f90). Writes the full Fortran state to a NetCDF that
+# `YelmoModel(restart_file, time; ...)` can load directly.
+function yelmo_write_restart!(ylmo::YelmoMirror, filename::String;
+                              time::Union{Nothing,Float64}=nothing)
+    t = time === nothing ? ylmo.time : time
+    mkpath(dirname(filename))
+    ccall((:yelmo_restart_write, yelmolib), Cvoid,
+        (Ptr{UInt8}, Float64, Ptr{UInt8}),
+        filename * "\0", t, ylmo.calias)
+    return filename
 end
 
 end # module
