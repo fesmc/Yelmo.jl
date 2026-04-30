@@ -27,3 +27,14 @@ julia> using Yelmo
 ## Quick-start
 
 To do...
+
+## Documentation
+
+- [`docs/topo-step.md`](docs/topo-step.md) — per-phase reference for
+  `topo_step!`, the topography component's per-timestep orchestrator
+  (advection, mass balance, residual cleanup, diagnostics).
+- [`docs/grounded-fraction.md`](docs/grounded-fraction.md) —
+  mathematical description of the subgrid grounded-fraction kernel
+  (CISM bilinear-interpolation scheme of Leguy et al. 2021), with
+  derivation of the analytical-limit stabilisations introduced by
+  the Julia port.
