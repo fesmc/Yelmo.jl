@@ -466,17 +466,22 @@ function _yelmo_init_grid_fromaxes(grid::NamedTuple, calias::Vector{UInt8})
     size(lat)  == (nx, ny) || error("grid.lat must have shape ($nx, $ny); got $(size(lat))")
     size(area) == (nx, ny) || error("grid.area must have shape ($nx, $ny); got $(size(area))")
 
-    # The C-side signature is:
-    #   yelmo_init_grid(char* grid_name, int nx, int ny,
-    #                   double* xc, double* yc,
-    #                   double* lon, double* lat, double* area,
-    #                   char* alias)
+    # The Fortran-side signature is:
+    #   yelmo_init_grid_fromaxes_wrapper(grid_name, nx, ny,
+    #                                    xc, yc, lon, lat, area, alias)
+    # with `nx, ny` declared `integer(c_int), intent(in)` (no `value`),
+    # so they're passed by reference — use `Ref{Cint}` here, mirroring
+    # the existing `yelmo_get_grid_sizes` ccall convention. The array
+    # arrays are `type(c_ptr), value` on the Fortran side, so `Ptr`s
+    # are correct.
+    nx_ref = Ref{Cint}(nx)
+    ny_ref = Ref{Cint}(ny)
     ccall((:yelmo_init_grid, yelmolib), Cvoid,
-        (Ptr{UInt8}, Cint, Cint,
+        (Ptr{UInt8}, Ref{Cint}, Ref{Cint},
          Ptr{Cdouble}, Ptr{Cdouble},
          Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble},
          Ptr{UInt8}),
-        grid_name * "\0", Cint(nx), Cint(ny),
+        grid_name * "\0", nx_ref, ny_ref,
         xc, yc, lon, lat, area,
         calias)
     return nothing
