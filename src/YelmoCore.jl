@@ -837,8 +837,13 @@ function compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel;
                 n_skipped += 1
                 continue
             end
-            # Skip non-Field entries (e.g. the SIA scratch substruct
-            # under `dyn.scratch`, which is a NamedTuple of buffers).
+            # Skip the scratch substruct explicitly, plus any other
+            # non-Field entries defensively. The scratch sub-NamedTuple
+            # under `dyn.scratch` holds SIA solver buffers (recomputed
+            # every step, not part of model state) — exclude by name
+            # first, then fall back to a type check that catches any
+            # future non-Field entry under another name.
+            k === :scratch && continue
             a_grp[k] isa AbstractField || (n_skipped += 1; continue)
             b_grp[k] isa AbstractField || (n_skipped += 1; continue)
             af = interior(a_grp[k])

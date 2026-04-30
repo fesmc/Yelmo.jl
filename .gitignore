@@ -1,6 +1,5 @@
 yelmo
 Manifest.toml
 plots
-test
 *.nml
 .claude/worktrees

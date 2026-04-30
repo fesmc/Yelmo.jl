@@ -140,6 +140,11 @@ struct YelmoOutput
     # `bnd_tau_relax`, `tpo_tau_relax`). NetCDF uses a flat namespace
     # so the prefix is the only way to write both.
     nc_names  :: Dict{Tuple{Symbol, Symbol}, String}
+    # Scratch entries (e.g. `dyn.scratch.sia_tau_xz`), populated only
+    # when `init_output(...; include_scratch=true)`. Keyed by
+    # (parent_group, scratch_subfname). NetCDF variable name is always
+    # `<group>_scratch_<subfname>`, no collision-detection needed.
+    scratch_nc_names :: Dict{Tuple{Symbol, Symbol}, String}
 end
 
 Base.close(out::YelmoOutput) = close(out.ds)
@@ -163,15 +168,24 @@ end
 const _ALL_GROUPS = [:bnd, :dta, :dyn, :mat, :thrm, :tpo]
 
 """
-    init_output(ylmo, path; selection, deflate) -> YelmoOutput
+    init_output(ylmo, path; selection, deflate, include_scratch) -> YelmoOutput
 
 Create a NetCDF file at `path`. Defines all dimensions, coordinate variables,
 and one NetCDF variable per field that passes `selection` and has a
 recognised grid. Returns a `YelmoOutput` to be passed to `write_output!`.
+
+Set `include_scratch=true` to also serialize solver-internal scratch
+buffers (e.g. `dyn.scratch.sia_tau_xz`) — useful for debugging the SIA
+solver's intermediate state. Off by default so production runs don't
+bloat NetCDFs with non-state fields. Scratch fields belong to their
+parent group, so `OutputSelection`'s group filter still applies; their
+NetCDF variable names are prefixed with `<group>_scratch_` (e.g.
+`dyn_scratch_sia_tau_xz`).
 """
 function init_output(ylmo::AbstractYelmoModel, path::String;
                      selection::OutputSelection = OutputSelection(),
-                     deflate::Int = 4)
+                     deflate::Int = 4,
+                     include_scratch::Bool = false)
 
     active_groups = selection.groups === nothing ? _ALL_GROUPS : selection.groups
 
@@ -216,11 +230,12 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     for gname in active_groups
         group_nt = getfield(ylmo, gname)
         for fname in keys(group_nt)
+            # Skip the scratch substruct explicitly, plus any other
+            # non-Field entries defensively.
+            fname === :scratch && continue
+            group_nt[fname] isa Field || continue
             name = String(fname)
             _selected(name, gname, selection) || continue
-            # Skip non-Field entries (e.g. the SIA scratch substruct
-            # under `dyn.scratch`).
-            group_nt[fname] isa Field || continue
             dims = _spatial_dims(group_nt[fname], ylmo)
             dims === nothing && continue
             push!(selected, (gname, fname, dims))
@@ -238,7 +253,35 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
                fillvalue    = Float32(NaN))
     end
 
-    return YelmoOutput(ds, selection, active_groups, nc_names)
+    # ---- scratch entries (opt-in via `include_scratch=true`) -------------
+    # Walk the `:scratch` substruct of every active group whose parent
+    # group passes `selection.groups`. Per-field selection still applies
+    # — patterns are matched against the bare scratch sub-fname (e.g.
+    # `"sia_tau_xz"`), so users can `include` / `exclude` them like any
+    # other field. NetCDF variable name is always `<group>_scratch_<sub>`,
+    # which is unambiguous so no collision-counting is needed.
+    scratch_nc_names = Dict{Tuple{Symbol, Symbol}, String}()
+    if include_scratch
+        for gname in active_groups
+            group_nt = getfield(ylmo, gname)
+            haskey(group_nt, :scratch) || continue
+            scratch_nt = group_nt[:scratch]
+            scratch_nt isa NamedTuple || continue
+            for sname in keys(scratch_nt)
+                scratch_nt[sname] isa Field || continue
+                _selected(String(sname), gname, selection) || continue
+                dims = _spatial_dims(scratch_nt[sname], ylmo)
+                dims === nothing && continue
+                nc_name = "$(gname)_scratch_$(sname)"
+                scratch_nc_names[(gname, sname)] = nc_name
+                defVar(ds, nc_name, Float32, (dims..., "time");
+                       deflatelevel = deflate,
+                       fillvalue    = Float32(NaN))
+            end
+        end
+    end
+
+    return YelmoOutput(ds, selection, active_groups, nc_names, scratch_nc_names)
 end
 
 # ---------------------------------------------------------------------------
@@ -246,11 +289,17 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel)
+    write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel; include_scratch)
 
 Append one time slice (at `ylmo.time`) to the open output file.
+
+`include_scratch` defaults to whatever `init_output` set up — i.e. `true`
+iff scratch entries were registered. Passing `include_scratch=false`
+explicitly suppresses scratch writes for a particular slice (the
+NetCDF variables remain, just unwritten at that time index).
 """
-function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel)
+function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
+                       include_scratch::Bool = !isempty(out.scratch_nc_names))
     ds    = out.ds
     t_idx = length(ds["time"]) + 1
     ds["time"][t_idx] = ylmo.time
@@ -259,13 +308,36 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel)
         group_nt = getfield(ylmo, gname)
 
         for fname in keys(group_nt)
+            # Skip the scratch substruct explicitly, plus any other
+            # non-Field entries defensively.
+            fname === :scratch && continue
+            group_nt[fname] isa Field || continue
             nc_name = get(out.nc_names, (gname, fname), nothing)
             nc_name === nothing && continue
             haskey(ds, nc_name) || continue
-            # Skip non-Field entries (e.g. dyn.scratch).
-            group_nt[fname] isa Field || continue
 
             data = _get_data(group_nt[fname])
+            sz   = size(data)
+
+            if ndims(data) == 2
+                ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
+            elseif ndims(data) == 3
+                ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+            end
+        end
+    end
+
+    if include_scratch
+        for ((gname, sname), nc_name) in out.scratch_nc_names
+            haskey(ds, nc_name) || continue
+            group_nt   = getfield(ylmo, gname)
+            haskey(group_nt, :scratch) || continue
+            scratch_nt = group_nt[:scratch]
+            haskey(scratch_nt, sname) || continue
+            field = scratch_nt[sname]
+            field isa Field || continue
+
+            data = _get_data(field)
             sz   = size(data)
 
             if ndims(data) == 2
