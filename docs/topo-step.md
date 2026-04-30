@@ -12,7 +12,7 @@ and recorded individually.
 | # | Phase | Helper(s) | Output | Notes |
 |---|---|---|---|---|
 | 1 | Snapshot `H_ice` | — | `H_prev`, `tpo.H_ice_n` | `H_ice_n` feeds the `topo_rel_field == "H_ice_n"` relaxation target. |
-| 2 | Advection | `advect_thickness!` | `tpo.H_ice` | Skipped if `ytopo.topo_fixed`. |
+| 2 | Advection | `advect_tracer!` | `tpo.H_ice` | Skipped if `ytopo.topo_fixed`. Generic 2D tracer advection; reused by `lsf_update!`. |
 | 3 | Mask post-step | `_apply_mask_ice_pass!` | `tpo.H_ice` | `bnd.mask_ice ∈ {NONE, FIXED, DYNAMIC}` per cell. |
 | 4 | Snapshot for `dHidt_dyn` | — | `H_after_dyn` | Captures the dynamic contribution before any tendency. |
 | 5 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | Binary stub for v1; fractional later. |
@@ -40,7 +40,9 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 **Done**
 
-- Phase 1 (advection): `advect_thickness!` — explicit upwind via Oceananigans operators.
+- Phase 1 (advection): `advect_tracer!` — generic 2D tracer advection
+  (explicit upwind via Oceananigans operators), used both for `H_ice`
+  here and for `lsf` in calving.
 - Phases 2–6, 8–13, 15–18 (the per-cell mass-balance pipeline).
 - Subgrid `f_grnd` via the full CISM bilinear-interpolation scheme,
   with a numerically stable `_calc_fraction_above_zero` kernel that
@@ -85,7 +87,7 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 `test/test_yelmo_topo.jl` covers:
 
-- Kernel-level: `advect_thickness!`, `calc_f_ice!`, `calc_H_grnd!`,
+- Kernel-level: `advect_tracer!`, `calc_f_ice!`, `calc_H_grnd!`,
   `determine_grounded_fractions!`, `calc_bmb_total!`,
   `calc_fmb_total!`, `calc_mb_discharge!`, `set_tau_relax!`,
   `calc_G_relaxation!`.

@@ -23,7 +23,7 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 import ..YelmoCore: step!
 
-export topo_step!, advect_thickness!,
+export topo_step!, advect_tracer!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
@@ -111,8 +111,8 @@ function topo_step!(y::YelmoModel, dt::Float64)
     interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
-        advect_thickness!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
-                          cfl_safety = y.p.yelmo.cfl_max)
+        advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
+                       cfl_safety = y.p.yelmo.cfl_max)
     end
 
     _apply_mask_ice_pass!(y, H_prev)

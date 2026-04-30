@@ -5,7 +5,7 @@ import Pkg; Pkg.activate(".")
 
 # Milestone 2b integration test for `tpo`. Test groups:
 #   1. Analytical advection — Gaussian return-to-origin and
-#      uniform-stationary checks against `advect_thickness!` directly
+#      uniform-stationary checks against `advect_tracer!` directly
 #      (no full YelmoModel).
 #   2. Square-pulse advection — informational only; reports
 #      first-order-upwind diffusion characteristics. Always passes.
@@ -59,7 +59,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
 
         # One full revolution: T = Lx / |u|
         T = Lx / u_speed
-        advect_thickness!(H, u, v, T; cfl_safety=0.5)
+        advect_tracer!(H, u, v, T; cfl_safety=0.5)
 
         # First-order upwind on a 50×50 grid over one period diffuses
         # the Gaussian noticeably. Acceptance: peak should still be
@@ -88,7 +88,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
         fill!(interior(u), 1.0)  # nonzero so kernel actually runs
         fill!(interior(v), 0.5)
 
-        advect_thickness!(H, u, v, 10.0; cfl_safety=0.5)
+        advect_tracer!(H, u, v, 10.0; cfl_safety=0.5)
 
         max_dev = maximum(abs.(interior(H) .- H_value))
         @test max_dev < 1e-12  # bit-stable for uniform field
@@ -117,7 +117,7 @@ end
     fill!(interior(v), 0.0)
 
     H_init = copy(interior(H))
-    advect_thickness!(H, u, v, 100.0; cfl_safety=0.5)
+    advect_tracer!(H, u, v, 100.0; cfl_safety=0.5)
 
     peak_ratio = maximum(interior(H)) / maximum(H_init)
     width_at_half_max = count(>=(0.5), view(interior(H), :, Nx ÷ 2, 1))
