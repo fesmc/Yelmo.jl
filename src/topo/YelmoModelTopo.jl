@@ -63,14 +63,6 @@ function step!(y::YelmoModel, dt::Float64)
     return y
 end
 
-# ---------------------------------------------------------------------------
-# Reference physical constants used by the diagnostic update. Yelmo Fortran
-# defaults; intentionally hard-coded here for v1, to be sourced from y.p.phys
-# in a later milestone when the physics-constants struct is wired through.
-# ---------------------------------------------------------------------------
-const _RHO_ICE = 910.0   # kg / m^3
-const _RHO_SW  = 1028.0  # kg / m^3
-
 """
     topo_step!(y::YelmoModel, dt) -> y
 
@@ -143,7 +135,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     # leave H_ice in a different state than the last diagnostic refresh).
     if y.p.ytopo.use_bmb
         calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
-                     _RHO_ICE, _RHO_SW)
+                     y.c.rho_ice, y.c.rho_sw)
         determine_grounded_fractions!(y.tpo.f_grnd_bmb, y.tpo.H_grnd)
 
         calc_bmb_total!(y.tpo.bmb_ref, y.thrm.bmb_grnd, y.bnd.bmb_shlf,
@@ -167,7 +159,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
                         y.bnd.fmb_shlf, y.bnd.bmb_shlf,
                         y.tpo.H_ice, y.tpo.H_grnd, y.tpo.f_ice,
                         y.p.ytopo.fmb_method, y.p.ytopo.fmb_scale,
-                        _RHO_ICE, _RHO_SW, _dx(y.g))
+                        y.c.rho_ice, y.c.rho_sw, _dx(y.g))
         mbal_tendency!(y.tpo.fmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.fmb_ref, dt)
     else
         fill!(interior(y.tpo.fmb_ref), 0.0)
@@ -285,7 +277,7 @@ function _update_diagnostics!(y::YelmoModel,
                               H_after_dyn::AbstractArray,
                               dt::Real)
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
-                 _RHO_ICE, _RHO_SW)
+                 y.c.rho_ice, y.c.rho_sw)
     determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd)
 
     H_ice     = interior(y.tpo.H_ice)
@@ -298,7 +290,7 @@ function _update_diagnostics!(y::YelmoModel,
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
 
     inv_dt = dt > 0 ? 1.0 / dt : 0.0
-    rho_ratio_iw = _RHO_ICE / _RHO_SW
+    rho_ratio_iw = y.c.rho_ice / y.c.rho_sw
 
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
         if H_grnd[i, j, 1] > 0.0

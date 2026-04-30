@@ -134,6 +134,12 @@ struct YelmoOutput
     ds        :: NCDataset
     selection :: OutputSelection
     groups    :: Vector{Symbol}
+    # NetCDF variable name per (group, fname). Mostly identical to
+    # `String(fname)`, but a field name that appears in more than one
+    # selected group is disambiguated as `<group>_<fname>` (e.g.
+    # `bnd_tau_relax`, `tpo_tau_relax`). NetCDF uses a flat namespace
+    # so the prefix is the only way to write both.
+    nc_names  :: Dict{Tuple{Symbol, Symbol}, String}
 end
 
 Base.close(out::YelmoOutput) = close(out.ds)
@@ -201,24 +207,35 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     tv.attrib["long_name"] = "model time"
 
     # ---- field variables --------------------------------------------------
+    # First pass: enumerate every selected (group, fname) pair that has
+    # a recognised grid, count name occurrences across groups so we can
+    # disambiguate collisions (e.g. `tau_relax` exists in both `bnd`
+    # and `tpo`).
+    selected = Vector{Tuple{Symbol, Symbol, NTuple}}()
+    name_count = Dict{String, Int}()
     for gname in active_groups
         group_nt = getfield(ylmo, gname)
-
         for fname in keys(group_nt)
-            name  = String(fname)
+            name = String(fname)
             _selected(name, gname, selection) || continue
-            
-            field = group_nt[fname]
-            dims  = _spatial_dims(field, ylmo)
+            dims = _spatial_dims(group_nt[fname], ylmo)
             dims === nothing && continue
-
-            defVar(ds, name, Float32, (dims..., "time");
-                   deflatelevel = deflate,
-                   fillvalue    = Float32(NaN))
+            push!(selected, (gname, fname, dims))
+            name_count[name] = get(name_count, name, 0) + 1
         end
     end
 
-    return YelmoOutput(ds, selection, active_groups)
+    nc_names = Dict{Tuple{Symbol, Symbol}, String}()
+    for (gname, fname, dims) in selected
+        name = String(fname)
+        nc_name = name_count[name] > 1 ? "$(gname)_$(name)" : name
+        nc_names[(gname, fname)] = nc_name
+        defVar(ds, nc_name, Float32, (dims..., "time");
+               deflatelevel = deflate,
+               fillvalue    = Float32(NaN))
+    end
+
+    return YelmoOutput(ds, selection, active_groups, nc_names)
 end
 
 # ---------------------------------------------------------------------------
@@ -239,17 +256,17 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel)
         group_nt = getfield(ylmo, gname)
 
         for fname in keys(group_nt)
-            name = String(fname)
-            _selected(name, gname, out.selection) || continue
-            haskey(ds, name)               || continue
+            nc_name = get(out.nc_names, (gname, fname), nothing)
+            nc_name === nothing && continue
+            haskey(ds, nc_name) || continue
 
             data = _get_data(group_nt[fname])
             sz   = size(data)
 
             if ndims(data) == 2
-                ds[name][1:sz[1], 1:sz[2], t_idx] = data
+                ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
-                ds[name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+                ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
             end
         end
     end

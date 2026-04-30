@@ -76,6 +76,10 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 **Read** (from other components):
 
+- `c` (`YelmoConstants`): `rho_ice`, `rho_sw` — used by `calc_H_grnd!`,
+  `calc_fmb_total!`, the surface/base elevation update, and
+  `calving_step!`. Defaults to Yelmo Fortran `&phys`; can be
+  overridden by passing `c=YelmoConstants(...)` to the constructor.
 - `dyn`: `ux_bar`, `uy_bar` (advection)
 - `bnd`: `smb_ref`, `bmb_shlf`, `fmb_shlf`, `z_bed`, `z_sl`,
   `z_bed_sd`, `H_ice_ref`, `tau_relax`, `ice_allowed`, `mask_ice`
