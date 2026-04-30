@@ -49,3 +49,36 @@ For milestone 2, dyn/therm/mat fields are read straight from the restart-loaded 
 - Sibling module pattern: `src/topo/YelmoModelTopo.jl` plus helpers in `src/topo/`.
 - Hard-coded ordered orchestration in `step!(::YelmoModel, dt)`; `topo_step!` is the entry.
 - Develop in a worktree; tests live alongside the v0 integration test.
+
+# Status (2026-04-30)
+
+The mass-balance pipeline of `topo_step!` now covers Fortran phases
+1–6 and 8–10 of `calc_ytopo_pc`, plus the diagnostic update. See
+[`docs/topo-step.md`](../docs/topo-step.md) for the per-phase reference
+and [`docs/grounded-fraction.md`](../docs/grounded-fraction.md) for
+the mathematical description of the subgrid `f_grnd` kernel.
+
+| Phase | Status |
+|---|---|
+| 1. Advection | done (explicit upwind via Oceananigans) |
+| 2. Mask + `f_ice` | done |
+| 3. SMB | done |
+| 4. BMB | done (`fcmp`/`fmp`/`pmp`/`nmp`; `pmpt` deferred — needs `calc_subgrid_array`) |
+| 5. FMB | done (methods 0/1/2) |
+| 6. DMB | stub only — `dmb_method = 0` (no-op). Other methods error. Calov+ 2015 kernel needs `dist_grline`/`dist_margin` distance fields, not yet computed. |
+| 7. Calving | **next** — to be ported in milestone 2c. |
+| 8. Relaxation | done (`topo_rel ∈ {-1, 1, 2, 3}`; `topo_rel == 4` errors — needs `mask_grz`). |
+| 9. Residual cleanup | done. |
+| 10. Diagnostics | done; `f_grnd` is full-CISM subgrid. |
+| Predictor-corrector | not yet implemented. |
+| `impl-lis` solver | not yet implemented. |
+
+Beyond the Fortran reference, the Julia port replaces the Fortran
+`_calc_fraction_above_zero` numerical bandages (`±_FRAC_FTOL` snap and
+`±0.1` perturbation when `|dd|` is small) with analytical limits — a
+linear-case branch that uses Sutherland–Hodgman polygon clipping, and
+a saddle-limit `\varphi \to aa/dd` for the `\delta = bb\,cc - aa\,dd
+\to 0` singularity. This recovers clean `O(dx^2)` convergence of the
+total grounded area on smooth flotation fields and machine-precision
+agreement on linear ones. The fix could be propagated back to the
+Fortran reference as a follow-up.

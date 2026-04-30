@@ -25,11 +25,19 @@ import ..YelmoCore: step!
 
 export topo_step!, advect_thickness!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
-       calc_f_ice!
+       calc_f_ice!,
+       calc_H_grnd!, determine_grounded_fractions!,
+       calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!,
+       set_tau_relax!, calc_G_relaxation!
 
 include("advection.jl")
 include("mass_balance.jl")
 include("ice_fraction.jl")
+include("grounded.jl")
+include("basal.jl")
+include("frontal.jl")
+include("discharge.jl")
+include("relaxation.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -58,7 +66,8 @@ const _RHO_SW  = 1028.0  # kg / m^3
 """
     topo_step!(y::YelmoModel, dt) -> y
 
-Advance topography state by `dt` years. In milestone 2b:
+Advance topography state by `dt` years. Phase order matches Fortran's
+`calc_ytopo_pc` predictor/corrector body (yelmo_topography.f90:172):
 
 1. Snapshot `H_ice` (used for the fixed-mask post-step and for the
    total `dHidt` denominator).
@@ -67,22 +76,39 @@ Advance topography state by `dt` years. In milestone 2b:
 3. Apply the `bnd.mask_ice` post-step pass (no-ice → 0; fixed →
    prior value; dynamic → clamped non-negative).
 4. Recompute binary `f_ice` from the post-advection `H_ice`.
-5. Pre-clip `bnd.smb_ref` into `tpo.smb` via `mbal_tendency!`, then
-   apply via `apply_tendency!(adjust_mb=true)` so `tpo.smb` reflects
-   the realised SMB rate.
-6. Recompute binary `f_ice` again (margins may have moved).
-7. Compute `tpo.mb_resid` via `resid_tendency!` and apply via
-   `apply_tendency!(adjust_mb=true)` so `tpo.mb_resid` reflects the
-   realised cleanup rate.
-8. Recompute binary `f_ice` once more.
-9. Combine: `tpo.mb_net = tpo.smb + tpo.mb_resid`.
-10. Update diagnostics: `dHidt` from the original snapshot, plus
-    `dHidt_dyn` from a snapshot taken right after step (3) — so the
-    dynamic and total rates can diverge once SMB/resid land.
-11. Advance `y.time`.
+5. SMB: `mbal_tendency!(smb, …, smb_ref)` + `apply_tendency!(adjust_mb)`.
+6. Refresh `f_ice`.
+7. BMB: refresh `H_grnd` and `f_grnd_bmb` from current state, combine
+   `thrm.bmb_grnd` and `bnd.bmb_shlf` into `tpo.bmb_ref` via
+   `calc_bmb_total!`, then realise via `mbal_tendency!` + `apply_tendency!`.
+   Skipped (`bmb = 0`) if `y.p.ytopo.use_bmb == false`.
+8. Refresh `f_ice`.
+9. FMB: `calc_fmb_total!` + `mbal_tendency!` + `apply_tendency!`.
+   Skipped (`fmb = 0`) if `y.p.ytopo.use_bmb == false` — Fortran
+   gates FMB on the same `use_bmb` flag.
+10. Refresh `f_ice`.
+11. DMB: `calc_mb_discharge!` (v1 stub: only `dmb_method = 0`) +
+    `mbal_tendency!` + `apply_tendency!`.
+12. Refresh `f_ice`.
+13. Optional relaxation toward `H_ref`/`H_ice_n` via `set_tau_relax!`
+    + `calc_G_relaxation!`. Skipped when `topo_rel == 0`. Errors on
+    `topo_rel == 4` (depends on un-ported `mask_grz`). When
+    `topo_rel == -1`, the timescale field is read from `bnd.tau_relax`.
+14. Refresh `f_ice` after relaxation.
+15. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
+16. Refresh `f_ice`.
+17. `mb_net = smb + bmb + fmb + dmb + mb_relax + mb_resid`.
+18. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
+    `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
+19. Advance `y.time`.
 """
 function topo_step!(y::YelmoModel, dt::Float64)
     H_prev = copy(interior(y.tpo.H_ice))
+
+    # Snapshot the start-of-step thickness into `H_ice_n` so that
+    # `topo_rel_field == "H_ice_n"` (relax-toward-previous) has a
+    # meaningful target. Fortran does the same in calc_ytopo_pc.
+    interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
         advect_thickness!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
@@ -101,9 +127,93 @@ function topo_step!(y::YelmoModel, dt::Float64)
     mbal_tendency!(y.tpo.smb, y.tpo.H_ice, y.tpo.f_grnd, y.bnd.smb_ref, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.smb, dt; adjust_mb=true)
 
-    # SMB may have grown / shrunk margins; refresh f_ice before the
-    # margin-aware residual cleanup reads it.
+    # SMB may have grown / shrunk margins; refresh f_ice before BMB.
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Basal mass balance: refresh H_grnd and f_grnd_bmb from the *current*
+    # state (Fortran does the same — predictor/corrector iterations can
+    # leave H_ice in a different state than the last diagnostic refresh).
+    if y.p.ytopo.use_bmb
+        calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
+                     _RHO_ICE, _RHO_SW)
+        determine_grounded_fractions!(y.tpo.f_grnd_bmb, y.tpo.H_grnd)
+
+        calc_bmb_total!(y.tpo.bmb_ref, y.thrm.bmb_grnd, y.bnd.bmb_shlf,
+                        y.tpo.H_ice, y.tpo.H_grnd, y.tpo.f_grnd_bmb,
+                        y.p.ytopo.bmb_gl_method)
+        mbal_tendency!(y.tpo.bmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.bmb_ref, dt)
+    else
+        fill!(interior(y.tpo.bmb_ref), 0.0)
+        fill!(interior(y.tpo.bmb),     0.0)
+    end
+    apply_tendency!(y.tpo.H_ice, y.tpo.bmb, dt; adjust_mb=true)
+
+    # BMB may have moved margins; refresh f_ice before FMB.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Frontal mass balance at marine margins. Fortran gates this on
+    # `use_bmb` too — same flag, same intent (turn off at-shelf melt
+    # for EISMINT-style runs).
+    if y.p.ytopo.use_bmb
+        calc_fmb_total!(y.tpo.fmb_ref,
+                        y.bnd.fmb_shlf, y.bnd.bmb_shlf,
+                        y.tpo.H_ice, y.tpo.H_grnd, y.tpo.f_ice,
+                        y.p.ytopo.fmb_method, y.p.ytopo.fmb_scale,
+                        _RHO_ICE, _RHO_SW, _dx(y.g))
+        mbal_tendency!(y.tpo.fmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.fmb_ref, dt)
+    else
+        fill!(interior(y.tpo.fmb_ref), 0.0)
+        fill!(interior(y.tpo.fmb),     0.0)
+    end
+    apply_tendency!(y.tpo.H_ice, y.tpo.fmb, dt; adjust_mb=true)
+
+    # FMB may have moved margins; refresh f_ice before DMB.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Subgrid discharge mass balance. v1 only supports dmb_method = 0
+    # (no-op); other methods error inside the helper.
+    calc_mb_discharge!(y.tpo.dmb_ref, y.tpo.H_ice, y.tpo.z_srf,
+                       y.bnd.z_bed_sd,
+                       y.tpo.dist_grline, y.tpo.dist_margin, y.tpo.f_ice,
+                       y.p.ytopo.dmb_method, _dx(y.g),
+                       y.p.ytopo.dmb_alpha_max, y.p.ytopo.dmb_tau,
+                       y.p.ytopo.dmb_sigma_ref,
+                       y.p.ytopo.dmb_m_d, y.p.ytopo.dmb_m_r)
+    mbal_tendency!(y.tpo.dmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.dmb_ref, dt)
+    apply_tendency!(y.tpo.H_ice, y.tpo.dmb, dt; adjust_mb=true)
+
+    # DMB may have moved margins; refresh f_ice before relaxation.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Optional relaxation toward a reference state (Fortran phase 8).
+    # Skipped entirely when `topo_rel == 0`.
+    if y.p.ytopo.topo_rel != 0
+        if y.p.ytopo.topo_rel == -1
+            interior(y.tpo.tau_relax) .= interior(y.bnd.tau_relax)
+        else
+            set_tau_relax!(y.tpo.tau_relax, y.tpo.H_ice, y.tpo.f_grnd,
+                           y.tpo.mask_grz, y.bnd.H_ice_ref,
+                           y.p.ytopo.topo_rel, y.p.ytopo.topo_rel_tau)
+        end
+
+        H_ref = if y.p.ytopo.topo_rel_field == "H_ref"
+            y.bnd.H_ice_ref
+        elseif y.p.ytopo.topo_rel_field == "H_ice_n"
+            y.tpo.H_ice_n
+        else
+            error("topo_step!: unknown topo_rel_field = \"$(y.p.ytopo.topo_rel_field)\". " *
+                  "Supported: \"H_ref\", \"H_ice_n\".")
+        end
+
+        calc_G_relaxation!(y.tpo.mb_relax, y.tpo.H_ice, H_ref,
+                           y.tpo.tau_relax, dt)
+        apply_tendency!(y.tpo.H_ice, y.tpo.mb_relax, dt; adjust_mb=true)
+
+        # Refresh f_ice after relaxation.
+        calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    else
+        fill!(interior(y.tpo.mb_relax), 0.0)
+    end
 
     # Residual cleanup tendency for margin/island regularisation.
     resid_tendency!(y.tpo.mb_resid, y.tpo.H_ice, y.tpo.f_ice, y.tpo.f_grnd,
@@ -115,7 +225,12 @@ function topo_step!(y::YelmoModel, dt::Float64)
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 
     # Net mass balance applied this step.
-    interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+ interior(y.tpo.mb_resid)
+    interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+
+                              interior(y.tpo.bmb) .+
+                              interior(y.tpo.fmb) .+
+                              interior(y.tpo.dmb) .+
+                              interior(y.tpo.mb_relax) .+
+                              interior(y.tpo.mb_resid)
 
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
 
@@ -142,39 +257,36 @@ function _apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
 end
 
 # Recompute Phase-10 diagnostics from current state.
+#  - Refresh `H_grnd` (flotation diagnostic), then `f_grnd` via the
+#    CISM bilinear-interpolation subgrid scheme.
+#  - `z_srf` / `z_base` from the standard grounded vs. floating
+#    formulae, keyed off the binary `H_grnd > 0` test (subgrid
+#    `z_srf` would land in a later milestone).
 #  - `dHidt = (H_now - H_prev) / dt`           — total step rate.
 #  - `dHidt_dyn = (H_after_dyn - H_prev) / dt` — dynamic-only rate
 #    (post-advection / mask-pass, before SMB or mb_resid).
-#  - Grounded if `H * rho_ice/rho_sw > max(z_sl - z_bed, 0)`. Binary
-#    `f_grnd` (0/1) in v1; same field will hold fractional values
-#    later without schema change.
-#  - `z_srf` / `z_base` from the standard grounded vs. floating
-#    formulae.
 function _update_diagnostics!(y::YelmoModel,
                               H_prev::AbstractArray,
                               H_after_dyn::AbstractArray,
                               dt::Real)
+    calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
+                 _RHO_ICE, _RHO_SW)
+    determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd)
+
     H_ice     = interior(y.tpo.H_ice)
+    H_grnd    = interior(y.tpo.H_grnd)
     z_bed     = interior(y.bnd.z_bed)
     z_sl      = interior(y.bnd.z_sl)
     z_srf     = interior(y.tpo.z_srf)
     z_base    = interior(y.tpo.z_base)
-    f_grnd    = interior(y.tpo.f_grnd)
     dHidt     = interior(y.tpo.dHidt)
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
 
-    inv_dt   = dt > 0 ? 1.0 / dt : 0.0
+    inv_dt = dt > 0 ? 1.0 / dt : 0.0
     rho_ratio_iw = _RHO_ICE / _RHO_SW
-    rho_ratio_wi = _RHO_SW  / _RHO_ICE
 
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
-        depth_below_sl = z_sl[i, j, 1] - z_bed[i, j, 1]
-        H_floating     = depth_below_sl > 0 ? depth_below_sl * rho_ratio_wi : 0.0
-        is_grnd        = H_ice[i, j, 1] > H_floating
-
-        f_grnd[i, j, 1] = is_grnd ? 1.0 : 0.0
-
-        if is_grnd
+        if H_grnd[i, j, 1] > 0.0
             z_base[i, j, 1] = z_bed[i, j, 1]
             z_srf[i, j, 1]  = z_bed[i, j, 1] + H_ice[i, j, 1]
         else
