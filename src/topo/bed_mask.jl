@@ -5,19 +5,24 @@
 #   - `gen_mask_bed!`             — `mask_bed` from per-cell ice /
 #                                    flotation / PMP state, plus the
 #                                    grounding-line cell flag.
+#   - `calc_ice_front!`           — `mask_frnt` distinguishing
+#                                    floating, marine and grounded
+#                                    fronts plus their adjacent
+#                                    ice-free cells.
 #
-# Both kernels write Float64 fields whose values are the integer enum
-# constants from YelmoConst (`MASK_BED_*`, plus the implicit
-# `mask_grz ∈ {-2,-1,0,1,2}`).
+# All three kernels write Float64 fields whose values are integer
+# enums (`MASK_BED_*` from YelmoConst for `mask_bed`, `mask_grz ∈
+# {-2,-1,0,1,2}`, `mask_frnt ∈ {-1, 0, 1, 3}`).
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoConst: MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_PARTIAL
 
-export calc_grounding_line_zone!, gen_mask_bed!
+export calc_grounding_line_zone!, gen_mask_bed!, calc_ice_front!
 
 # Float64 forms of the enum integers — eligible for in-kernel `==`
 # comparisons against the stored CenterField values.
@@ -124,4 +129,92 @@ function gen_mask_bed!(mask_bed, f_ice, f_pmp, f_grnd, mask_grz)
         end
     end
     return mask_bed
+end
+
+# Per-side `mask_frnt` enum values, matching the integer parameters
+# in `physics/topography.f90:calc_ice_front:555-558`. The Fortran
+# routine reuses `+1` for both floating and marine fronts (with a
+# commented-out `+2 = marine` alternative); we follow the active
+# numbering.
+const _MASK_FRNT_ICE_FREE  = -1.0
+const _MASK_FRNT_FLOATING  =  1.0
+const _MASK_FRNT_MARINE    =  1.0   # same value as FLOATING in Fortran
+const _MASK_FRNT_GROUNDED  =  3.0
+const _MASK_FRNT_INTERIOR  =  0.0
+
+"""
+    calc_ice_front!(mask_frnt, f_ice, f_grnd, z_bed, z_sl) -> mask_frnt
+
+Mark the ice-front cells of the domain with an integer-valued mask:
+
+| value | meaning                                                  |
+|------:|----------------------------------------------------------|
+|  `-1` | ice-free cell adjacent to a fully-covered front cell     |
+|   `0` | interior cell (no front nearby)                          |
+|  `+1` | floating ice front, *or* marine grounded ice front       |
+|  `+3` | grounded ice front above sea level                       |
+
+A *front* cell is a fully-ice-covered cell (`f_ice == 1`) that has at
+least one direct (4-conn) neighbour with `f_ice < 1`. The cell type
+key (floating / marine / grounded) is set from `f_grnd` and the bed
+elevation vs sea level. Adjacent ice-free cells are marked `-1`.
+
+Halo handling: `f_ice` halos are filled via `fill_halo_regions!` so
+front detection at domain edges respects the grid's topology + BCs.
+The mark-adjacent-cells pass writes into the interior only; the
+ice-free flag does not propagate through the halo.
+
+Port of `physics/topography.f90:533 calc_ice_front`.
+"""
+function calc_ice_front!(mask_frnt, f_ice, f_grnd, z_bed, z_sl)
+    Mf = @view interior(mask_frnt)[:, :, 1]
+    Fg = @view interior(f_grnd)[:, :, 1]
+    Zb = @view interior(z_bed)[:, :, 1]
+    Zs = @view interior(z_sl)[:, :, 1]
+    nx, ny = size(Mf)
+
+    fill_halo_regions!(f_ice)
+
+    # Initialise to interior (0). The kernel below writes `-1` /
+    # `+1` / `+3` only at relevant cells.
+    fill!(Mf, _MASK_FRNT_INTERIOR)
+
+    @inbounds for j in 1:ny, i in 1:nx
+        # Centre cell must be fully ice-covered to be a front.
+        f_ice[i, j, 1] == 1.0 || continue
+
+        fW = f_ice[i-1, j,   1]
+        fE = f_ice[i+1, j,   1]
+        fS = f_ice[i,   j-1, 1]
+        fN = f_ice[i,   j+1, 1]
+
+        # `<` not `==` matches the Fortran `f_neighb .lt. 1.0`.
+        n_open = (fW < 1.0 ? 1 : 0) + (fE < 1.0 ? 1 : 0) +
+                 (fS < 1.0 ? 1 : 0) + (fN < 1.0 ? 1 : 0)
+        n_open == 0 && continue
+
+        # Classify the front cell type.
+        if Fg[i, j] > 0.0
+            Mf[i, j] = (Zs[i, j] <= Zb[i, j]) ?
+                       _MASK_FRNT_GROUNDED : _MASK_FRNT_MARINE
+        else
+            Mf[i, j] = _MASK_FRNT_FLOATING
+        end
+
+        # Mark the ice-free neighbours `-1`. Don't write through the
+        # halo — only interior cells.
+        if fW < 1.0 && i > 1
+            Mf[i-1, j] = _MASK_FRNT_ICE_FREE
+        end
+        if fE < 1.0 && i < nx
+            Mf[i+1, j] = _MASK_FRNT_ICE_FREE
+        end
+        if fS < 1.0 && j > 1
+            Mf[i, j-1] = _MASK_FRNT_ICE_FREE
+        end
+        if fN < 1.0 && j < ny
+            Mf[i, j+1] = _MASK_FRNT_ICE_FREE
+        end
+    end
+    return mask_frnt
 end

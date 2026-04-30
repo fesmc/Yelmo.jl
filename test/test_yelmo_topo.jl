@@ -1804,3 +1804,206 @@ end
     # NE corner: x wraps, y clamps → source (1, Nx) = 13.
     @test f[Nx+1, Nx+1, 1] == 13.0
 end
+
+# ------------------------------------------------------------------
+# Fractional ice fraction, surface elevation, ice-front mask
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_f_ice! — binary (flt_subgrid=false)" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 50e3), y=(0.0, 50e3),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice  = CenterField(g)
+    H_ice  = CenterField(g)
+    z_bed  = CenterField(g)
+    z_sl   = CenterField(g)
+
+    fill!(interior(z_bed), -500.0)   # all-floating bed
+    fill!(interior(z_sl),  0.0)
+    fill!(interior(H_ice), 0.0)
+
+    # Single ice-covered cell at centre.
+    interior(H_ice)[3, 3, 1] = 200.0
+
+    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
+                flt_subgrid = false)
+    F = interior(f_ice)
+    @test F[3, 3, 1] == 1.0
+    @test all(F[i, j, 1] == 0.0 for j in 1:Nx, i in 1:Nx if !(i == 3 && j == 3))
+end
+
+@testset "tpo: calc_f_ice! — fractional floating margin" begin
+    # 5x5 grid with a 3x3 thick floating block surrounded by ocean.
+    # Margin cells are the 8 outer cells of the 3x3 block; the centre
+    # is fully interior. With flt_subgrid=true, the margin cells
+    # should get f_ice < 1 because their thickness is less than the
+    # interior, while a thinner margin = 100 m vs interior = 200 m
+    # gives f_ice = 100/200 = 0.5.
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 50e3), y=(0.0, 50e3),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice = CenterField(g)
+    H_ice = CenterField(g)
+    z_bed = CenterField(g)
+    z_sl  = CenterField(g)
+
+    fill!(interior(z_bed), -500.0)
+    fill!(interior(z_sl),  0.0)
+    fill!(interior(H_ice), 0.0)
+
+    # Centre cell: fully covered (interior). Eight surrounding cells:
+    # margin with thinner ice. Ocean cells (corners outside 3x3 block)
+    # remain at 0.
+    @inbounds for j in 2:4, i in 2:4
+        interior(H_ice)[i, j, 1] = 100.0   # margin thickness
+    end
+    interior(H_ice)[3, 3, 1] = 200.0       # interior fully-covered cell
+
+    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
+                flt_subgrid = true)
+    F = interior(f_ice)
+
+    # Centre cell is fully interior (n_ice = 4) → f_ice = 1.
+    @test F[3, 3, 1] == 1.0
+
+    # Direct margin neighbours of centre: (2,3), (4,3), (3,2), (3,4)
+    # — each has H = 100 with at least one ice-free neighbour.
+    # Their upstream-fully-covered neighbour is (3,3) with H=200,
+    # so f_ice = 100/200 = 0.5.
+    @test F[2, 3, 1] ≈ 0.5
+    @test F[4, 3, 1] ≈ 0.5
+    @test F[3, 2, 1] ≈ 0.5
+    @test F[3, 4, 1] ≈ 0.5
+
+    # Corner cells of the 3x3 block (e.g. (2,2)): H=100, no upstream
+    # *fully-covered* (n_ice=4) neighbour — falls back on H_lim=100 m,
+    # giving f_ice = min(100/max(100, 100), 1) = 1.0.
+    @test F[2, 2, 1] ≈ 1.0
+    @test F[4, 4, 1] ≈ 1.0
+
+    # Ocean cells stay 0.
+    @test F[1, 1, 1] == 0.0
+    @test F[5, 5, 1] == 0.0
+end
+
+@testset "tpo: calc_z_srf! — grounded vs floating vs ice-free" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    z_srf = CenterField(g)
+    H_ice = CenterField(g)
+    f_ice = CenterField(g)
+    z_bed = CenterField(g)
+    z_sl  = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+    rho_ratio = rho_ice / rho_sw
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(f_ice), 1.0)
+
+    # 1. Grounded ice (bed above flotation): z_srf = z_bed + H_ice.
+    interior(z_bed)[1, 1, 1] = 100.0
+    interior(H_ice)[1, 1, 1] = 500.0
+
+    # 2. Floating ice (bed deep below flotation): z_srf = z_sl + (1-r)·H_ice.
+    interior(z_bed)[2, 1, 1] = -2000.0
+    interior(H_ice)[2, 1, 1] = 500.0
+
+    # 3. Ice-free over land: z_srf = z_bed.
+    interior(z_bed)[3, 1, 1] = 50.0
+    interior(H_ice)[3, 1, 1] = 0.0
+    interior(f_ice)[3, 1, 1] = 0.0
+
+    # 4. Ice-free over ocean: z_srf = z_sl.
+    interior(z_bed)[4, 1, 1] = -200.0
+    interior(H_ice)[4, 1, 1] = 0.0
+    interior(f_ice)[4, 1, 1] = 0.0
+
+    # 5. Partially-covered margin (f_ice < 1): H_eff = 0 →
+    #    z_srf = max(z_bed, z_sl).
+    interior(z_bed)[1, 2, 1] = -100.0
+    interior(H_ice)[1, 2, 1] = 50.0
+    interior(f_ice)[1, 2, 1] = 0.5
+
+    calc_z_srf!(z_srf, H_ice, f_ice, z_bed, z_sl, rho_ice, rho_sw)
+    Z = interior(z_srf)
+
+    @test Z[1, 1, 1] ≈ 100.0 + 500.0
+    @test Z[2, 1, 1] ≈ 0.0   + (1.0 - rho_ratio) * 500.0
+    @test Z[3, 1, 1] ≈ 50.0
+    @test Z[4, 1, 1] == 0.0    # max(z_bed=-200, z_sl=0)
+    @test Z[1, 2, 1] == 0.0    # max(z_bed=-100, z_sl=0); H_eff=0
+end
+
+@testset "tpo: calc_ice_front!" begin
+    # 6x6 grid. Configuration:
+    #   - 4x4 ice block at (2:5, 2:5)
+    #   - block is grounded marine in the south half (y ≤ 3),
+    #     grounded above SL in the north half (y ≥ 4)
+    #   - one floating-extension cell at (3, 5) sticking out — wait,
+    #     keep it simple: just test floating + marine + grounded fronts
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 6.0), y=(0.0, 6.0),
+                        topology=(Bounded, Bounded, Flat))
+    mask_frnt = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(f_ice), 0.0)
+    fill!(interior(f_grnd), 0.0)
+    fill!(interior(z_bed), -100.0)
+    fill!(interior(z_sl),  0.0)
+
+    # 4x4 fully-ice-covered block at (2:5, 2:5).
+    @inbounds for j in 2:5, i in 2:5
+        interior(f_ice)[i, j, 1] = 1.0
+    end
+
+    # South half (j = 2:3): floating (f_grnd = 0).
+    # Middle row (j = 4): grounded marine (f_grnd > 0, z_bed < z_sl).
+    # North row (j = 5): grounded above SL (f_grnd > 0, z_bed > z_sl).
+    for i in 2:5
+        interior(f_grnd)[i, 4, 1] = 1.0
+        # marine: z_bed already -100 < z_sl = 0
+        interior(f_grnd)[i, 5, 1] = 1.0
+        interior(z_bed)[i, 5, 1]  = 200.0   # above SL
+    end
+
+    calc_ice_front!(mask_frnt, f_ice, f_grnd, z_bed, z_sl)
+    M = interior(mask_frnt)
+
+    # Front cells (perimeter of the 4x4 block):
+    @test M[2, 2, 1] == 1.0    # SW: floating
+    @test M[2, 3, 1] == 1.0    # floating front (S edge)
+    @test M[5, 2, 1] == 1.0
+    @test M[2, 4, 1] == 1.0    # marine front
+    @test M[5, 4, 1] == 1.0
+    @test M[2, 5, 1] == 3.0    # grounded above SL
+    @test M[5, 5, 1] == 3.0
+    @test M[3, 5, 1] == 3.0
+
+    # Adjacent ice-free cells get -1.
+    @test M[1, 2, 1] == -1.0   # west of (2,2)
+    @test M[1, 5, 1] == -1.0
+    @test M[6, 5, 1] == -1.0
+    @test M[3, 1, 1] == -1.0   # south of (3,2)
+    @test M[3, 6, 1] == -1.0   # north of (3,5)
+
+    # Interior cells of the block (3,3) - (4,4) — those are not
+    # adjacent to ice-free, so they stay 0.
+    @test M[3, 3, 1] == 0.0
+    @test M[4, 3, 1] == 0.0
+    @test M[3, 4, 1] == 0.0
+    @test M[4, 4, 1] == 0.0
+
+    # Far-from-block cells stay 0.
+    @test M[1, 1, 1] == 0.0
+    @test M[6, 6, 1] == 0.0
+end

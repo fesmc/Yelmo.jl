@@ -73,7 +73,8 @@ export lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!
 export calving_step!
 export calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
-       calc_grounding_line_zone!, gen_mask_bed!
+       calc_grounding_line_zone!, gen_mask_bed!, calc_ice_front!,
+       calc_z_srf!
 
 # YelmoIO
 export init_output
