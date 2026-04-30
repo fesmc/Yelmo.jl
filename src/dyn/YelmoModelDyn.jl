@@ -32,13 +32,15 @@ export dyn_step!,
        calc_lateral_bc_stress_2D!,
        calc_ydyn_neff!,
        calc_cb_ref!, calc_c_bed!,
-       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
+       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
+       calc_shear_stress_3D!, calc_uxy_sia_3D!
 
 include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")
 include("basal_dragging.jl")
 include("diagnostics.jl")
+include("velocity_sia.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an

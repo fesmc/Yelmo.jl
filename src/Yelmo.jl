@@ -90,6 +90,7 @@ export calc_lateral_bc_stress_2D!
 export calc_ydyn_neff!
 export calc_cb_ref!, calc_c_bed!
 export calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
+export calc_shear_stress_3D!, calc_uxy_sia_3D!
 
 # YelmoIO
 export init_output

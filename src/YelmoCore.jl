@@ -581,6 +581,13 @@ function YelmoModel(restart_file::String, time::Float64;
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
 
+    # SIA-only solver scratch buffers; not in the dyn schema because
+    # they are recomputed every `dyn_step!` and not part of the model
+    # state. Exposed as `y.dyn.scratch.sia_tau_xz` /
+    # `y.dyn.scratch.sia_tau_yz`. See `src/dyn/velocity_sia.jl`.
+    sia_scratch = (sia_tau_xz = XFaceField(gt), sia_tau_yz = YFaceField(gt))
+    dyn = merge(dyn, (scratch = sia_scratch,))
+
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
     # boundary conditions on the domain edge. The upwind advection
     # operator reads these via Oceananigans' standard halo machinery
@@ -830,6 +837,10 @@ function compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel;
                 n_skipped += 1
                 continue
             end
+            # Skip non-Field entries (e.g. the SIA scratch substruct
+            # under `dyn.scratch`, which is a NamedTuple of buffers).
+            a_grp[k] isa AbstractField || (n_skipped += 1; continue)
+            b_grp[k] isa AbstractField || (n_skipped += 1; continue)
             af = interior(a_grp[k])
             bf = interior(b_grp[k])
             if size(af) != size(bf)

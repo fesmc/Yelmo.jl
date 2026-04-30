@@ -218,6 +218,9 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
         for fname in keys(group_nt)
             name = String(fname)
             _selected(name, gname, selection) || continue
+            # Skip non-Field entries (e.g. the SIA scratch substruct
+            # under `dyn.scratch`).
+            group_nt[fname] isa Field || continue
             dims = _spatial_dims(group_nt[fname], ylmo)
             dims === nothing && continue
             push!(selected, (gname, fname, dims))
@@ -259,6 +262,8 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel)
             nc_name = get(out.nc_names, (gname, fname), nothing)
             nc_name === nothing && continue
             haskey(ds, nc_name) || continue
+            # Skip non-Field entries (e.g. dyn.scratch).
+            group_nt[fname] isa Field || continue
 
             data = _get_data(group_nt[fname])
             sz   = size(data)
