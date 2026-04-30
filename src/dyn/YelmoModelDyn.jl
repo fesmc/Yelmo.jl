@@ -30,11 +30,13 @@ import ..YelmoCore: dyn_step!
 export dyn_step!,
        calc_driving_stress!, calc_driving_stress_gl!,
        calc_lateral_bc_stress_2D!,
+       calc_ydyn_neff!,
        calc_cb_ref!, calc_c_bed!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
 
 include("driving_stress.jl")
 include("lateral_stress.jl")
+include("neff.jl")
 include("basal_dragging.jl")
 include("diagnostics.jl")
 
@@ -121,10 +123,9 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                                y.tpo.z_srf, y.bnd.z_sl,
                                y.c.rho_ice, y.c.rho_sw, y.c.g)
 
-    # 5a. Effective pressure N_eff (milestone 3b, deferred — current
-    #     value comes from the restart load until calc_ydyn_neff!
-    #     lands in the next commit).
-    # TODO(3b commit 2): calc_ydyn_neff!(y)
+    # 5a. Effective pressure N_eff. Dispatches on `yneff.method`
+    #     ∈ [-1, 5]. Subgrid sampling (`nxi > 0`) is deferred.
+    calc_ydyn_neff!(y)
 
     # 5b. Reference till-friction coefficient `cb_tgt`.
     calc_cb_ref!(y.dyn.cb_tgt,
