@@ -298,37 +298,11 @@ Base.@kwdef struct YelmoDataParams
     pd_age_names    ::Vector{String} = ["age_iso", "depth_iso"]
 end
 yelmo_data_params(; kwargs...) = YelmoDataParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &phys  (physical constants)
-# ---------------------------------------------------------------------------
-Base.@kwdef struct PhysParams
-    sec_year    ::Float64 = 31536000.0   # [s/a]      365*24*3600
-    g           ::Float64 = 9.81         # [m/s^2]    Gravitational accel.
-    T0          ::Float64 = 273.15       # [K]        Reference freezing temperature
-    rho_ice     ::Float64 = 910.0        # [kg/m^3]   Density ice
-    rho_w       ::Float64 = 1000.0       # [kg/m^3]   Density water
-    rho_sw      ::Float64 = 1028.0       # [kg/m^3]   Density seawater
-    rho_a       ::Float64 = 3300.0       # [kg/m^3]   Density asthenosphere
-    rho_rock    ::Float64 = 2000.0       # [kg/m^3]   Density bedrock (mantle/lithosphere)
-    L_ice       ::Float64 = 333500.0     # [J/kg]     Latent heat of fusion for ice/water
-    T_pmp_beta  ::Float64 = 9.8e-8       # [K/Pa]     Greve and Blatter (2009)
-end
-phys_params(; kwargs...) = PhysParams(; kwargs...)
-
-const _EARTH_DEFAULTS = (
-    sec_year   = 31536000.0,
-    g          = 9.81,
-    T0         = 273.15,
-    rho_ice    = 910.0,
-    rho_w      = 1000.0,
-    rho_sw     = 1028.0,
-    rho_a      = 3300.0,
-    rho_rock   = 2000.0,
-    L_ice      = 333500.0,
-    T_pmp_beta = 9.8e-8,
-)
-
-earth_params(; kwargs...) = PhysParams(; _EARTH_DEFAULTS..., kwargs...)
+# Note: physical constants (rho_ice, rho_sw, g, ...) used to live here as
+# `PhysParams` / `phys_params(...)`. They've moved to the `YelmoConst` module
+# (`YelmoConstants`), which lives separately so a single instance can be
+# shared across multi-domain runs without going through model parameters.
+# Read them from `y.c` on a constructed `YelmoModel`.
 
 # ---------------------------------------------------------------------------
 # Top-level container
@@ -351,7 +325,6 @@ struct YelmoModelParameters
     yelmo_masks     ::YelmoMasksParams
     yelmo_init_topo ::YelmoInitTopoParams
     yelmo_data      ::YelmoDataParams
-    phys           ::PhysParams
 end
 """
     YelmoModelParameters(name; yelmo, ytopo, ...) -> YelmoModelParameters
@@ -361,8 +334,7 @@ parameter set and the stem of the output filename.
 # Example
 ```julia
 p = YelmoModelParameters("experiment1";
-    ydyn  = ydyn_params(solver="ssa"),
-    phys = phys_params(rho_ice=917.0),
+    ydyn = ydyn_params(solver="ssa"),
 )
 write_nml("run.nml", p)
 ```
@@ -379,11 +351,10 @@ function YelmoModelParameters(name;
     yelmo_masks     = yelmo_masks_params(),
     yelmo_init_topo = yelmo_init_topo_params(),
     yelmo_data      = yelmo_data_params(),
-    phys            = phys_params(),
 )
     return YelmoModelParameters(
         name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, ymat, ytherm,
-        yelmo_masks, yelmo_init_topo, yelmo_data, phys,
+        yelmo_masks, yelmo_init_topo, yelmo_data,
     )
 end
 
@@ -391,7 +362,7 @@ function YelmoModelParameters(filename, name)
     p = read_nml(filename)
     return YelmoModelParameters(
         name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
-        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
+        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data,
     )
 end
 
@@ -455,7 +426,6 @@ function write_nml(filename::AbstractString, p::YelmoModelParameters; overwrite:
         error("File already exists: $(filename). Use overwrite=true to overwrite.")
     end
     open(filename, "w") do io
-        write_group(io, "phys",            p.phys)
         write_group(io, "yelmo",           p.yelmo)
         write_group(io, "ytopo",           p.ytopo)
         write_group(io, "ycalv",           p.ycalv)
@@ -660,7 +630,6 @@ function read_nml(filename::AbstractString)
         yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
         yelmo_init_topo = struct_from_dict(YelmoInitTopoParams,  get_group("yelmo_init_topo")),
         yelmo_data      = struct_from_dict(YelmoDataParams,      get_group("yelmo_data")),
-        phys            = struct_from_dict(PhysParams,           get_group("phys")),
     )
 end
 
@@ -681,7 +650,7 @@ end
 
 for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
           YneffParams, YmatParams, YthermParams, YelmoMasksParams,
-          YelmoInitTopoParams, YelmoDataParams, PhysParams)
+          YelmoInitTopoParams, YelmoDataParams)
     @eval function Base.:(==)(a::$S, b::$S)
         for fname in fieldnames($S)
             getfield(a, fname) == getfield(b, fname) || return false
