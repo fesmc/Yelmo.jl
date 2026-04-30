@@ -21,6 +21,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+
 import ..YelmoCore: step!
 
 export topo_step!, advect_tracer!,
@@ -33,7 +34,9 @@ export topo_step!, advect_tracer!,
        calc_calving_vonmises_m16_ac!, merge_calving_rates!,
        lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!,
-       calving_step!
+       calving_step!,
+       calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
+       calc_grounding_line_zone!, gen_mask_bed!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -46,6 +49,8 @@ include("relaxation.jl")
 include("calving_ac.jl")
 include("lsf.jl")
 include("calving.jl")
+include("distances.jl")
+include("bed_mask.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -272,6 +277,9 @@ end
 #  - `dHidt = (H_now - H_prev) / dt`           — total step rate.
 #  - `dHidt_dyn = (H_after_dyn - H_prev) / dt` — dynamic-only rate
 #    (post-advection / mask-pass, before SMB or mb_resid).
+#  - `dist_grline` / `dist_margin` (m), `mask_grz`, `mask_bed`. The
+#    grounding-zone half-width parameter `ytopo.dist_grz` is in km
+#    in the namelist; convert to metres for the kernel.
 function _update_diagnostics!(y::YelmoModel,
                               H_prev::AbstractArray,
                               H_after_dyn::AbstractArray,
@@ -304,6 +312,18 @@ function _update_diagnostics!(y::YelmoModel,
         dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
         dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
     end
+
+    # Distance-to-feature fields (metres) and bed-state masks.
+    dx = _dx(y.g)
+    calc_distance_to_grounding_line!(y.tpo.dist_grline, y.tpo.f_grnd, dx)
+    calc_distance_to_ice_margin!(y.tpo.dist_margin,  y.tpo.f_ice,  dx)
+
+    # `dist_grz` parameter is in km; convert to metres.
+    dist_grz_m = 1e3 * y.p.ytopo.dist_grz
+    calc_grounding_line_zone!(y.tpo.mask_grz, y.tpo.dist_grline, dist_grz_m)
+
+    gen_mask_bed!(y.tpo.mask_bed, y.tpo.f_ice, y.thrm.f_pmp,
+                  y.tpo.f_grnd, y.tpo.mask_grz)
 
     return y
 end

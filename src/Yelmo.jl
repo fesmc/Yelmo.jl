@@ -51,6 +51,8 @@ export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
+       MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
 export compare_state, StateComparison
 
 # YelmoMirrorCore
@@ -70,6 +72,8 @@ export calc_calving_equil_ac!, calc_calving_threshold_ac!,
 export lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!
 export calving_step!
+export calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
+       calc_grounding_line_zone!, gen_mask_bed!
 
 # YelmoIO
 export init_output

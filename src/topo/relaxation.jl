@@ -7,9 +7,9 @@
 #   - `calc_G_relaxation!` ↔ `calc_G_relaxation` (line 916)
 #
 # `set_tau_relax!` builds the per-cell timescale field according to
-# the spatial-mask selector `topo_rel` (1..3 supported; 4 errors
-# pending the `mask_grz` port). `calc_G_relaxation!` converts that
-# timescale into a `dHdt`-shaped tendency.
+# the spatial-mask selector `topo_rel` (1..4 all supported).
+# `calc_G_relaxation!` converts that timescale into a `dHdt`-shaped
+# tendency.
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
@@ -41,8 +41,8 @@ spatial mask selector:
   - `topo_rel == 2`: floating + grounding-line ice (a grounded cell
     with at least one floating orthogonal neighbour) → `tau`.
   - `topo_rel == 3`: every cell → `tau`.
-  - `topo_rel == 4`: grounding-zone points keyed off `mask_grz` →
-    not yet ported (errors).
+  - `topo_rel == 4`: grounding-zone points (`mask_grz ∈ {0, 1}` —
+    grounding-line cells and grounded cells inside the zone) → `tau`.
 
 All other cells are set to `_TAU_OFF` (-1.0), the "no-relaxation"
 sentinel that `calc_G_relaxation!` recognises.
@@ -54,6 +54,7 @@ function set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref,
     Tau = interior(tau_relax)
     Fg  = interior(f_grnd)
     Hr  = interior(H_ref)
+    Mg  = interior(mask_grz)
     nx  = size(Tau, 1)
     ny  = size(Tau, 2)
 
@@ -88,9 +89,10 @@ function set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref,
         fill!(Tau, tau)
 
     elseif topo_rel == 4
-        error("set_tau_relax!: topo_rel = 4 not yet ported (depends on " *
-              "mask_grz from the grounding-zone diagnostic, which the " *
-              "Yelmo.jl v1 port has not yet computed).")
+        @inbounds for j in 1:ny, i in 1:nx
+            mg = Mg[i, j, 1]
+            Tau[i, j, 1] = (mg == 0.0 || mg == 1.0) ? tau : _TAU_OFF
+        end
 
     else
         # Fortran default branch: no relaxation anywhere.

@@ -5,7 +5,10 @@ using NCDatasets
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoConst: YelmoConstants,
-                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC,
+                    MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
+                    MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
+                    MASK_BED_ISLAND, MASK_BED_PARTIAL
 using ..YelmoModelPar: YelmoModelParameters
 
 export AbstractYelmoModel, YelmoModel
@@ -15,6 +18,8 @@ export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
+       MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
 export compare_state, StateComparison
 
 # ---------------------------------------------------------------------------

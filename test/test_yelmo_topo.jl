@@ -694,9 +694,19 @@ end
     set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 3, tau)
     @test all(interior(tau_relax) .== tau)
 
-    # topo_rel = 4 → not yet ported.
-    @test_throws ErrorException set_tau_relax!(tau_relax, H_ice, f_grnd,
-        mask_grz, H_ref, 4, tau)
+    # topo_rel = 4 → tau on grounding-zone cells (mask_grz ∈ {0, 1}).
+    fill!(interior(mask_grz), 2.0)             # default: out of zone
+    interior(mask_grz)[2, 2, 1] = 0.0          # GL cell
+    interior(mask_grz)[3, 3, 1] = 1.0          # grounded in zone
+    interior(mask_grz)[4, 4, 1] = -1.0         # floating in zone — NOT relaxed
+    interior(mask_grz)[5, 5, 1] = -2.0         # floating out of zone
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 4, tau)
+    T = interior(tau_relax)
+    @test T[2, 2, 1] == tau       # mask_grz = 0
+    @test T[3, 3, 1] == tau       # mask_grz = 1
+    @test T[4, 4, 1] == -1.0      # mask_grz = -1 (floating in zone, not relaxed)
+    @test T[5, 5, 1] == -1.0      # mask_grz = -2 (floating out of zone)
+    @test T[1, 1, 1] == -1.0      # mask_grz = 2 (grounded out of zone)
 end
 
 @testset "tpo: calc_G_relaxation!" begin
@@ -1429,4 +1439,220 @@ end
     @test sym_override.rho_ice == 900.0
 
     @test_throws ErrorException YelmoConstants(:bogus)
+end
+
+# ------------------------------------------------------------------
+# Distance-to-feature kernels and bed-state masks
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_distance_to_grounding_line!" begin
+    # 8x8 grid with a 4-cell-wide grounded square. dx = 1 metre to make
+    # distance arithmetic trivially auditable.
+    Nx = 8
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 8.0), y=(0.0, 8.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd  = CenterField(g)
+    dist_gl = CenterField(g)
+    dx = 1.0
+
+    fill!(interior(f_grnd), 0.0)
+    @inbounds for j in 3:6, i in 3:6
+        interior(f_grnd)[i, j, 1] = 1.0
+    end
+
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, dx; bc=:zero)
+    D = interior(dist_gl)
+
+    # 1. Grounding-line cells (grounded with floating direct neighbour)
+    #    are the perimeter of the 4x4 block: dist = 0.
+    @test D[3, 3, 1] == 0.0
+    @test D[3, 6, 1] == 0.0
+    @test D[6, 3, 1] == 0.0
+    @test D[6, 6, 1] == 0.0
+    @test D[4, 3, 1] == 0.0
+    @test D[3, 4, 1] == 0.0
+
+    # 2. Interior of the block (no floating neighbour) is grounded but
+    #    not on the GL → positive distance equal to one direct step.
+    @test D[4, 4, 1] ≈ 1.0
+    @test D[5, 5, 1] ≈ 1.0
+    @test D[4, 5, 1] ≈ 1.0
+    @test D[5, 4, 1] ≈ 1.0
+
+    # 3. Direct floating neighbour of the GL → -1 (one cell out, negated).
+    @test D[2, 4, 1] ≈ -1.0
+    @test D[7, 4, 1] ≈ -1.0
+    @test D[4, 2, 1] ≈ -1.0
+    @test D[4, 7, 1] ≈ -1.0
+
+    # 4. Diagonal floating neighbour of a GL corner → -√2 (chamfer).
+    @test D[2, 2, 1] ≈ -sqrt(2.0)
+    @test D[7, 7, 1] ≈ -sqrt(2.0)
+
+    # 5. Two cells out (direct) → ≈ -2 (chamfer routes via direct path).
+    @test D[1, 4, 1] ≈ -2.0
+    @test D[8, 4, 1] ≈ -2.0
+end
+
+@testset "tpo: calc_distance_to_grounding_line! — bc modes" begin
+    # 4x4 grid with grounded ice everywhere → no floating cells in the
+    # interior at all. With bc=:zero the boundary halo is "phantom
+    # ocean", so all edge cells are GL sources. With bc=:mirror the
+    # halo extends interior values, so no cell sees a floating
+    # neighbour and there is no GL anywhere.
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd  = CenterField(g)
+    dist_gl = CenterField(g)
+
+    fill!(interior(f_grnd), 1.0)
+
+    # bc = :zero — every edge cell becomes a GL source.
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0; bc=:zero)
+    D = interior(dist_gl)
+    @test D[1, 1, 1] == 0.0
+    @test D[1, 4, 1] == 0.0
+    @test D[4, 4, 1] == 0.0
+    @test D[2, 2, 1] ≈ 1.0   # one cell in from the edge
+
+    # bc = :mirror — halo clamps to nearest interior, so no edge cell
+    # sees a floating neighbour. Distance is +Inf everywhere.
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0; bc=:mirror)
+    D = interior(dist_gl)
+    @test all(isinf, D)
+    @test all(>(0), D)
+end
+
+@testset "tpo: calc_distance_to_ice_margin!" begin
+    # Same geometry as the GL test but using f_ice as the source flag.
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 6.0), y=(0.0, 6.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice = CenterField(g)
+    dist_mrgn = CenterField(g)
+
+    fill!(interior(f_ice), 0.0)
+    @inbounds for j in 2:5, i in 2:5
+        interior(f_ice)[i, j, 1] = 1.0
+    end
+
+    calc_distance_to_ice_margin!(dist_mrgn, f_ice, 100.0; bc=:zero)
+    D = interior(dist_mrgn)
+
+    # Ice perimeter is the margin → dist = 0.
+    @test D[2, 2, 1] == 0.0
+    @test D[2, 5, 1] == 0.0
+    @test D[5, 2, 1] == 0.0
+    @test D[5, 5, 1] == 0.0
+
+    # Interior of the ice block — at distance dx from the margin.
+    @test D[3, 3, 1] ≈ 100.0
+    @test D[4, 4, 1] ≈ 100.0
+
+    # Outside the ice block (ice-free) → negative distances.
+    @test D[1, 3, 1] ≈ -100.0
+    @test D[6, 3, 1] ≈ -100.0
+end
+
+@testset "tpo: calc_grounding_line_zone!" begin
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 60e3), y=(0.0, 60e3),
+                        topology=(Bounded, Bounded, Flat))
+    dist_gl  = CenterField(g)
+    mask_grz = CenterField(g)
+
+    # Threshold = 5 km = 5000 m. Use a column of distances spanning the
+    # bin boundaries.
+    interior(dist_gl)[1, 1, 1] = 0.0          # exactly on GL
+    interior(dist_gl)[2, 1, 1] = 3000.0       # grounded in zone
+    interior(dist_gl)[3, 1, 1] = 5000.0       # grounded at threshold (in)
+    interior(dist_gl)[4, 1, 1] = 7000.0       # grounded out of zone
+    interior(dist_gl)[1, 2, 1] = -3000.0      # floating in zone
+    interior(dist_gl)[2, 2, 1] = -5000.0      # floating at threshold (in)
+    interior(dist_gl)[3, 2, 1] = -7000.0      # floating out of zone
+
+    calc_grounding_line_zone!(mask_grz, dist_gl, 5000.0)
+    M = interior(mask_grz)
+
+    @test M[1, 1, 1] == 0.0
+    @test M[2, 1, 1] == 1.0
+    @test M[3, 1, 1] == 1.0
+    @test M[4, 1, 1] == 2.0
+    @test M[1, 2, 1] == -1.0
+    @test M[2, 2, 1] == -1.0
+    @test M[3, 2, 1] == -2.0
+end
+
+@testset "tpo: gen_mask_bed!" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    mask_bed = CenterField(g)
+    f_ice    = CenterField(g)
+    f_pmp    = CenterField(g)
+    f_grnd   = CenterField(g)
+    mask_grz = CenterField(g)
+
+    fill!(interior(f_ice),    0.0)
+    fill!(interior(f_pmp),    0.0)
+    fill!(interior(f_grnd),   0.0)
+    fill!(interior(mask_grz), 2.0)   # default: grounded out of zone
+    fill!(interior(mask_bed), -99.0) # sentinel to confirm overwrite
+
+    # Layout (one cell per bed-mask category):
+    #   (1,1): ice-free ocean  (f_ice=0, f_grnd=0)
+    #   (2,1): ice-free land   (f_ice=0, f_grnd=1)
+    #   (3,1): partial         (f_ice=0.5)
+    #   (4,1): grounding line  (mask_grz=0, regardless of other flags)
+    #   (1,2): floating ice    (f_ice=1, f_grnd=0)
+    #   (2,2): grounded frozen (f_ice=1, f_grnd=1, f_pmp=0)
+    #   (3,2): grounded stream (f_ice=1, f_grnd=1, f_pmp=0.8)
+    interior(f_grnd)[2, 1, 1] = 1.0
+
+    interior(f_ice)[3, 1, 1]  = 0.5
+
+    interior(mask_grz)[4, 1, 1] = 0.0
+
+    interior(f_ice)[1, 2, 1]  = 1.0
+
+    interior(f_ice)[2, 2, 1]  = 1.0
+    interior(f_grnd)[2, 2, 1] = 1.0
+
+    interior(f_ice)[3, 2, 1]  = 1.0
+    interior(f_grnd)[3, 2, 1] = 1.0
+    interior(f_pmp)[3, 2, 1]  = 0.8
+
+    gen_mask_bed!(mask_bed, f_ice, f_pmp, f_grnd, mask_grz)
+    Mb = interior(mask_bed)
+
+    @test Mb[1, 1, 1] == Float64(MASK_BED_OCEAN)
+    @test Mb[2, 1, 1] == Float64(MASK_BED_LAND)
+    @test Mb[3, 1, 1] == Float64(MASK_BED_PARTIAL)
+    @test Mb[4, 1, 1] == Float64(MASK_BED_GRLINE)
+    @test Mb[1, 2, 1] == Float64(MASK_BED_FLOAT)
+    @test Mb[2, 2, 1] == Float64(MASK_BED_FROZEN)
+    @test Mb[3, 2, 1] == Float64(MASK_BED_STREAM)
+
+    # Grounding-line dominates other states.
+    interior(mask_grz)[1, 2, 1] = 0.0
+    gen_mask_bed!(mask_bed, f_ice, f_pmp, f_grnd, mask_grz)
+    Mb = interior(mask_bed)
+    @test Mb[1, 2, 1] == Float64(MASK_BED_GRLINE)
+end
+
+@testset "tpo: MASK_BED_* enum values" begin
+    @test MASK_BED_OCEAN   == 0
+    @test MASK_BED_LAND    == 1
+    @test MASK_BED_FROZEN  == 2
+    @test MASK_BED_STREAM  == 3
+    @test MASK_BED_GRLINE  == 4
+    @test MASK_BED_FLOAT   == 5
+    @test MASK_BED_ISLAND  == 6
+    @test MASK_BED_PARTIAL == 7
 end
