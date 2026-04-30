@@ -9,6 +9,7 @@ include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
 include("YelmoMirrorCoreFields.jl")
 include("topo/YelmoModelTopo.jl")
+include("dyn/YelmoModelDyn.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
@@ -18,6 +19,7 @@ using .YelmoModelPar
 using .YelmoCore
 using .YelmoMirrorCore
 using .YelmoModelTopo
+using .YelmoModelDyn
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -80,6 +82,9 @@ export calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
        calc_f_grnd_pinning_points!, calc_grounded_fractions!
 export extend_floating_slab!, calc_dynamic_ice_fields!
 export update_diagnostics!
+
+# YelmoModelDyn
+export dyn_step!
 
 # YelmoIO
 export init_output

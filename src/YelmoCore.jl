@@ -724,7 +724,7 @@ function therm_step! end
 # the C API instead of the per-phase chain.
 function step!(y::YelmoModel, dt::Float64)
     topo_step!(y, dt)
-    # dyn_step!(y,   dt)   — milestone 3
+    dyn_step!(y, dt)
     # mat_step!(y,   dt)   — milestone 4
     # therm_step!(y, dt)   — milestone 5
     return y

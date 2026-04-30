@@ -134,9 +134,13 @@ end
 @testset "tpo: mask_ice post-step pass" begin
     @assert isfile(RESTART_PATH) "Restart fixture not found at $(RESTART_PATH)"
 
+    # `ydyn.solver = "fixed"` so dyn_step! is a no-op; this test only
+    # exercises topo_step!'s mask handling. Other solvers error in 3a.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
+                   p      = YelmoModelParameters("tpo-mask-test";
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -327,9 +331,12 @@ end
 @testset "tpo: real-restart 5-step smoke test" begin
     @assert isfile(RESTART_PATH)
 
+    # `ydyn.solver = "fixed"`: this smoke test only exercises topo_step!.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
+                   p      = YelmoModelParameters("tpo-smoke";
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -397,9 +404,12 @@ end
 @testset "tpo: SMB conservation (slab + prescribed melt)" begin
     @assert isfile(RESTART_PATH)
 
+    # `ydyn.solver = "fixed"`: SMB-only conservation, no velocity update.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smb_test_"),
                    alias  = "tpo-smb-test",
+                   p      = YelmoModelParameters("tpo-smb-test";
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -490,9 +500,12 @@ end
 @testset "tpo: BMB conservation (slab + uniform basal melt)" begin
     @assert isfile(RESTART_PATH)
 
+    # `ydyn.solver = "fixed"`: BMB-only conservation, no velocity update.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_bmb_test_"),
                    alias  = "tpo-bmb-test",
+                   p      = YelmoModelParameters("tpo-bmb-test";
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -881,7 +894,10 @@ end
         topo_rel_tau   = 5.0,       # 5-yr timescale
         topo_rel_field = "H_ref",
     )
-    p = YelmoModelParameters("tpo-relax-test"; ytopo = p_ytopo)
+    # `ydyn.solver = "fixed"`: relaxation kernel only, no velocity solve.
+    p = YelmoModelParameters("tpo-relax-test";
+                             ytopo = p_ytopo,
+                             ydyn  = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"))
 
     y = YelmoModel(RESTART_PATH, 0.0;
                    p      = p,
@@ -1212,7 +1228,7 @@ end
 # Calving (phase 7) — kernel-level + end-to-end smoke tests.
 # ------------------------------------------------------------------
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params
+using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params, ydyn_params
 
 # Helper: tiny Bounded grid for kernel-level calving tests.
 _calv_grid(nx, ny; dx=1.0) = RectilinearGrid(size=(nx, ny),
@@ -1414,6 +1430,7 @@ end
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
                              calv_grnd_method="zero", dt_lsf=0.0),
+        ydyn  = ydyn_params(solver="fixed"),
     )
     y = YelmoModel(RESTART_PATH, 0.0; alias="calv-kill", p=p, strict=false)
 
@@ -1461,6 +1478,7 @@ end
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16"),
+        ydyn  = ydyn_params(solver="fixed"),
     )
     y_vm = YelmoModel(RESTART_PATH, 0.0; alias="calv-vm",
                       p=p_vm, strict=false)
@@ -1472,6 +1490,7 @@ end
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="bogus"),
+        ydyn  = ydyn_params(solver="fixed"),
     )
     y_b = YelmoModel(RESTART_PATH, 0.0; alias="calv-bogus",
                     p=p_bogus, strict=false)
