@@ -1354,3 +1354,29 @@ end
     fill!(interior(y_b.bnd.smb_ref), 0.0)
     @test_throws ErrorException Yelmo.step!(y_b, 1.0)
 end
+
+@testset "model: YelmoConstants plumbing" begin
+    # Default constants land on `y.c`.
+    y = YelmoModel(RESTART_PATH, 0.0; alias="c-default", strict=false)
+    @test y.c isa YelmoConstants
+    @test y.c.rho_ice == 910.0
+    @test y.c.rho_sw  == 1028.0
+    @test y.c.g       == 9.81
+
+    # Override via the `c=` keyword; same instance can be shared.
+    custom = YelmoConstants(rho_ice=917.0, rho_sw=1027.0)
+    y1 = YelmoModel(RESTART_PATH, 0.0; alias="c-shared-1",
+                    c=custom, strict=false)
+    y2 = YelmoModel(RESTART_PATH, 0.0; alias="c-shared-2",
+                    c=custom, strict=false)
+    @test y1.c === custom
+    @test y2.c === custom
+    @test y1.c.rho_ice == 917.0
+    @test y2.c.rho_ice == 917.0
+
+    # The masked-cell enums live in YelmoConst now; the values match
+    # what YelmoCore re-exports for back-compat.
+    @test MASK_ICE_NONE    == 0
+    @test MASK_ICE_FIXED   == 1
+    @test MASK_ICE_DYNAMIC == 2
+end

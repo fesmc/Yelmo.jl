@@ -91,7 +91,7 @@ function calving_step!(y::YelmoModel, dt::Float64)
 
     # 2. Refresh grounding fractions including ac-stagger.
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
-                 _RHO_ICE, _RHO_SW)
+                 y.c.rho_ice, y.c.rho_sw)
     determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd;
                                   f_grnd_acx = y.tpo.f_grnd_acx,
                                   f_grnd_acy = y.tpo.f_grnd_acy)

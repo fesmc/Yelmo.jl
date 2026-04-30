@@ -4,6 +4,8 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using NCDatasets
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
+using ..YelmoConst: YelmoConstants,
+                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 using ..YelmoModelPar: YelmoModelParameters
 
 export AbstractYelmoModel, YelmoModel
@@ -25,12 +27,9 @@ const XFACE_VARIABLES = ["ux_s", "ux_b", "ux", r".*_acx$"]
 const YFACE_VARIABLES = ["uy_s", "uy_b", "uy", r".*_acy$"]
 const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
 
-# Per-cell ice evolution mask values (`bnd.mask_ice`).
-# Stored as Float64 in the field so they round-trip through Oceananigans
-# CenterField storage; the values themselves are integers.
-const MASK_ICE_NONE    = 0  # H_ice forced to 0
-const MASK_ICE_FIXED   = 1  # H_ice held at its current value
-const MASK_ICE_DYNAMIC = 2  # H_ice evolves freely
+# Per-cell ice evolution mask values (`bnd.mask_ice`) — defined in
+# YelmoConst and re-exported here for back-compat with existing call
+# sites that import from YelmoCore.
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -320,6 +319,7 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     rundir::String
     time::Float64
     p::P
+    c::YelmoConstants
     g::RectilinearGrid
     gt::RectilinearGrid
     gr::RectilinearGrid
@@ -335,12 +335,16 @@ end
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
 
 """
-    YelmoModel(restart_file, time; alias, rundir, p, groups, strict)
+    YelmoModel(restart_file, time; alias, rundir, p, c, groups, strict)
 
 Construct a `YelmoModel` whose grids and field values are read from a NetCDF
 restart file. Variable layout is taken from `src/variables/model/` markdown
 tables. The model parameters `p` are passed through verbatim and may be
 `nothing`, a `YelmoModelParameters`, or any user object.
+
+The physical constants `c` default to `YelmoConstants()` (Yelmo Fortran
+defaults). The struct is immutable, so the same `c` instance can be safely
+shared across multiple `YelmoModel`s when the physics is identical.
 
 `groups` selects which component groups to load from the restart (default:
 all six). `strict=true` (default) errors if a variable in a loaded group
@@ -351,6 +355,7 @@ function YelmoModel(restart_file::String, time::Float64;
                     alias::String = "ymodel1",
                     rundir::String = "./",
                     p = nothing,
+                    c::YelmoConstants = YelmoConstants(),
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
                     strict::Bool = true)
 
@@ -386,7 +391,7 @@ function YelmoModel(restart_file::String, time::Float64;
     # without per-cell branching in the kernel.
     haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = _dirichlet_2d_field(g, 0.0),)))
 
-    y = YelmoModel(alias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
+    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 
     # Default mask_ice to all-dynamic before load_state!. If the restart
     # file carries `mask_ice`, load_state! overwrites this; otherwise the

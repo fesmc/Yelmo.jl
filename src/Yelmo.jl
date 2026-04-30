@@ -2,6 +2,7 @@ module Yelmo
 
 # Sub-modules
 include("YelmoMeta.jl")
+include("YelmoConst.jl")
 include("YelmoPar.jl")
 include("YelmoModelPar.jl")
 include("YelmoCore.jl")
@@ -11,6 +12,7 @@ include("topo/YelmoModelTopo.jl")
 include("YelmoIO.jl")
 
 using .YelmoMeta
+using .YelmoConst
 using .YelmoPar
 using .YelmoModelPar
 using .YelmoCore
@@ -22,6 +24,10 @@ using .YelmoIO
 
 # YelmoMeta
 export VariableMeta, parse_variable_table
+
+# YelmoConst
+export YelmoConstants, yelmo_constants, earth_constants
+# (MASK_ICE_* are also exported from YelmoCore for back-compat — see below.)
 
 # YelmoPar
 export YelmoParameters
