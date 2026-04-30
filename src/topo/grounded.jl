@@ -20,11 +20,20 @@ export calc_H_grnd!, determine_grounded_fractions!,
 """
     calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw) -> H_grnd
 
-Flotation diagnostic: `H_grnd = H_ice - max(z_sl - z_bed, 0) * rho_sw / rho_ice`.
-Positive ⇒ grounded (anchored to bed); negative ⇒ floating.
+Flotation diagnostic. Two-branch formula matching
+`physics/topography.f90:806 calc_H_grnd`:
 
-Lightweight helper; no neighbour stencils. Mirrors the scattered
-formula used throughout `yelmo_topography.f90`.
+  - Bed below sea level (`z_sl > z_bed`):
+    `H_grnd = H_ice - (z_sl - z_bed) · rho_sw/rho_ice`
+    — overburden minus water-column thickness.
+  - Bed at or above sea level (`z_sl ≤ z_bed`):
+    `H_grnd = H_ice + (z_bed - z_sl)`
+    — ice thickness plus bed elevation above sea level. Ensures
+    ice-free land also has `H_grnd > 0` so it classifies as
+    grounded in subsequent kernels.
+
+Positive ⇒ grounded (anchored to bed or above-SL land); negative ⇒
+floating. Lightweight helper; no neighbour stencils.
 """
 function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
                       rho_ice::Real, rho_sw::Real)
@@ -32,11 +41,12 @@ function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
     H   = interior(H_ice)
     Zb  = interior(z_bed)
     Zsl = interior(z_sl)
-    rho_ratio = rho_sw / rho_ice
+    rho_sw_ice = rho_sw / rho_ice
     @inbounds for j in axes(Hg, 2), i in axes(Hg, 1)
-        depth   = Zsl[i, j, 1] - Zb[i, j, 1]
-        H_float = depth > 0.0 ? depth * rho_ratio : 0.0
-        Hg[i, j, 1] = H[i, j, 1] - H_float
+        depth = Zsl[i, j, 1] - Zb[i, j, 1]
+        Hg[i, j, 1] = depth > 0.0 ?
+            H[i, j, 1] - rho_sw_ice * depth :
+            H[i, j, 1] + (Zb[i, j, 1] - Zsl[i, j, 1])
     end
     return H_grnd
 end

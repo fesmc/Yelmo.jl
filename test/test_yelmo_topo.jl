@@ -211,6 +211,119 @@ end
 # Real-restart smoke test: 5 steps, mass conservation accounting
 # ------------------------------------------------------------------
 
+const NML_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/yelmo_Greenland_rembo.nml"
+
+@testset "tpo: post-load diagnostic consistency" begin
+    # Recompute every diagnostic tpo field from the loaded prognostic
+    # state and verify it matches what the Fortran restart wrote --
+    # i.e. the Julia diagnostic chain reproduces the Fortran reference
+    # to numerical tolerance for a static configuration where no
+    # topography has changed since the restart was written.
+    #
+    # Loads the actual run namelist so parameter-sensitive kernels
+    # (grad_lim, gl_sep, etc.) match the Fortran configuration that
+    # produced the restart.
+    @assert isfile(RESTART_PATH)
+    @assert isfile(NML_PATH)
+
+    p = Yelmo.YelmoModelPar.read_nml(NML_PATH)
+    y = YelmoModel(RESTART_PATH, 0.0;
+                   rundir = mktempdir(; prefix="tpo_diag_"),
+                   alias  = "tpo-diag-consistency",
+                   p      = p,
+                   groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+                   strict = false)
+
+    # Snapshot diagnostic fields as written by Fortran.
+    fields = (:H_grnd, :f_grnd, :f_grnd_acx, :f_grnd_acy, :f_grnd_pin,
+              :z_srf, :z_base,
+              :dzsdx, :dzsdy, :dHidx, :dHidy, :dzbdx, :dzbdy,
+              :mask_bed, :mask_frnt,
+              :H_ice_dyn, :f_ice_dyn,
+              :f_ice)
+    snap = NamedTuple{fields}(copy(interior(getfield(y.tpo, k))) for k in fields)
+
+    update_diagnostics!(y)
+
+    # Helper: relative-L∞ vs the Fortran snapshot. Falls back to plain
+    # max-abs for fields where the snapshot is identically zero.
+    function rel_linf(now::AbstractArray, ref::AbstractArray)
+        max_diff = maximum(abs.(now .- ref))
+        max_ref  = maximum(abs.(ref))
+        return max_ref > 0 ? max_diff / max_ref : max_diff
+    end
+
+    # --- Tight: fully deterministic per-cell formulas. H_grnd, z_srf,
+    # z_base depend only on H_ice / f_ice / z_bed / z_sl, so any
+    # mismatch is at the level of Float32→Float64 NetCDF rounding.
+    @test rel_linf(interior(y.tpo.H_grnd), snap.H_grnd) < 1e-6
+    @test rel_linf(interior(y.tpo.z_srf),  snap.z_srf)  < 1e-6
+    @test rel_linf(interior(y.tpo.z_base), snap.z_base) < 1e-6
+    @test rel_linf(interior(y.tpo.f_ice),  snap.f_ice)  < 1e-12
+
+    # H_ice_dyn / f_ice_dyn under the default "floating" ssa_lat_bc
+    # is pass-through; matches exactly.
+    @test rel_linf(interior(y.tpo.H_ice_dyn), snap.H_ice_dyn) < 1e-12
+    @test rel_linf(interior(y.tpo.f_ice_dyn), snap.f_ice_dyn) < 1e-12
+
+    # rel_linf restricted to the inner grid (drops boundary face row
+    # and column on each side).
+    function rel_linf_inner(now, ref)
+        nx, ny = size(now, 1), size(now, 2)
+        slc = (now .- ref)[2:nx-1, 2:ny-1, :]
+        max_diff = maximum(abs.(slc))
+        max_ref  = maximum(abs.(ref[2:nx-1, 2:ny-1, :]))
+        return max_ref > 0 ? max_diff / max_ref : max_diff
+    end
+
+    # --- Subgrid grounded fractions, gl_sep = 1 per the namelist.
+    # Linear interpolation is closed-form deterministic on the aa
+    # node. The Fortran kernel duplicates the easternmost / northern-
+    # most face row of f_grnd_acx / acy from its inward neighbour
+    # for aesthetic continuity (`f_grnd_x[nx,:] = f_grnd_x[nx-1,:]`),
+    # which our Oceananigans halo-clamp produces as a binary value
+    # instead — compare interior only.
+    @test rel_linf(interior(y.tpo.f_grnd),     snap.f_grnd)     < 1e-6
+    @test rel_linf_inner(interior(y.tpo.f_grnd_acx), snap.f_grnd_acx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.f_grnd_acy), snap.f_grnd_acy) < 1e-3
+
+    # f_grnd_pin: P&D 2012 formula, per-cell deterministic.
+    @test rel_linf(interior(y.tpo.f_grnd_pin), snap.f_grnd_pin) < 1e-6
+
+    # --- Bed-state masks: per-cell decision trees, exact match
+    # expected for the front mask. `mask_bed` differs at a handful
+    # of domain-edge cells where Fortran's chained
+    # `compute_distance_to_mask` post-pass reclassifies a few
+    # boundary cells as on-the-GL; that helper isn't shipped in
+    # the public Yelmo source we port from, so we tolerate a small
+    # number of disagreements here (≤ 0.5% of cells).
+    @test interior(y.tpo.mask_frnt) == snap.mask_frnt
+    let n_diff = count(interior(y.tpo.mask_bed) .!= snap.mask_bed),
+        n_tot = length(snap.mask_bed)
+        @test n_diff / n_tot < 5e-3
+    end
+
+    # --- Gradients: centered diff with grad_lim clamp. The
+    # easternmost / northernmost face row may differ from the
+    # Fortran restart's edge-extension fix-up at "infinite"
+    # boundaries (we use halo-clamp ⇒ 0 there); compare interior
+    # only, matching the Fortran kernel on i ∈ 2..Nx-1, j ∈ 2..Ny-1.
+    @test rel_linf_inner(interior(y.tpo.dzsdx), snap.dzsdx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzsdy), snap.dzsdy) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dHidx), snap.dHidx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dHidy), snap.dHidy) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzbdx), snap.dzbdx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzbdy), snap.dzbdy) < 1e-3
+
+    # --- Not asserted: dist_grline, dist_margin, mask_grz.
+    # The Fortran restart's dist_grline is dominated by a -1e9 m
+    # sentinel for floating cells (calc_distances=FALSE was used,
+    # plus an unported `compute_distance_to_mask` post-pass) rather
+    # than the chamfer-distance values our kernel produces;
+    # dist_margin in this restart is identically zero. mask_grz is
+    # binned from dist_grline so it inherits the disagreement.
+end
+
 @testset "tpo: real-restart 5-step smoke test" begin
     @assert isfile(RESTART_PATH)
 
@@ -836,12 +949,14 @@ end
 
     rho_ice, rho_sw = 910.0, 1028.0
 
-    # 1. Bed above sea level: H_grnd = H_ice (no flotation contribution).
+    # 1. Bed above sea level: H_grnd = H_ice + (z_bed - z_sl).
+    # Includes the elevation-above-SL term so ice-free land also
+    # classifies as grounded (matches Fortran's two-branch formula).
     fill!(interior(H_ice), 500.0)
     fill!(interior(z_bed), 100.0)
     fill!(interior(z_sl),    0.0)
     calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw)
-    @test all(interior(H_grnd) .≈ 500.0)
+    @test all(interior(H_grnd) .≈ 600.0)   # 500 + (100 - 0)
 
     # 2. Thin shelf in deep water: H_grnd = H_ice - depth * rho_sw/rho_ice < 0.
     fill!(interior(H_ice),  100.0)
@@ -2013,17 +2128,20 @@ end
 # ------------------------------------------------------------------
 
 @testset "tpo: calc_gradient_acx! — interior linear field" begin
-    # Linear field var = a·x: gradient should equal a everywhere
-    # interior. Boundary faces with default Neumann clamp BC give 0
-    # (halo = first-interior, so the difference vanishes).
+    # Linear field var = a·x: with the Yelmo convention
+    # (`dvardx[i] = (var[i+1] - var[i]) / dx`), the gradient should
+    # equal `a` for every interior face index `i = 1..Nx-1`. The
+    # easternmost face index `i = Nx` reads `var[Nx+1]` from the
+    # halo; with default Neumann clamp this returns `var[Nx]`, so
+    # `dvardx[Nx] = 0`.
     Nx = 8
     dx = 1.0
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, Nx*dx), y=(0.0, Nx*dx),
                         topology=(Bounded, Bounded, Flat))
-    var   = CenterField(g)
-    f_ice = CenterField(g)
-    dvardx = XFaceField(g)
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)   # Yelmo schema: dzsdx etc. are Center fields
 
     a = 2.5
     fill!(interior(f_ice), 1.0)
@@ -2032,15 +2150,11 @@ end
     end
 
     calc_gradient_acx!(dvardx, var, f_ice, dx)
-
-    # Interior x-faces (i = 2:Nx) sit between fully covered cells;
-    # gradient = a.
     Dx = interior(dvardx)
-    @test all(Dx[i, j, 1] ≈ a for j in 1:Nx, i in 2:Nx)
 
-    # West and east boundary faces: Neumann clamp ⇒ gradient = 0.
-    @test all(Dx[1,    j, 1] == 0.0 for j in 1:Nx)
-    @test all(Dx[Nx+1, j, 1] == 0.0 for j in 1:Nx)
+    @test all(Dx[i, j, 1] ≈ a for j in 1:Nx, i in 1:Nx-1)
+    # Eastern boundary face at i=Nx: Neumann clamp ⇒ gradient = 0.
+    @test all(Dx[Nx, j, 1] == 0.0 for j in 1:Nx)
 end
 
 @testset "tpo: calc_gradient_acy! — interior linear field" begin
@@ -2049,9 +2163,9 @@ end
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, Nx*dy), y=(0.0, Nx*dy),
                         topology=(Bounded, Bounded, Flat))
-    var   = CenterField(g)
-    f_ice = CenterField(g)
-    dvardy = YFaceField(g)
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardy = CenterField(g)
 
     b = -1.5
     fill!(interior(f_ice), 1.0)
@@ -2061,9 +2175,8 @@ end
 
     calc_gradient_acy!(dvardy, var, f_ice, dy)
     Dy = interior(dvardy)
-    @test all(Dy[i, j, 1] ≈ b for j in 2:Nx, i in 1:Nx)
-    @test all(Dy[i, 1,    1] == 0.0 for i in 1:Nx)
-    @test all(Dy[i, Nx+1, 1] == 0.0 for i in 1:Nx)
+    @test all(Dy[i, j, 1] ≈ b for j in 1:Nx-1, i in 1:Nx)
+    @test all(Dy[i, Nx, 1] == 0.0 for i in 1:Nx)
 end
 
 @testset "tpo: calc_gradient_acx! — grad_lim clamp + zero_outside" begin
@@ -2072,9 +2185,9 @@ end
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, Nx*dx), y=(0.0, Nx*dx),
                         topology=(Bounded, Bounded, Flat))
-    var   = CenterField(g)
-    f_ice = CenterField(g)
-    dvardx = XFaceField(g)
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)
 
     # Steep ramp.
     fill!(interior(f_ice), 1.0)
@@ -2085,25 +2198,23 @@ end
     # Without clamp, raw gradient = 100/dx = 100. With grad_lim=10,
     # output is clamped to 10.
     calc_gradient_acx!(dvardx, var, f_ice, dx; grad_lim=10.0)
-    @test all(interior(dvardx)[i, j, 1] <= 10.0 + 1e-9
-              for j in 1:Nx, i in 1:Nx+1)
-    @test all(interior(dvardx)[i, j, 1] >= -10.0 - 1e-9
-              for j in 1:Nx, i in 1:Nx+1)
+    Dx = interior(dvardx)
+    @test all(Dx[i, j, 1] <= 10.0 + 1e-9 for j in 1:Nx, i in 1:Nx)
+    @test all(Dx[i, j, 1] >= -10.0 - 1e-9 for j in 1:Nx, i in 1:Nx)
 
-    # zero_outside path: mark (3, j) as ice-free. Faces (3, j) and
-    # (4, j) read aa-cell (3, *) with f_ice < 1, so V=0 substitution
-    # fires.
+    # zero_outside path: mark cell (3, j) as partial cover. Faces
+    # (2, j) and (3, j) both touch this cell.
     @inbounds for j in 1:Nx
-        interior(f_ice)[3, j, 1] = 0.5  # < 1 ⇒ partial cover
+        interior(f_ice)[3, j, 1] = 0.5
     end
     calc_gradient_acx!(dvardx, var, f_ice, dx; zero_outside=true)
     Dx = interior(dvardx)
-    # Face i=3 between aa-cells (2) and (3). With zero_outside, V0 =
-    # var[2] = 200, V1 = 0 → grad = -200/1 = -200.
-    @test Dx[3, 2, 1] ≈ -200.0
-    # Face i=4 between aa-cells (3) and (4). V0 = 0, V1 = var[4] = 400 →
-    # grad = 400.
-    @test Dx[4, 2, 1] ≈ 400.0
+    # Face i=2 between (2) and (3). var[2]=200, var[3]=300, but
+    # cell (3) has f_ice<1 → V1 = 0, V0 = 200, grad = (0 - 200)/1 = -200.
+    @test Dx[2, 2, 1] ≈ -200.0
+    # Face i=3 between (3) and (4). var[3]=300 → V0 = 0, var[4]=400 →
+    # grad = (400 - 0)/1 = 400.
+    @test Dx[3, 2, 1] ≈ 400.0
 end
 
 @testset "tpo: calc_f_grnd_subgrid_linear!" begin

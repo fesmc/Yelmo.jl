@@ -41,7 +41,8 @@ export topo_step!, advect_tracer!,
        calc_gradient_acx!, calc_gradient_acy!,
        calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
        calc_f_grnd_pinning_points!, calc_grounded_fractions!,
-       extend_floating_slab!, calc_dynamic_ice_fields!
+       extend_floating_slab!, calc_dynamic_ice_fields!,
+       update_diagnostics!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -255,6 +256,28 @@ function topo_step!(y::YelmoModel, dt::Float64)
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
 
     y.time += dt
+    return y
+end
+
+"""
+    update_diagnostics!(y::YelmoModel) -> y
+
+Recompute every diagnostic `tpo` field from the current prognostic
+state (`H_ice` plus `bnd` inputs `z_bed`, `z_sl`, `f_pmp`, `z_bed_sd`)
+without advancing time. Refreshes `f_ice` first (so the rest of the
+diagnostic chain sees a consistent ice cover), then runs the same
+diagnostic body that fires at the end of `topo_step!`.
+
+`dHidt` and `dHidt_dyn` come out as zero since `dt = 0`. Useful to
+materialise diagnostics after `load_state!` for restart files that
+omit some derived fields, and as a regression check that the Julia
+diagnostic chain reproduces what the Fortran reference wrote into a
+restart.
+"""
+function update_diagnostics!(y::YelmoModel)
+    calc_f_ice!(y)
+    H = copy(interior(y.tpo.H_ice))
+    _update_diagnostics!(y, H, H, 0.0)
     return y
 end
 

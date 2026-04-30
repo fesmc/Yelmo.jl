@@ -25,23 +25,30 @@ using ..YelmoCore: fill_corner_halos!
 
 export calc_gradient_acx!, calc_gradient_acy!
 
-# Per-XFace gradient kernel. Oceananigans XFace index `i` corresponds
-# to the face between aa-cells (i-1) and (i); the gradient there is
-# `(var[i] - var[i-1]) / dx`. With `zero_outside`, partially-covered
-# (`f_ice < 1`) aa-cells are clipped to 0 before differencing — used
-# for `dHidx` / `dHidy` so the ice thickness drops cleanly to 0 at
-# the margin. `margin2nd` switches to a 2nd-order upwind difference
-# at ice/ocean margins (Saito et al. 2007), which reduces
-# margin-thickness bias in the SIA driving stress.
+# Per-cell gradient kernel using the Yelmo CenterField storage
+# convention for ac-staggered diagnostics: `dvardx[i, j]` is the
+# *east* face of aa-cell (i, j), i.e. the face between aa-cells
+# (i, j) and (i+1, j). The gradient there is
+# `(var[i+1] - var[i]) / dx`. This matches the Fortran reference's
+# face-indexing convention used by `calc_gradient_acx` in
+# `yelmo_tools.f90` and the `dzsdx`/`dHidx`/`dzbdx` schema entries
+# in `yelmo-variables-ytopo.md`, which are loaded as plain Center
+# fields (no `_acx` suffix → no XFace allocation).
+#
+# `zero_outside` clips partially-covered (`f_ice < 1`) aa-cells to 0
+# before differencing — used for `dHidx`/`dHidy` so the ice thickness
+# drops cleanly to 0 at the margin. `margin2nd` switches to a
+# 2nd-order upwind difference at ice/ocean margins (Saito et al. 2007),
+# which reduces margin-thickness bias in the SIA driving stress.
 @inline function _gradient_acx_kernel(i::Int, j::Int, k::Int,
                                        var, f_ice,
                                        dx::Float64,
                                        margin2nd::Bool,
                                        zero_outside::Bool)
-    V0 = var[i-1, j, k]
-    V1 = var[i,   j, k]
-    f0 = f_ice[i-1, j, 1]
-    f1 = f_ice[i,   j, 1]
+    V0 = var[i,   j, k]
+    V1 = var[i+1, j, k]
+    f0 = f_ice[i,   j, 1]
+    f1 = f_ice[i+1, j, 1]
 
     if zero_outside
         f0 < 1.0 && (V0 = 0.0)
@@ -51,24 +58,26 @@ export calc_gradient_acx!, calc_gradient_acy!
     grad = (V1 - V0) / dx
 
     if margin2nd
-        # Ice on left, ice-free on right: use upstream (i-1, i-2).
+        # Ice on left (centre cell), ice-free on right: 2nd-order
+        # upstream stencil reaching into (i-1, j) on the ice side.
         if f0 == 1.0 && f1 < 1.0
-            f_far = f_ice[i-2, j, 1]
+            f_far = f_ice[i-1, j, 1]
             if f_far == 1.0
-                Va = var[i,   j, k]; zero_outside && f1 < 1.0 && (Va = 0.0)
-                Vb = var[i-1, j, k]
-                Vc = var[i-2, j, k]
+                Va = var[i+1, j, k]; zero_outside && f1 < 1.0 && (Va = 0.0)
+                Vb = var[i,   j, k]
+                Vc = var[i-1, j, k]
                 grad = (Vc - 4.0*Vb + 3.0*Va) / dx
             else
                 grad = 0.0
             end
         elseif f0 < 1.0 && f1 == 1.0
-            # Ice on right, ice-free on left: use upstream (i, i+1).
-            f_far = f_ice[i+1, j, 1]
+            # Ice on right, ice-free on left: 2nd-order stencil
+            # reaching into (i+2, j).
+            f_far = f_ice[i+2, j, 1]
             if f_far == 1.0
-                Va = var[i-1, j, k]; zero_outside && f0 < 1.0 && (Va = 0.0)
-                Vb = var[i,   j, k]
-                Vc = var[i+1, j, k]
+                Va = var[i,   j, k]; zero_outside && f0 < 1.0 && (Va = 0.0)
+                Vb = var[i+1, j, k]
+                Vc = var[i+2, j, k]
                 grad = -(Vc - 4.0*Vb + 3.0*Va) / dx
             else
                 grad = 0.0
@@ -84,10 +93,10 @@ end
                                        dy::Float64,
                                        margin2nd::Bool,
                                        zero_outside::Bool)
-    V0 = var[i, j-1, k]
-    V1 = var[i, j,   k]
-    f0 = f_ice[i, j-1, 1]
-    f1 = f_ice[i, j,   1]
+    V0 = var[i, j,   k]
+    V1 = var[i, j+1, k]
+    f0 = f_ice[i, j,   1]
+    f1 = f_ice[i, j+1, 1]
 
     if zero_outside
         f0 < 1.0 && (V0 = 0.0)
@@ -98,21 +107,21 @@ end
 
     if margin2nd
         if f0 == 1.0 && f1 < 1.0
-            f_far = f_ice[i, j-2, 1]
+            f_far = f_ice[i, j-1, 1]
             if f_far == 1.0
-                Va = var[i, j,   k]; zero_outside && f1 < 1.0 && (Va = 0.0)
-                Vb = var[i, j-1, k]
-                Vc = var[i, j-2, k]
+                Va = var[i, j+1, k]; zero_outside && f1 < 1.0 && (Va = 0.0)
+                Vb = var[i, j,   k]
+                Vc = var[i, j-1, k]
                 grad = (Vc - 4.0*Vb + 3.0*Va) / dy
             else
                 grad = 0.0
             end
         elseif f0 < 1.0 && f1 == 1.0
-            f_far = f_ice[i, j+1, 1]
+            f_far = f_ice[i, j+2, 1]
             if f_far == 1.0
-                Va = var[i, j-1, k]; zero_outside && f0 < 1.0 && (Va = 0.0)
-                Vb = var[i, j,   k]
-                Vc = var[i, j+1, k]
+                Va = var[i, j,   k]; zero_outside && f0 < 1.0 && (Va = 0.0)
+                Vb = var[i, j+1, k]
+                Vc = var[i, j+2, k]
                 grad = -(Vc - 4.0*Vb + 3.0*Va) / dy
             else
                 grad = 0.0
@@ -128,9 +137,10 @@ end
                        grad_lim=Inf, margin2nd=false,
                        zero_outside=false) -> dvardx
 
-Compute the per-cell `∂var/∂x` on an XFaceField from a Center-located
-field `var` and the binary/fractional ice mask `f_ice`. The face at
-Oceananigans index `i` lies between aa-cells `(i-1)` and `(i)`.
+Compute the per-cell `∂var/∂x` on the acx-staggered diagnostic
+`dvardx` (a Center field per the Yelmo schema, with the convention
+that interior index `i` is the *east* face of aa-cell `i`).
+`var` is Center-located; `f_ice` is the binary/fractional ice mask.
 
 Modes:
 
@@ -185,9 +195,10 @@ end
                        grad_lim=Inf, margin2nd=false,
                        zero_outside=false) -> dvardy
 
-`∂var/∂y` on a YFaceField, same options as
-[`calc_gradient_acx!`](@ref). Port of `yelmo_tools.f90:829
-calc_gradient_acy`.
+`∂var/∂y` on the acy-staggered diagnostic `dvardy` (Center field per
+the Yelmo schema, interior index `j` ↔ *north* face of aa-cell `j`).
+Same options as [`calc_gradient_acx!`](@ref). Port of
+`yelmo_tools.f90:829 calc_gradient_acy`.
 """
 function calc_gradient_acy!(dvardy, var, f_ice, dy::Real;
                             grad_lim::Real = Inf,
