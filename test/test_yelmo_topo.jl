@@ -1412,4 +1412,21 @@ end
     @test custom.rho_ice    == 915.0           # kwargs win over the EISMINT default
     @test custom.sec_year   == 31556926.0      # untouched EISMINT field still set
     @test custom.T_pmp_beta == 9.7e-8
+
+    # Symbol-dispatch constructor agrees with the named functions and
+    # supports the Fortran-style aliases.
+    @test YelmoConstants(:Earth)    == earth_constants()
+    @test YelmoConstants(:EISMINT)  == eismint_constants()
+    @test YelmoConstants(:EISMINT1) == eismint_constants()
+    @test YelmoConstants(:EISMINT2) == eismint_constants()
+    @test YelmoConstants(:MISMIP)   == mismip3d_constants()
+    @test YelmoConstants(:MISMIP3D) == mismip3d_constants()
+    @test YelmoConstants(:TROUGH)   == trough_constants()
+
+    # kwargs flow through the symbol dispatch.
+    sym_override = YelmoConstants(:MISMIP3D, rho_sw=1027.5)
+    @test sym_override.rho_sw  == 1027.5
+    @test sym_override.rho_ice == 900.0
+
+    @test_throws ErrorException YelmoConstants(:bogus)
 end

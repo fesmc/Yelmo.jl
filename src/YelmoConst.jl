@@ -123,6 +123,52 @@ const _TROUGH_DEFAULTS = (
 )
 
 """
+    YelmoConstants(preset::Symbol; kwargs...) -> YelmoConstants
+
+Symbol-dispatch shortcut over the named-experiment constructors.
+Supported presets (the symbol matches the Fortran `phys_const` group
+name; aliases follow the dispatch in
+`yelmo_boundaries.f90:ybound_define_physical_constants`):
+
+| symbol                         | constructor             |
+|--------------------------------|-------------------------|
+| `:Earth`                       | `earth_constants`       |
+| `:EISMINT` / `:EISMINT1` / `:EISMINT2` | `eismint_constants`  |
+| `:MISMIP` / `:MISMIP3D`        | `mismip3d_constants`    |
+| `:TROUGH`                      | `trough_constants`      |
+
+`kwargs...` override any field on top of the preset defaults.
+
+```julia
+c1 = YelmoConstants(:EISMINT)
+c2 = YelmoConstants(:MISMIP3D, rho_sw=1027.5)
+```
+
+For users who want to define their own preset, follow the named-
+constructor pattern:
+
+```julia
+mars_constants(; kwargs...) =
+    YelmoConstants(; g=3.71, rho_ice=900.0, kwargs...)
+```
+"""
+function YelmoConstants(preset::Symbol; kwargs...)
+    if preset === :Earth
+        return earth_constants(; kwargs...)
+    elseif preset === :EISMINT || preset === :EISMINT1 || preset === :EISMINT2
+        return eismint_constants(; kwargs...)
+    elseif preset === :MISMIP || preset === :MISMIP3D
+        return mismip3d_constants(; kwargs...)
+    elseif preset === :TROUGH
+        return trough_constants(; kwargs...)
+    else
+        error("YelmoConstants: unknown preset :$(preset). " *
+              "Supported: :Earth, :EISMINT (also :EISMINT1, :EISMINT2), " *
+              ":MISMIP3D (also :MISMIP), :TROUGH.")
+    end
+end
+
+"""
     eismint_constants(; kwargs...) -> YelmoConstants
 
 Constants for the EISMINT / EISMINT1 / EISMINT2 intercomparison
