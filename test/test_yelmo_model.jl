@@ -74,6 +74,19 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
         @test length(ds["time"]) == 5
         @test ds["time"][:] == [1.0, 2.0, 3.0, 4.0, 5.0]
         @test haskey(ds, "H_ice")
+
+        # `tau_relax` exists in both `bnd` and `tpo` groups — they're
+        # genuinely distinct fields (input forcing vs. realised
+        # timescale). The IO layer disambiguates by group-prefixing
+        # both occurrences. Plain `tau_relax` must not be present;
+        # both prefixed names must be.
+        @test !haskey(ds, "tau_relax")
+        @test  haskey(ds, "bnd_tau_relax")
+        @test  haskey(ds, "tpo_tau_relax")
+
+        # Non-colliding names stay plain (regression guard).
+        @test haskey(ds, "z_bed")        # bnd-only
+        @test haskey(ds, "ux_bar")       # dyn-only
     finally
         close(ds)
     end
