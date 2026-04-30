@@ -21,6 +21,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+
 import ..YelmoCore: step!
 
 export topo_step!, advect_tracer!,
@@ -33,12 +34,20 @@ export topo_step!, advect_tracer!,
        calc_calving_vonmises_m16_ac!, merge_calving_rates!,
        lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!,
-       calving_step!
+       calving_step!,
+       calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
+       calc_grounding_line_zone!, gen_mask_bed!, calc_ice_front!,
+       calc_z_srf!,
+       calc_gradient_acx!, calc_gradient_acy!,
+       calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
+       calc_f_grnd_pinning_points!, calc_grounded_fractions!,
+       extend_floating_slab!, calc_dynamic_ice_fields!,
+       update_diagnostics!
 
 include("advection.jl")
 include("mass_balance.jl")
-include("ice_fraction.jl")
 include("grounded.jl")
+include("ice_fraction.jl")
 include("basal.jl")
 include("frontal.jl")
 include("discharge.jl")
@@ -46,6 +55,11 @@ include("relaxation.jl")
 include("calving_ac.jl")
 include("lsf.jl")
 include("calving.jl")
+include("distances.jl")
+include("bed_mask.jl")
+include("surface.jl")
+include("gradients.jl")
+include("dynamic_thickness.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -121,14 +135,14 @@ function topo_step!(y::YelmoModel, dt::Float64)
     H_after_dyn = copy(interior(y.tpo.H_ice))
 
     # Refresh f_ice now that the dynamic margin may have moved.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Surface mass balance: clip the raw forcing field, then apply.
     mbal_tendency!(y.tpo.smb, y.tpo.H_ice, y.tpo.f_grnd, y.bnd.smb_ref, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.smb, dt; adjust_mb=true)
 
     # SMB may have grown / shrunk margins; refresh f_ice before BMB.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Basal mass balance: refresh H_grnd and f_grnd_bmb from the *current*
     # state (Fortran does the same — predictor/corrector iterations can
@@ -149,7 +163,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     apply_tendency!(y.tpo.H_ice, y.tpo.bmb, dt; adjust_mb=true)
 
     # BMB may have moved margins; refresh f_ice before FMB.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Frontal mass balance at marine margins. Fortran gates this on
     # `use_bmb` too — same flag, same intent (turn off at-shelf melt
@@ -168,7 +182,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     apply_tendency!(y.tpo.H_ice, y.tpo.fmb, dt; adjust_mb=true)
 
     # FMB may have moved margins; refresh f_ice before DMB.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Subgrid discharge mass balance. v1 only supports dmb_method = 0
     # (no-op); other methods error inside the helper.
@@ -183,13 +197,13 @@ function topo_step!(y::YelmoModel, dt::Float64)
     apply_tendency!(y.tpo.H_ice, y.tpo.dmb, dt; adjust_mb=true)
 
     # DMB may have moved margins; refresh f_ice before calving.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Phase 7: level-set calving. No-op when `ycalv.use_lsf` is false.
     calving_step!(y, dt)
 
     # Calving may have killed cells; refresh f_ice before relaxation.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Optional relaxation toward a reference state (Fortran phase 8).
     # Skipped entirely when `topo_rel == 0`.
@@ -216,7 +230,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
         apply_tendency!(y.tpo.H_ice, y.tpo.mb_relax, dt; adjust_mb=true)
 
         # Refresh f_ice after relaxation.
-        calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+        calc_f_ice!(y)
     else
         fill!(interior(y.tpo.mb_relax), 0.0)
     end
@@ -228,7 +242,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     apply_tendency!(y.tpo.H_ice, y.tpo.mb_resid, dt; adjust_mb=true)
 
     # Final f_ice refresh after the cleanup step.
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # Net mass balance applied this step.
     interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+
@@ -242,6 +256,28 @@ function topo_step!(y::YelmoModel, dt::Float64)
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
 
     y.time += dt
+    return y
+end
+
+"""
+    update_diagnostics!(y::YelmoModel) -> y
+
+Recompute every diagnostic `tpo` field from the current prognostic
+state (`H_ice` plus `bnd` inputs `z_bed`, `z_sl`, `f_pmp`, `z_bed_sd`)
+without advancing time. Refreshes `f_ice` first (so the rest of the
+diagnostic chain sees a consistent ice cover), then runs the same
+diagnostic body that fires at the end of `topo_step!`.
+
+`dHidt` and `dHidt_dyn` come out as zero since `dt = 0`. Useful to
+materialise diagnostics after `load_state!` for restart files that
+omit some derived fields, and as a regression check that the Julia
+diagnostic chain reproduces what the Fortran reference wrote into a
+restart.
+"""
+function update_diagnostics!(y::YelmoModel)
+    calc_f_ice!(y)
+    H = copy(interior(y.tpo.H_ice))
+    _update_diagnostics!(y, H, H, 0.0)
     return y
 end
 
@@ -266,44 +302,103 @@ end
 # Recompute Phase-10 diagnostics from current state.
 #  - Refresh `H_grnd` (flotation diagnostic), then `f_grnd` via the
 #    CISM bilinear-interpolation subgrid scheme.
-#  - `z_srf` / `z_base` from the standard grounded vs. floating
-#    formulae, keyed off the binary `H_grnd > 0` test (subgrid
-#    `z_srf` would land in a later milestone).
+#  - `z_srf` from `calc_z_srf!` (Pattyn 2017, Eq. 1 — max-of-grounded-
+#    or-floating with sub-grid `f_ice < 1` collapsing to bare bed/sea
+#    level). `z_base = z_srf - H_ice` per Fortran convention.
 #  - `dHidt = (H_now - H_prev) / dt`           — total step rate.
 #  - `dHidt_dyn = (H_after_dyn - H_prev) / dt` — dynamic-only rate
 #    (post-advection / mask-pass, before SMB or mb_resid).
+#  - `dist_grline` / `dist_margin` (m), `mask_grz`, `mask_bed`,
+#    `mask_frnt`. The grounding-zone half-width parameter
+#    `ytopo.dist_grz` is in km in the namelist; convert to metres for
+#    the kernel.
 function _update_diagnostics!(y::YelmoModel,
                               H_prev::AbstractArray,
                               H_after_dyn::AbstractArray,
                               dt::Real)
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
                  y.c.rho_ice, y.c.rho_sw)
-    determine_grounded_fractions!(y.tpo.f_grnd, y.tpo.H_grnd)
+
+    # `gl_sep` dispatch: linear / area / CISM-quad subgrid grounded
+    # fractions. `f_grnd_ab` only populated by gl_sep == 3.
+    calc_grounded_fractions!(y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy,
+                             y.tpo.f_grnd_ab, y.tpo.H_grnd,
+                             y.p.ytopo.gl_sep;
+                             gz_nx = y.p.ytopo.gz_nx)
+
+    # Subgrid pinning-point fraction over floating ice (uses z_bed_sd).
+    calc_f_grnd_pinning_points!(y.tpo.f_grnd_pin, y.tpo.H_ice, y.tpo.f_ice,
+                                y.bnd.z_bed, y.bnd.z_bed_sd, y.bnd.z_sl,
+                                y.c.rho_ice, y.c.rho_sw)
+
+    calc_z_srf!(y.tpo.z_srf, y.tpo.H_ice, y.tpo.f_ice,
+                y.bnd.z_bed, y.bnd.z_sl, y.c.rho_ice, y.c.rho_sw)
 
     H_ice     = interior(y.tpo.H_ice)
-    H_grnd    = interior(y.tpo.H_grnd)
-    z_bed     = interior(y.bnd.z_bed)
-    z_sl      = interior(y.bnd.z_sl)
     z_srf     = interior(y.tpo.z_srf)
     z_base    = interior(y.tpo.z_base)
     dHidt     = interior(y.tpo.dHidt)
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
 
     inv_dt = dt > 0 ? 1.0 / dt : 0.0
-    rho_ratio_iw = y.c.rho_ice / y.c.rho_sw
 
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
-        if H_grnd[i, j, 1] > 0.0
-            z_base[i, j, 1] = z_bed[i, j, 1]
-            z_srf[i, j, 1]  = z_bed[i, j, 1] + H_ice[i, j, 1]
-        else
-            z_base[i, j, 1] = z_sl[i, j, 1] - rho_ratio_iw * H_ice[i, j, 1]
-            z_srf[i, j, 1]  = z_base[i, j, 1] + H_ice[i, j, 1]
-        end
+        # `z_base` follows the Fortran convention `z_srf - H_ice` so the
+        # value is meaningful for both grounded (= z_bed) and floating
+        # (= z_sl - rho_ice/rho_sw·H_ice) regimes.
+        z_base[i, j, 1] = z_srf[i, j, 1] - H_ice[i, j, 1]
 
         dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
         dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
     end
+
+    # Margin-aware horizontal gradients on staggered ac-faces.
+    # `dHidx`/`dHidy` use `zero_outside` so partially-covered cells
+    # collapse to 0 (matches Fortran's `zero_outside=.TRUE.` for
+    # ice-thickness gradients).
+    dx = _dx(y.g)
+    dy = _dy(y.g)
+    grad_lim  = y.p.ytopo.grad_lim
+    margin2nd = y.p.ytopo.margin2nd
+
+    calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,  y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+    calc_gradient_acy!(y.tpo.dzsdy, y.tpo.z_srf,  y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+
+    calc_gradient_acx!(y.tpo.dHidx, y.tpo.H_ice,  y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = true)
+    calc_gradient_acy!(y.tpo.dHidy, y.tpo.H_ice,  y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = true)
+
+    calc_gradient_acx!(y.tpo.dzbdx, y.tpo.z_base, y.tpo.f_ice, dx;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+    calc_gradient_acy!(y.tpo.dzbdy, y.tpo.z_base, y.tpo.f_ice, dy;
+                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       zero_outside = false)
+
+    # Distance-to-feature fields (metres) and bed-state masks.
+    calc_distance_to_grounding_line!(y.tpo.dist_grline, y.tpo.f_grnd, dx)
+    calc_distance_to_ice_margin!(y.tpo.dist_margin,  y.tpo.f_ice,  dx)
+
+    # `dist_grz` parameter is in km; convert to metres.
+    dist_grz_m = 1e3 * y.p.ytopo.dist_grz
+    calc_grounding_line_zone!(y.tpo.mask_grz, y.tpo.dist_grline, dist_grz_m)
+
+    gen_mask_bed!(y.tpo.mask_bed, y.tpo.f_ice, y.thrm.f_pmp,
+                  y.tpo.f_grnd, y.tpo.mask_grz)
+
+    calc_ice_front!(y.tpo.mask_frnt, y.tpo.f_ice, y.tpo.f_grnd,
+                    y.bnd.z_bed, y.bnd.z_sl)
+
+    # Dynamics-only thickness/cover fields, dispatched on
+    # `ydyn.ssa_lat_bc`. Default ("floating") is pass-through.
+    calc_dynamic_ice_fields!(y)
 
     return y
 end

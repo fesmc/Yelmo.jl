@@ -20,18 +20,12 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_calving_equil_ac!,
        calc_calving_threshold_ac!,
        calc_calving_vonmises_m16_ac!,
        merge_calving_rates!
-
-# Out-of-domain reads of an aa-field resolve to 0.0. Mirrors the
-# convention used in `grounded.jl::_f_or_zero`.
-@inline function _aa_or_zero(F::AbstractMatrix, i::Int, j::Int,
-                             nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? F[i, j] : 0.0
-end
 
 """
     calc_calving_equil_ac!(cr_x, cr_y, u_bar, v_bar) -> (cr_x, cr_y)
@@ -82,16 +76,16 @@ function calc_calving_threshold_ac!(cr_x, cr_y,
     Cy = interior(cr_y)
     Ux = interior(u_bar)
     Uy = interior(v_bar)
-    H  = view(interior(H_ice),  :, :, 1)
-    F  = view(interior(f_ice),  :, :, 1)
-    nx, ny = size(H)
+
+    fill_halo_regions!(H_ice)
+    fill_halo_regions!(f_ice)
 
     # XFaceField indexing: face `i` sits between centres `i-1` and `i`.
     @inbounds for j in axes(Cx, 2), i in axes(Cx, 1)
-        H_l = _aa_or_zero(H, i - 1, j, nx, ny)
-        H_r = _aa_or_zero(H, i,     j, nx, ny)
-        F_l = _aa_or_zero(F, i - 1, j, nx, ny)
-        F_r = _aa_or_zero(F, i,     j, nx, ny)
+        H_l = H_ice[i - 1, j, 1]
+        H_r = H_ice[i,     j, 1]
+        F_l = f_ice[i - 1, j, 1]
+        F_r = f_ice[i,     j, 1]
         H_acx = if F_l > 0.0 && F_r == 0.0
             H_l                              # ice → ocean: pick ice
         elseif F_l == 0.0 && F_r > 0.0
@@ -105,10 +99,10 @@ function calc_calving_threshold_ac!(cr_x, cr_y,
 
     # YFaceField indexing: face `j` sits between centres `j-1` and `j`.
     @inbounds for j in axes(Cy, 2), i in axes(Cy, 1)
-        H_d = _aa_or_zero(H, i, j - 1, nx, ny)
-        H_u = _aa_or_zero(H, i, j,     nx, ny)
-        F_d = _aa_or_zero(F, i, j - 1, nx, ny)
-        F_u = _aa_or_zero(F, i, j,     nx, ny)
+        H_d = H_ice[i, j - 1, 1]
+        H_u = H_ice[i, j,     1]
+        F_d = f_ice[i, j - 1, 1]
+        F_u = f_ice[i, j,     1]
         H_acy = if F_d > 0.0 && F_u == 0.0
             H_d
         elseif F_d == 0.0 && F_u > 0.0
@@ -185,21 +179,17 @@ function merge_calving_rates!(cr_acx, cr_acy,
     Uy  = interior(v_bar)
     Gax = interior(f_grnd_acx)
     Gay = interior(f_grnd_acy)
-    Zb  = view(interior(z_bed), :, :, 1)
-    Zsl = view(interior(z_sl),  :, :, 1)
-    nx, ny = size(Zb)
+
+    fill_halo_regions!(z_bed)
+    fill_halo_regions!(z_sl)
 
     # x-face merge: face `i` between centres `i-1` and `i`.
     @inbounds for j in axes(Cx, 2), i in axes(Cx, 1)
         if Gax[i, j, 1] == 0.0
             Cx[i, j, 1] = Fx[i, j, 1]
         else
-            zb_l  = _aa_or_zero(Zb,  i - 1, j, nx, ny)
-            zb_r  = _aa_or_zero(Zb,  i,     j, nx, ny)
-            zsl_l = _aa_or_zero(Zsl, i - 1, j, nx, ny)
-            zsl_r = _aa_or_zero(Zsl, i,     j, nx, ny)
-            zb_face  = 0.5 * (zb_l  + zb_r)
-            zsl_face = 0.5 * (zsl_l + zsl_r)
+            zb_face  = 0.5 * (z_bed[i - 1, j, 1] + z_bed[i, j, 1])
+            zsl_face = 0.5 * (z_sl[i - 1, j, 1]  + z_sl[i, j, 1])
             Cx[i, j, 1] = zb_face > zsl_face ? -Ux[i, j, 1] : Gx[i, j, 1]
         end
     end
@@ -209,12 +199,8 @@ function merge_calving_rates!(cr_acx, cr_acy,
         if Gay[i, j, 1] == 0.0
             Cy[i, j, 1] = Fy[i, j, 1]
         else
-            zb_d  = _aa_or_zero(Zb,  i, j - 1, nx, ny)
-            zb_u  = _aa_or_zero(Zb,  i, j,     nx, ny)
-            zsl_d = _aa_or_zero(Zsl, i, j - 1, nx, ny)
-            zsl_u = _aa_or_zero(Zsl, i, j,     nx, ny)
-            zb_face  = 0.5 * (zb_d  + zb_u)
-            zsl_face = 0.5 * (zsl_d + zsl_u)
+            zb_face  = 0.5 * (z_bed[i, j - 1, 1] + z_bed[i, j, 1])
+            zsl_face = 0.5 * (z_sl[i, j - 1, 1]  + z_sl[i, j, 1])
             Cy[i, j, 1] = zb_face > zsl_face ? -Uy[i, j, 1] : Gy[i, j, 1]
         end
     end

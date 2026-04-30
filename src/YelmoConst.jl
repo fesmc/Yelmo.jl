@@ -19,12 +19,20 @@ Two flavours of constants live here:
     (module-level `const`) — non-physical bit-pattern enums for
     the `bnd.mask_ice` field. Not configurable; collected here
     so they're easy to find rather than buried in `YelmoCore`.
+
+  - `MASK_BED_OCEAN` … `MASK_BED_PARTIAL` (module-level `const`) —
+    enum values for the multi-valued `tpo.mask_bed` field. Mirrors
+    the integer parameters at the top of Fortran
+    `physics/topography.f90`; consumers in `yelmo_data.f90` and
+    diagnostic output expect these exact integer values.
 """
 module YelmoConst
 
 export YelmoConstants, yelmo_constants, earth_constants,
        eismint_constants, mismip3d_constants, trough_constants
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
+export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
+       MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
 
 # ---------------------------------------------------------------------------
 # Non-physical constants — bit-pattern enums for bnd.mask_ice cells.
@@ -33,6 +41,20 @@ export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 const MASK_ICE_NONE    = 0  # H_ice forced to 0
 const MASK_ICE_FIXED   = 1  # H_ice held at its current value
 const MASK_ICE_DYNAMIC = 2  # H_ice evolves freely
+
+# ---------------------------------------------------------------------------
+# Non-physical constants — multi-valued bed mask (tpo.mask_bed).
+# Integer values mirror Fortran physics/topography.f90:10-17 verbatim.
+# ---------------------------------------------------------------------------
+
+const MASK_BED_OCEAN   = 0  # ice-free ocean
+const MASK_BED_LAND    = 1  # ice-free land
+const MASK_BED_FROZEN  = 2  # fully ice-covered, grounded, frozen base
+const MASK_BED_STREAM  = 3  # fully ice-covered, grounded, temperate base
+const MASK_BED_GRLINE  = 4  # grounding line cell
+const MASK_BED_FLOAT   = 5  # fully ice-covered, floating
+const MASK_BED_ISLAND  = 6  # reserved (Fortran does not currently emit)
+const MASK_BED_PARTIAL = 7  # partially ice-covered cell
 
 # ---------------------------------------------------------------------------
 # Physical constants — instantiable per model.

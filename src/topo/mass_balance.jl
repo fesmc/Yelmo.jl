@@ -10,7 +10,8 @@
 # `Field`s (or any array-like with an `interior(...)` view).
 # ----------------------------------------------------------------------
 
-using Oceananigans.Fields: interior
+using Oceananigans.Fields: interior, CenterField
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export apply_tendency!, mbal_tendency!, resid_tendency!
 
@@ -117,13 +118,6 @@ function mbal_tendency!(G_mb, H_ice, f_grnd, mbal, dt::Real)
     return G_mb
 end
 
-# Saturated lookup: returns `H[i,j,1]` if (i,j) is in bounds, else 0.0.
-# Treats out-of-domain neighbors as ice-free, matching the spec's
-# "grid handles BC" simplification of the Fortran neighbor lookup.
-@inline function _h_or_zero(H::AbstractArray, i::Int, j::Int, nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? H[i, j, 1] : 0.0
-end
-
 """
     resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
                     H_min_flt, H_min_grnd, dt) -> G_resid
@@ -140,28 +134,20 @@ The factor of `1.1` on the rate is intentional: a downstream call to
 was realised after the non-negativity clamp, so a slight overshoot in
 the input tendency produces the desired final state.
 
+Halo handling: a temporary `CenterField` (with the same boundary
+conditions as `H_ice`) is used as a per-sweep snapshot. After each
+sweep modifies `H_new`, the snapshot is refreshed and its halos
+re-filled — so margin / island detection at boundaries respects the
+field's BCs (Dirichlet zero on `H_ice` → halo = `-first_interior`,
+distinct from 0 unless interior is itself 0; Periodic axes wrap).
+
 Port of `calc_G_boundaries` in
-`yelmo/src/physics/mass_conservation.f90:609`. Simplifications vs the
-Fortran:
-
-  - The EISMINT-summit averaging block (lines 651-658) is dropped.
-  - The trailing per-BC border-zeroing switch (lines 761-805) is
-    dropped — Oceananigans' Dirichlet halo on `H_ice` already enforces
-    `H = 0` outside the domain. Out-of-domain neighbors are read as 0
-    via `_h_or_zero` so margin / island detection is consistent with
-    the BC.
-
-`f_ice` is read for `calc_H_eff = H_ice / f_ice` at margins.
+`yelmo/src/physics/mass_conservation.f90:609`. The EISMINT-summit
+averaging block (lines 651-658) and the trailing per-BC border-
+zeroing switch (lines 761-805) are dropped — Oceananigans' BC
+machinery now handles boundary semantics.
 """
 function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
-                         # `H_ice_ref` was previously here. The Fortran
-                         # `calc_G_boundaries` consumes it only in the
-                         # `boundaries == "fixed"` branch of the per-BC
-                         # border-zeroing switch (lines 787-793 of
-                         # mass_conservation.f90), which we drop here in
-                         # favor of Oceananigans' grid-level halo
-                         # handling. Re-add the argument when (if) that
-                         # BC mode is reintroduced.
                          H_min_flt::Real, H_min_grnd::Real,
                          dt::Real)
     H_in = interior(H_ice)
@@ -175,9 +161,14 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
 
     H_min_tol = 1e-6
 
-    # Working copy of H. We mutate `H_new` through three sweeps; each
-    # sweep reads from a snapshot `H_tmp` of the previous state.
-    H_new = copy(H_in)
+    # Working state: `H_new` holds the in-progress thickness; `H_tmp`
+    # is a per-sweep snapshot Field with halos. Allocating `H_tmp`
+    # once and refilling it per sweep avoids allocating four temp
+    # Matrices the way the old `copy(H_new)` pattern did, while
+    # keeping halo-aware reads consistent with `H_ice`'s BCs.
+    H_new   = copy(H_in)
+    H_tmp_f = CenterField(H_ice.grid; boundary_conditions=H_ice.boundary_conditions)
+    H_tmp   = interior(H_tmp_f)
 
     # ---- 1. Disallow ice where the boundary mask says so. -----------
     @inbounds for j in 1:ny, i in 1:nx
@@ -187,7 +178,8 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
     end
 
     # ---- 2. Margin too-thin removal + sub-tolerance cleanup. --------
-    H_tmp = copy(H_new)
+    H_tmp .= H_new
+    fill_halo_regions!(H_tmp_f)
     @inbounds for j in 1:ny, i in 1:nx
         h_here = H_tmp[i, j, 1]
 
@@ -198,10 +190,10 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
         end
 
         # 2b. Margin test against the snapshot.
-        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
-        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
-        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
-        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+        nW = H_tmp_f[i-1, j,   1]
+        nE = H_tmp_f[i+1, j,   1]
+        nS = H_tmp_f[i,   j-1, 1]
+        nN = H_tmp_f[i,   j+1, 1]
 
         is_margin = (nW == 0.0) | (nE == 0.0) |
                     (nS == 0.0) | (nN == 0.0)
@@ -219,15 +211,16 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
     end
 
     # ---- 3. Island removal (cell with H>0 but every neighbor 0). ----
-    H_tmp = copy(H_new)
+    H_tmp .= H_new
+    fill_halo_regions!(H_tmp_f)
     @inbounds for j in 1:ny, i in 1:nx
         h_here = H_tmp[i, j, 1]
         h_here > 0.0 || continue
 
-        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
-        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
-        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
-        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+        nW = H_tmp_f[i-1, j,   1]
+        nE = H_tmp_f[i+1, j,   1]
+        nS = H_tmp_f[i,   j-1, 1]
+        nN = H_tmp_f[i,   j+1, 1]
 
         is_island = (nW == 0.0) & (nE == 0.0) &
                     (nS == 0.0) & (nN == 0.0)
@@ -238,15 +231,16 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
     end
 
     # ---- 4. Cap margin cells to the max thickness of neighbors. -----
-    H_tmp = copy(H_new)
+    H_tmp .= H_new
+    fill_halo_regions!(H_tmp_f)
     @inbounds for j in 1:ny, i in 1:nx
         h_here = H_tmp[i, j, 1]
         h_here > 0.0 || continue
 
-        nW = _h_or_zero(H_tmp, i-1, j,   nx, ny)
-        nE = _h_or_zero(H_tmp, i+1, j,   nx, ny)
-        nS = _h_or_zero(H_tmp, i,   j-1, nx, ny)
-        nN = _h_or_zero(H_tmp, i,   j+1, nx, ny)
+        nW = H_tmp_f[i-1, j,   1]
+        nE = H_tmp_f[i+1, j,   1]
+        nS = H_tmp_f[i,   j-1, 1]
+        nN = H_tmp_f[i,   j+1, 1]
 
         is_margin = (nW == 0.0) | (nE == 0.0) |
                     (nS == 0.0) | (nN == 0.0)

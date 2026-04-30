@@ -211,6 +211,119 @@ end
 # Real-restart smoke test: 5 steps, mass conservation accounting
 # ------------------------------------------------------------------
 
+const NML_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/yelmo_Greenland_rembo.nml"
+
+@testset "tpo: post-load diagnostic consistency" begin
+    # Recompute every diagnostic tpo field from the loaded prognostic
+    # state and verify it matches what the Fortran restart wrote --
+    # i.e. the Julia diagnostic chain reproduces the Fortran reference
+    # to numerical tolerance for a static configuration where no
+    # topography has changed since the restart was written.
+    #
+    # Loads the actual run namelist so parameter-sensitive kernels
+    # (grad_lim, gl_sep, etc.) match the Fortran configuration that
+    # produced the restart.
+    @assert isfile(RESTART_PATH)
+    @assert isfile(NML_PATH)
+
+    p = Yelmo.YelmoModelPar.read_nml(NML_PATH)
+    y = YelmoModel(RESTART_PATH, 0.0;
+                   rundir = mktempdir(; prefix="tpo_diag_"),
+                   alias  = "tpo-diag-consistency",
+                   p      = p,
+                   groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+                   strict = false)
+
+    # Snapshot diagnostic fields as written by Fortran.
+    fields = (:H_grnd, :f_grnd, :f_grnd_acx, :f_grnd_acy, :f_grnd_pin,
+              :z_srf, :z_base,
+              :dzsdx, :dzsdy, :dHidx, :dHidy, :dzbdx, :dzbdy,
+              :mask_bed, :mask_frnt,
+              :H_ice_dyn, :f_ice_dyn,
+              :f_ice)
+    snap = NamedTuple{fields}(copy(interior(getfield(y.tpo, k))) for k in fields)
+
+    update_diagnostics!(y)
+
+    # Helper: relative-L∞ vs the Fortran snapshot. Falls back to plain
+    # max-abs for fields where the snapshot is identically zero.
+    function rel_linf(now::AbstractArray, ref::AbstractArray)
+        max_diff = maximum(abs.(now .- ref))
+        max_ref  = maximum(abs.(ref))
+        return max_ref > 0 ? max_diff / max_ref : max_diff
+    end
+
+    # --- Tight: fully deterministic per-cell formulas. H_grnd, z_srf,
+    # z_base depend only on H_ice / f_ice / z_bed / z_sl, so any
+    # mismatch is at the level of Float32→Float64 NetCDF rounding.
+    @test rel_linf(interior(y.tpo.H_grnd), snap.H_grnd) < 1e-6
+    @test rel_linf(interior(y.tpo.z_srf),  snap.z_srf)  < 1e-6
+    @test rel_linf(interior(y.tpo.z_base), snap.z_base) < 1e-6
+    @test rel_linf(interior(y.tpo.f_ice),  snap.f_ice)  < 1e-12
+
+    # H_ice_dyn / f_ice_dyn under the default "floating" ssa_lat_bc
+    # is pass-through; matches exactly.
+    @test rel_linf(interior(y.tpo.H_ice_dyn), snap.H_ice_dyn) < 1e-12
+    @test rel_linf(interior(y.tpo.f_ice_dyn), snap.f_ice_dyn) < 1e-12
+
+    # rel_linf restricted to the inner grid (drops boundary face row
+    # and column on each side).
+    function rel_linf_inner(now, ref)
+        nx, ny = size(now, 1), size(now, 2)
+        slc = (now .- ref)[2:nx-1, 2:ny-1, :]
+        max_diff = maximum(abs.(slc))
+        max_ref  = maximum(abs.(ref[2:nx-1, 2:ny-1, :]))
+        return max_ref > 0 ? max_diff / max_ref : max_diff
+    end
+
+    # --- Subgrid grounded fractions, gl_sep = 1 per the namelist.
+    # Linear interpolation is closed-form deterministic on the aa
+    # node. The Fortran kernel duplicates the easternmost / northern-
+    # most face row of f_grnd_acx / acy from its inward neighbour
+    # for aesthetic continuity (`f_grnd_x[nx,:] = f_grnd_x[nx-1,:]`),
+    # which our Oceananigans halo-clamp produces as a binary value
+    # instead — compare interior only.
+    @test rel_linf(interior(y.tpo.f_grnd),     snap.f_grnd)     < 1e-6
+    @test rel_linf_inner(interior(y.tpo.f_grnd_acx), snap.f_grnd_acx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.f_grnd_acy), snap.f_grnd_acy) < 1e-3
+
+    # f_grnd_pin: P&D 2012 formula, per-cell deterministic.
+    @test rel_linf(interior(y.tpo.f_grnd_pin), snap.f_grnd_pin) < 1e-6
+
+    # --- Bed-state masks: per-cell decision trees, exact match
+    # expected for the front mask. `mask_bed` differs at a handful
+    # of domain-edge cells where Fortran's chained
+    # `compute_distance_to_mask` post-pass reclassifies a few
+    # boundary cells as on-the-GL; that helper isn't shipped in
+    # the public Yelmo source we port from, so we tolerate a small
+    # number of disagreements here (≤ 0.5% of cells).
+    @test interior(y.tpo.mask_frnt) == snap.mask_frnt
+    let n_diff = count(interior(y.tpo.mask_bed) .!= snap.mask_bed),
+        n_tot = length(snap.mask_bed)
+        @test n_diff / n_tot < 5e-3
+    end
+
+    # --- Gradients: centered diff with grad_lim clamp. The
+    # easternmost / northernmost face row may differ from the
+    # Fortran restart's edge-extension fix-up at "infinite"
+    # boundaries (we use halo-clamp ⇒ 0 there); compare interior
+    # only, matching the Fortran kernel on i ∈ 2..Nx-1, j ∈ 2..Ny-1.
+    @test rel_linf_inner(interior(y.tpo.dzsdx), snap.dzsdx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzsdy), snap.dzsdy) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dHidx), snap.dHidx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dHidy), snap.dHidy) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzbdx), snap.dzbdx) < 1e-3
+    @test rel_linf_inner(interior(y.tpo.dzbdy), snap.dzbdy) < 1e-3
+
+    # --- Not asserted: dist_grline, dist_margin, mask_grz.
+    # The Fortran restart's dist_grline is dominated by a -1e9 m
+    # sentinel for floating cells (calc_distances=FALSE was used,
+    # plus an unported `compute_distance_to_mask` post-pass) rather
+    # than the chamfer-distance values our kernel produces;
+    # dist_margin in this restart is identically zero. mask_grz is
+    # binned from dist_grline so it inherits the disagreement.
+end
+
 @testset "tpo: real-restart 5-step smoke test" begin
     @assert isfile(RESTART_PATH)
 
@@ -694,9 +807,19 @@ end
     set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 3, tau)
     @test all(interior(tau_relax) .== tau)
 
-    # topo_rel = 4 → not yet ported.
-    @test_throws ErrorException set_tau_relax!(tau_relax, H_ice, f_grnd,
-        mask_grz, H_ref, 4, tau)
+    # topo_rel = 4 → tau on grounding-zone cells (mask_grz ∈ {0, 1}).
+    fill!(interior(mask_grz), 2.0)             # default: out of zone
+    interior(mask_grz)[2, 2, 1] = 0.0          # GL cell
+    interior(mask_grz)[3, 3, 1] = 1.0          # grounded in zone
+    interior(mask_grz)[4, 4, 1] = -1.0         # floating in zone — NOT relaxed
+    interior(mask_grz)[5, 5, 1] = -2.0         # floating out of zone
+    set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref, 4, tau)
+    T = interior(tau_relax)
+    @test T[2, 2, 1] == tau       # mask_grz = 0
+    @test T[3, 3, 1] == tau       # mask_grz = 1
+    @test T[4, 4, 1] == -1.0      # mask_grz = -1 (floating in zone, not relaxed)
+    @test T[5, 5, 1] == -1.0      # mask_grz = -2 (floating out of zone)
+    @test T[1, 1, 1] == -1.0      # mask_grz = 2 (grounded out of zone)
 end
 
 @testset "tpo: calc_G_relaxation!" begin
@@ -826,12 +949,14 @@ end
 
     rho_ice, rho_sw = 910.0, 1028.0
 
-    # 1. Bed above sea level: H_grnd = H_ice (no flotation contribution).
+    # 1. Bed above sea level: H_grnd = H_ice + (z_bed - z_sl).
+    # Includes the elevation-above-SL term so ice-free land also
+    # classifies as grounded (matches Fortran's two-branch formula).
     fill!(interior(H_ice), 500.0)
     fill!(interior(z_bed), 100.0)
     fill!(interior(z_sl),    0.0)
     calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw)
-    @test all(interior(H_grnd) .≈ 500.0)
+    @test all(interior(H_grnd) .≈ 600.0)   # 500 + (100 - 0)
 
     # 2. Thin shelf in deep water: H_grnd = H_ice - depth * rho_sw/rho_ice < 0.
     fill!(interior(H_ice),  100.0)
@@ -1429,4 +1554,1025 @@ end
     @test sym_override.rho_ice == 900.0
 
     @test_throws ErrorException YelmoConstants(:bogus)
+end
+
+# ------------------------------------------------------------------
+# Distance-to-feature kernels and bed-state masks
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_distance_to_grounding_line!" begin
+    # 8x8 grid with a 4-cell-wide grounded square. dx = 1 metre to make
+    # distance arithmetic trivially auditable.
+    Nx = 8
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 8.0), y=(0.0, 8.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd  = CenterField(g)
+    dist_gl = CenterField(g)
+    dx = 1.0
+
+    fill!(interior(f_grnd), 0.0)
+    @inbounds for j in 3:6, i in 3:6
+        interior(f_grnd)[i, j, 1] = 1.0
+    end
+
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, dx)
+    D = interior(dist_gl)
+
+    # 1. Grounding-line cells (grounded with floating direct neighbour)
+    #    are the perimeter of the 4x4 block: dist = 0.
+    @test D[3, 3, 1] == 0.0
+    @test D[3, 6, 1] == 0.0
+    @test D[6, 3, 1] == 0.0
+    @test D[6, 6, 1] == 0.0
+    @test D[4, 3, 1] == 0.0
+    @test D[3, 4, 1] == 0.0
+
+    # 2. Interior of the block (no floating neighbour) is grounded but
+    #    not on the GL → positive distance equal to one direct step.
+    @test D[4, 4, 1] ≈ 1.0
+    @test D[5, 5, 1] ≈ 1.0
+    @test D[4, 5, 1] ≈ 1.0
+    @test D[5, 4, 1] ≈ 1.0
+
+    # 3. Direct floating neighbour of the GL → -1 (one cell out, negated).
+    @test D[2, 4, 1] ≈ -1.0
+    @test D[7, 4, 1] ≈ -1.0
+    @test D[4, 2, 1] ≈ -1.0
+    @test D[4, 7, 1] ≈ -1.0
+
+    # 4. Diagonal floating neighbour of a GL corner → -√2 (chamfer).
+    @test D[2, 2, 1] ≈ -sqrt(2.0)
+    @test D[7, 7, 1] ≈ -sqrt(2.0)
+
+    # 5. Two cells out (direct) → ≈ -2 (chamfer routes via direct path).
+    @test D[1, 4, 1] ≈ -2.0
+    @test D[8, 4, 1] ≈ -2.0
+end
+
+@testset "tpo: calc_distance_to_grounding_line! — Neumann boundary" begin
+    # All-grounded 4x4 grid. With the default Neumann-zero clamp BC on
+    # Bounded sides, halo f_grnd = first interior = grounded — so no
+    # cell sees a floating neighbour, and there is no GL anywhere.
+    # Distance is +Inf everywhere (positive because all cells are
+    # grounded; no sign flip in Phase 3).
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd  = CenterField(g)   # default BC = Neumann zero
+    dist_gl = CenterField(g)
+    fill!(interior(f_grnd), 1.0)
+
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0)
+    D = interior(dist_gl)
+    @test all(isinf, D)
+    @test all(>(0), D)
+end
+
+@testset "tpo: calc_distance_to_grounding_line! — periodic axes" begin
+    # 8x8 grid with a single grounded cell at (1,1). Test that under
+    # full-periodic topology, the chamfer distance from the diametric
+    # corner (5,5) wraps around the boundary (chamfer distance via
+    # wrap is 4·√2 ≈ 5.66, vs. straight-through 4·√2 also — they're
+    # equal in this geometry, but periodic-aware code must produce a
+    # finite distance).
+    Nx = 8
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 8.0), y=(0.0, 8.0),
+                        topology=(Periodic, Periodic, Flat))
+    f_grnd  = CenterField(g)
+    dist_gl = CenterField(g)
+
+    fill!(interior(f_grnd), 0.0)
+    interior(f_grnd)[1, 1, 1] = 1.0   # single grounded cell at corner
+
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0)
+    D = interior(dist_gl)
+
+    # The single grounded cell is a GL source (all 4 direct neighbours
+    # are floating, including via wrap).
+    @test D[1, 1, 1] == 0.0
+
+    # All floating cells get finite (negative) chamfer distance — no
+    # cell remains -Inf, since periodic wrap connects every cell to
+    # the source.
+    @test all(isfinite, D)
+    @test all(D[i, j, 1] <= 0.0 for j in 1:Nx, i in 1:Nx)
+
+    # Periodic wrap: cell (1, 8) is one cell south of (1, 1) via the
+    # north wrap → distance 1.
+    @test D[1, 8, 1] ≈ -1.0
+    @test D[8, 1, 1] ≈ -1.0
+    @test D[8, 8, 1] ≈ -sqrt(2.0)   # diagonal wrap
+end
+
+@testset "tpo: calc_distance_to_ice_margin!" begin
+    # Same geometry as the GL test but using f_ice as the source flag.
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 6.0), y=(0.0, 6.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice = CenterField(g)
+    dist_mrgn = CenterField(g)
+
+    fill!(interior(f_ice), 0.0)
+    @inbounds for j in 2:5, i in 2:5
+        interior(f_ice)[i, j, 1] = 1.0
+    end
+
+    calc_distance_to_ice_margin!(dist_mrgn, f_ice, 100.0)
+    D = interior(dist_mrgn)
+
+    # Ice perimeter is the margin → dist = 0.
+    @test D[2, 2, 1] == 0.0
+    @test D[2, 5, 1] == 0.0
+    @test D[5, 2, 1] == 0.0
+    @test D[5, 5, 1] == 0.0
+
+    # Interior of the ice block — at distance dx from the margin.
+    @test D[3, 3, 1] ≈ 100.0
+    @test D[4, 4, 1] ≈ 100.0
+
+    # Outside the ice block (ice-free) → negative distances.
+    @test D[1, 3, 1] ≈ -100.0
+    @test D[6, 3, 1] ≈ -100.0
+end
+
+@testset "tpo: calc_grounding_line_zone!" begin
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 60e3), y=(0.0, 60e3),
+                        topology=(Bounded, Bounded, Flat))
+    dist_gl  = CenterField(g)
+    mask_grz = CenterField(g)
+
+    # Threshold = 5 km = 5000 m. Use a column of distances spanning the
+    # bin boundaries.
+    interior(dist_gl)[1, 1, 1] = 0.0          # exactly on GL
+    interior(dist_gl)[2, 1, 1] = 3000.0       # grounded in zone
+    interior(dist_gl)[3, 1, 1] = 5000.0       # grounded at threshold (in)
+    interior(dist_gl)[4, 1, 1] = 7000.0       # grounded out of zone
+    interior(dist_gl)[1, 2, 1] = -3000.0      # floating in zone
+    interior(dist_gl)[2, 2, 1] = -5000.0      # floating at threshold (in)
+    interior(dist_gl)[3, 2, 1] = -7000.0      # floating out of zone
+
+    calc_grounding_line_zone!(mask_grz, dist_gl, 5000.0)
+    M = interior(mask_grz)
+
+    @test M[1, 1, 1] == 0.0
+    @test M[2, 1, 1] == 1.0
+    @test M[3, 1, 1] == 1.0
+    @test M[4, 1, 1] == 2.0
+    @test M[1, 2, 1] == -1.0
+    @test M[2, 2, 1] == -1.0
+    @test M[3, 2, 1] == -2.0
+end
+
+@testset "tpo: gen_mask_bed!" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    mask_bed = CenterField(g)
+    f_ice    = CenterField(g)
+    f_pmp    = CenterField(g)
+    f_grnd   = CenterField(g)
+    mask_grz = CenterField(g)
+
+    fill!(interior(f_ice),    0.0)
+    fill!(interior(f_pmp),    0.0)
+    fill!(interior(f_grnd),   0.0)
+    fill!(interior(mask_grz), 2.0)   # default: grounded out of zone
+    fill!(interior(mask_bed), -99.0) # sentinel to confirm overwrite
+
+    # Layout (one cell per bed-mask category):
+    #   (1,1): ice-free ocean  (f_ice=0, f_grnd=0)
+    #   (2,1): ice-free land   (f_ice=0, f_grnd=1)
+    #   (3,1): partial         (f_ice=0.5)
+    #   (4,1): grounding line  (mask_grz=0, regardless of other flags)
+    #   (1,2): floating ice    (f_ice=1, f_grnd=0)
+    #   (2,2): grounded frozen (f_ice=1, f_grnd=1, f_pmp=0)
+    #   (3,2): grounded stream (f_ice=1, f_grnd=1, f_pmp=0.8)
+    interior(f_grnd)[2, 1, 1] = 1.0
+
+    interior(f_ice)[3, 1, 1]  = 0.5
+
+    interior(mask_grz)[4, 1, 1] = 0.0
+
+    interior(f_ice)[1, 2, 1]  = 1.0
+
+    interior(f_ice)[2, 2, 1]  = 1.0
+    interior(f_grnd)[2, 2, 1] = 1.0
+
+    interior(f_ice)[3, 2, 1]  = 1.0
+    interior(f_grnd)[3, 2, 1] = 1.0
+    interior(f_pmp)[3, 2, 1]  = 0.8
+
+    gen_mask_bed!(mask_bed, f_ice, f_pmp, f_grnd, mask_grz)
+    Mb = interior(mask_bed)
+
+    @test Mb[1, 1, 1] == Float64(MASK_BED_OCEAN)
+    @test Mb[2, 1, 1] == Float64(MASK_BED_LAND)
+    @test Mb[3, 1, 1] == Float64(MASK_BED_PARTIAL)
+    @test Mb[4, 1, 1] == Float64(MASK_BED_GRLINE)
+    @test Mb[1, 2, 1] == Float64(MASK_BED_FLOAT)
+    @test Mb[2, 2, 1] == Float64(MASK_BED_FROZEN)
+    @test Mb[3, 2, 1] == Float64(MASK_BED_STREAM)
+
+    # Grounding-line dominates other states.
+    interior(mask_grz)[1, 2, 1] = 0.0
+    gen_mask_bed!(mask_bed, f_ice, f_pmp, f_grnd, mask_grz)
+    Mb = interior(mask_bed)
+    @test Mb[1, 2, 1] == Float64(MASK_BED_GRLINE)
+end
+
+@testset "tpo: MASK_BED_* enum values" begin
+    @test MASK_BED_OCEAN   == 0
+    @test MASK_BED_LAND    == 1
+    @test MASK_BED_FROZEN  == 2
+    @test MASK_BED_STREAM  == 3
+    @test MASK_BED_GRLINE  == 4
+    @test MASK_BED_FLOAT   == 5
+    @test MASK_BED_ISLAND  == 6
+    @test MASK_BED_PARTIAL == 7
+end
+
+# ------------------------------------------------------------------
+# Boundary plumbing — grid topology, BC palette, corner halos
+# ------------------------------------------------------------------
+
+using Yelmo.YelmoCore: resolve_boundaries, neumann_2d_field, dirichlet_2d_field,
+                       fill_corner_halos!
+using Oceananigans.BoundaryConditions: fill_halo_regions!
+
+@testset "core: resolve_boundaries" begin
+    @test resolve_boundaries(:bounded)    == (Bounded,  Bounded)
+    @test resolve_boundaries(:periodic)   == (Periodic, Periodic)
+    @test resolve_boundaries(:periodic_x) == (Periodic, Bounded)
+    @test resolve_boundaries(:periodic_y) == (Bounded,  Periodic)
+
+    @test resolve_boundaries((:periodic, :bounded))  == (Periodic, Bounded)
+    @test resolve_boundaries((:bounded,  :periodic)) == (Bounded,  Periodic)
+
+    # Direct Oceananigans tuples pass through unchanged.
+    @test resolve_boundaries((Periodic, Bounded))           == (Periodic, Bounded)
+    @test resolve_boundaries((Bounded, Periodic, Flat))     == (Bounded,  Periodic)
+
+    @test_throws ErrorException resolve_boundaries(:bogus)
+    @test_throws ErrorException resolve_boundaries((:bogus, :bounded))
+end
+
+@testset "core: neumann/dirichlet field BCs" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+
+    fN = neumann_2d_field(g)
+    fill!(interior(fN), 5.0)
+    fill_halo_regions!(fN)
+    # Neumann zero / clamp: halo = first interior.
+    @test fN[0,    1, 1] ≈ 5.0
+    @test fN[Nx+1, 1, 1] ≈ 5.0
+
+    fD = dirichlet_2d_field(g, 0.0)
+    fill!(interior(fD), 5.0)
+    fill_halo_regions!(fD)
+    # Dirichlet zero face value: halo = -first_interior so the face
+    # mean is 0.
+    @test fD[0,    1, 1] ≈ -5.0
+    @test fD[Nx+1, 1, 1] ≈ -5.0
+end
+
+@testset "core: fill_corner_halos! — bounded clamps to nearest corner" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f = neumann_2d_field(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0   # SW
+    int[Nx, 1,  1] = 12.0   # SE
+    int[1,  Nx, 1] = 13.0   # NW
+    int[Nx, Nx, 1] = 14.0   # NE
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    @test f[0,    0,    1] == 11.0    # SW corner clamps to (1,1)
+    @test f[Nx+1, 0,    1] == 12.0    # SE clamps to (Nx,1)
+    @test f[0,    Nx+1, 1] == 13.0    # NW clamps to (1,Nx)
+    @test f[Nx+1, Nx+1, 1] == 14.0    # NE clamps to (Nx,Nx)
+end
+
+@testset "core: fill_corner_halos! — periodic wraps to opposite corner" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Periodic, Periodic, Flat))
+    f = CenterField(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0   # SW interior
+    int[Nx, 1,  1] = 12.0   # SE
+    int[1,  Nx, 1] = 13.0   # NW
+    int[Nx, Nx, 1] = 14.0   # NE
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    # SW corner halo (0, 0) wraps to (Nx, Nx).
+    @test f[0,    0,    1] == 14.0
+    # SE corner halo (Nx+1, 0) wraps to (1, Nx).
+    @test f[Nx+1, 0,    1] == 13.0
+    # NW corner halo (0, Nx+1) wraps to (Nx, 1).
+    @test f[0,    Nx+1, 1] == 12.0
+    # NE corner halo (Nx+1, Nx+1) wraps to (1, 1).
+    @test f[Nx+1, Nx+1, 1] == 11.0
+end
+
+@testset "core: fill_corner_halos! — mixed periodic-x + bounded-y" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Periodic, Bounded, Flat))
+    f = CenterField(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0
+    int[Nx, 1,  1] = 12.0
+    int[1,  Nx, 1] = 13.0
+    int[Nx, Nx, 1] = 14.0
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    # SW corner: x wraps (Nx → 0 halo), y clamps (1 → 0 halo) →
+    # source = (Nx, 1) = 12.
+    @test f[0,    0,    1] == 12.0
+    # SE corner: x wraps (1 → Nx+1 halo), y clamps → source (1, 1) = 11.
+    @test f[Nx+1, 0,    1] == 11.0
+    # NW corner: x wraps, y clamps → source (Nx, Nx) = 14.
+    @test f[0,    Nx+1, 1] == 14.0
+    # NE corner: x wraps, y clamps → source (1, Nx) = 13.
+    @test f[Nx+1, Nx+1, 1] == 13.0
+end
+
+# ------------------------------------------------------------------
+# Fractional ice fraction, surface elevation, ice-front mask
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_f_ice! — binary (flt_subgrid=false)" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 50e3), y=(0.0, 50e3),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice  = CenterField(g)
+    H_ice  = CenterField(g)
+    z_bed  = CenterField(g)
+    z_sl   = CenterField(g)
+
+    fill!(interior(z_bed), -500.0)   # all-floating bed
+    fill!(interior(z_sl),  0.0)
+    fill!(interior(H_ice), 0.0)
+
+    # Single ice-covered cell at centre.
+    interior(H_ice)[3, 3, 1] = 200.0
+
+    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
+                flt_subgrid = false)
+    F = interior(f_ice)
+    @test F[3, 3, 1] == 1.0
+    @test all(F[i, j, 1] == 0.0 for j in 1:Nx, i in 1:Nx if !(i == 3 && j == 3))
+end
+
+@testset "tpo: calc_f_ice! — fractional floating margin" begin
+    # 5x5 grid with a 3x3 thick floating block surrounded by ocean.
+    # Margin cells are the 8 outer cells of the 3x3 block; the centre
+    # is fully interior. With flt_subgrid=true, the margin cells
+    # should get f_ice < 1 because their thickness is less than the
+    # interior, while a thinner margin = 100 m vs interior = 200 m
+    # gives f_ice = 100/200 = 0.5.
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 50e3), y=(0.0, 50e3),
+                        topology=(Bounded, Bounded, Flat))
+    f_ice = CenterField(g)
+    H_ice = CenterField(g)
+    z_bed = CenterField(g)
+    z_sl  = CenterField(g)
+
+    fill!(interior(z_bed), -500.0)
+    fill!(interior(z_sl),  0.0)
+    fill!(interior(H_ice), 0.0)
+
+    # Centre cell: fully covered (interior). Eight surrounding cells:
+    # margin with thinner ice. Ocean cells (corners outside 3x3 block)
+    # remain at 0.
+    @inbounds for j in 2:4, i in 2:4
+        interior(H_ice)[i, j, 1] = 100.0   # margin thickness
+    end
+    interior(H_ice)[3, 3, 1] = 200.0       # interior fully-covered cell
+
+    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
+                flt_subgrid = true)
+    F = interior(f_ice)
+
+    # Centre cell is fully interior (n_ice = 4) → f_ice = 1.
+    @test F[3, 3, 1] == 1.0
+
+    # Direct margin neighbours of centre: (2,3), (4,3), (3,2), (3,4)
+    # — each has H = 100 with at least one ice-free neighbour.
+    # Their upstream-fully-covered neighbour is (3,3) with H=200,
+    # so f_ice = 100/200 = 0.5.
+    @test F[2, 3, 1] ≈ 0.5
+    @test F[4, 3, 1] ≈ 0.5
+    @test F[3, 2, 1] ≈ 0.5
+    @test F[3, 4, 1] ≈ 0.5
+
+    # Corner cells of the 3x3 block (e.g. (2,2)): H=100, no upstream
+    # *fully-covered* (n_ice=4) neighbour — falls back on H_lim=100 m,
+    # giving f_ice = min(100/max(100, 100), 1) = 1.0.
+    @test F[2, 2, 1] ≈ 1.0
+    @test F[4, 4, 1] ≈ 1.0
+
+    # Ocean cells stay 0.
+    @test F[1, 1, 1] == 0.0
+    @test F[5, 5, 1] == 0.0
+end
+
+@testset "tpo: calc_z_srf! — grounded vs floating vs ice-free" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    z_srf = CenterField(g)
+    H_ice = CenterField(g)
+    f_ice = CenterField(g)
+    z_bed = CenterField(g)
+    z_sl  = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+    rho_ratio = rho_ice / rho_sw
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(f_ice), 1.0)
+
+    # 1. Grounded ice (bed above flotation): z_srf = z_bed + H_ice.
+    interior(z_bed)[1, 1, 1] = 100.0
+    interior(H_ice)[1, 1, 1] = 500.0
+
+    # 2. Floating ice (bed deep below flotation): z_srf = z_sl + (1-r)·H_ice.
+    interior(z_bed)[2, 1, 1] = -2000.0
+    interior(H_ice)[2, 1, 1] = 500.0
+
+    # 3. Ice-free over land: z_srf = z_bed.
+    interior(z_bed)[3, 1, 1] = 50.0
+    interior(H_ice)[3, 1, 1] = 0.0
+    interior(f_ice)[3, 1, 1] = 0.0
+
+    # 4. Ice-free over ocean: z_srf = z_sl.
+    interior(z_bed)[4, 1, 1] = -200.0
+    interior(H_ice)[4, 1, 1] = 0.0
+    interior(f_ice)[4, 1, 1] = 0.0
+
+    # 5. Partially-covered margin (f_ice < 1): H_eff = 0 →
+    #    z_srf = max(z_bed, z_sl).
+    interior(z_bed)[1, 2, 1] = -100.0
+    interior(H_ice)[1, 2, 1] = 50.0
+    interior(f_ice)[1, 2, 1] = 0.5
+
+    calc_z_srf!(z_srf, H_ice, f_ice, z_bed, z_sl, rho_ice, rho_sw)
+    Z = interior(z_srf)
+
+    @test Z[1, 1, 1] ≈ 100.0 + 500.0
+    @test Z[2, 1, 1] ≈ 0.0   + (1.0 - rho_ratio) * 500.0
+    @test Z[3, 1, 1] ≈ 50.0
+    @test Z[4, 1, 1] == 0.0    # max(z_bed=-200, z_sl=0)
+    @test Z[1, 2, 1] == 0.0    # max(z_bed=-100, z_sl=0); H_eff=0
+end
+
+@testset "tpo: calc_ice_front!" begin
+    # 6x6 grid. Configuration:
+    #   - 4x4 ice block at (2:5, 2:5)
+    #   - block is grounded marine in the south half (y ≤ 3),
+    #     grounded above SL in the north half (y ≥ 4)
+    #   - one floating-extension cell at (3, 5) sticking out — wait,
+    #     keep it simple: just test floating + marine + grounded fronts
+    Nx = 6
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 6.0), y=(0.0, 6.0),
+                        topology=(Bounded, Bounded, Flat))
+    mask_frnt = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(f_ice), 0.0)
+    fill!(interior(f_grnd), 0.0)
+    fill!(interior(z_bed), -100.0)
+    fill!(interior(z_sl),  0.0)
+
+    # 4x4 fully-ice-covered block at (2:5, 2:5).
+    @inbounds for j in 2:5, i in 2:5
+        interior(f_ice)[i, j, 1] = 1.0
+    end
+
+    # South half (j = 2:3): floating (f_grnd = 0).
+    # Middle row (j = 4): grounded marine (f_grnd > 0, z_bed < z_sl).
+    # North row (j = 5): grounded above SL (f_grnd > 0, z_bed > z_sl).
+    for i in 2:5
+        interior(f_grnd)[i, 4, 1] = 1.0
+        # marine: z_bed already -100 < z_sl = 0
+        interior(f_grnd)[i, 5, 1] = 1.0
+        interior(z_bed)[i, 5, 1]  = 200.0   # above SL
+    end
+
+    calc_ice_front!(mask_frnt, f_ice, f_grnd, z_bed, z_sl)
+    M = interior(mask_frnt)
+
+    # Front cells (perimeter of the 4x4 block):
+    @test M[2, 2, 1] == 1.0    # SW: floating
+    @test M[2, 3, 1] == 1.0    # floating front (S edge)
+    @test M[5, 2, 1] == 1.0
+    @test M[2, 4, 1] == 1.0    # marine front
+    @test M[5, 4, 1] == 1.0
+    @test M[2, 5, 1] == 3.0    # grounded above SL
+    @test M[5, 5, 1] == 3.0
+    @test M[3, 5, 1] == 3.0
+
+    # Adjacent ice-free cells get -1.
+    @test M[1, 2, 1] == -1.0   # west of (2,2)
+    @test M[1, 5, 1] == -1.0
+    @test M[6, 5, 1] == -1.0
+    @test M[3, 1, 1] == -1.0   # south of (3,2)
+    @test M[3, 6, 1] == -1.0   # north of (3,5)
+
+    # Interior cells of the block (3,3) - (4,4) — those are not
+    # adjacent to ice-free, so they stay 0.
+    @test M[3, 3, 1] == 0.0
+    @test M[4, 3, 1] == 0.0
+    @test M[3, 4, 1] == 0.0
+    @test M[4, 4, 1] == 0.0
+
+    # Far-from-block cells stay 0.
+    @test M[1, 1, 1] == 0.0
+    @test M[6, 6, 1] == 0.0
+end
+
+# ------------------------------------------------------------------
+# Gradients, gl_sep dispatch, pinning points
+# ------------------------------------------------------------------
+
+@testset "tpo: calc_gradient_acx! — interior linear field" begin
+    # Linear field var = a·x: with the Yelmo convention
+    # (`dvardx[i] = (var[i+1] - var[i]) / dx`), the gradient should
+    # equal `a` for every interior face index `i = 1..Nx-1`. The
+    # easternmost face index `i = Nx` reads `var[Nx+1]` from the
+    # halo; with default Neumann clamp this returns `var[Nx]`, so
+    # `dvardx[Nx] = 0`.
+    Nx = 8
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)   # Yelmo schema: dzsdx etc. are Center fields
+
+    a = 2.5
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = a * (i - 0.5) * dx
+    end
+
+    calc_gradient_acx!(dvardx, var, f_ice, dx)
+    Dx = interior(dvardx)
+
+    @test all(Dx[i, j, 1] ≈ a for j in 1:Nx, i in 1:Nx-1)
+    # Eastern boundary face at i=Nx: Neumann clamp ⇒ gradient = 0.
+    @test all(Dx[Nx, j, 1] == 0.0 for j in 1:Nx)
+end
+
+@testset "tpo: calc_gradient_acy! — interior linear field" begin
+    Nx = 6
+    dy = 2.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dy), y=(0.0, Nx*dy),
+                        topology=(Bounded, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardy = CenterField(g)
+
+    b = -1.5
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = b * (j - 0.5) * dy
+    end
+
+    calc_gradient_acy!(dvardy, var, f_ice, dy)
+    Dy = interior(dvardy)
+    @test all(Dy[i, j, 1] ≈ b for j in 1:Nx-1, i in 1:Nx)
+    @test all(Dy[i, Nx, 1] == 0.0 for i in 1:Nx)
+end
+
+@testset "tpo: calc_gradient_acx! — grad_lim clamp + zero_outside" begin
+    Nx = 4
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)
+
+    # Steep ramp.
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = 100.0 * i
+    end
+
+    # Without clamp, raw gradient = 100/dx = 100. With grad_lim=10,
+    # output is clamped to 10.
+    calc_gradient_acx!(dvardx, var, f_ice, dx; grad_lim=10.0)
+    Dx = interior(dvardx)
+    @test all(Dx[i, j, 1] <= 10.0 + 1e-9 for j in 1:Nx, i in 1:Nx)
+    @test all(Dx[i, j, 1] >= -10.0 - 1e-9 for j in 1:Nx, i in 1:Nx)
+
+    # zero_outside path: mark cell (3, j) as partial cover. Faces
+    # (2, j) and (3, j) both touch this cell.
+    @inbounds for j in 1:Nx
+        interior(f_ice)[3, j, 1] = 0.5
+    end
+    calc_gradient_acx!(dvardx, var, f_ice, dx; zero_outside=true)
+    Dx = interior(dvardx)
+    # Face i=2 between (2) and (3). var[2]=200, var[3]=300, but
+    # cell (3) has f_ice<1 → V1 = 0, V0 = 200, grad = (0 - 200)/1 = -200.
+    @test Dx[2, 2, 1] ≈ -200.0
+    # Face i=3 between (3) and (4). var[3]=300 → V0 = 0, var[4]=400 →
+    # grad = (400 - 0)/1 = 400.
+    @test Dx[3, 2, 1] ≈ 400.0
+end
+
+@testset "tpo: calc_f_grnd_subgrid_linear!" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd      = CenterField(g)
+    f_grnd      = CenterField(g)
+    f_grnd_acx  = XFaceField(g)
+    f_grnd_acy  = YFaceField(g)
+
+    # Set a linear ramp of H_grnd along x: H_grnd[i, j] = i - 3.
+    # i=1: -2 (floating), i=2: -1, i=3: 0 (border), i=4: +1 (grnd), i=5: +2.
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+    Fa  = interior(f_grnd)
+    Fx  = interior(f_grnd_acx)
+
+    # aa-node is binary: H_grnd > 0 → 1 else 0.
+    @test Fa[1, 1, 1] == 0.0   # H_grnd = -2
+    @test Fa[3, 1, 1] == 0.0   # H_grnd = 0 (treated as floating: > 0 fails)
+    @test Fa[4, 1, 1] == 1.0   # H_grnd = 1
+    @test Fa[5, 1, 1] == 1.0
+
+    # x-face fractions. Face i=4 sits between aa (3) and (4):
+    #   H_grnd_left = 0 (floating per >0 test, but the formula treats
+    #     H1=0, H2=1 → H1<=0 && H2>0 branch → -H2/(H1-H2) = -1/(0-1) = 1.0).
+    @test Fx[4, 1, 1] ≈ 1.0
+
+    # Face i=5 between aa(4) and aa(5): both grounded → 1.
+    @test Fx[5, 1, 1] == 1.0
+
+    # Face i=2 between aa(1)=-2 and aa(2)=-1: both floating → 0.
+    @test Fx[2, 1, 1] == 0.0
+
+    # Face i=3 between aa(2)=-1 and aa(3)=0: H1=-1, H2=0. Formula:
+    # H1<=0 && H2>0 false (H2==0 fails > 0); both <=0 → 0.
+    @test Fx[3, 1, 1] == 0.0
+end
+
+@testset "tpo: calc_f_grnd_subgrid_area! — area-based" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd     = CenterField(g)
+    f_grnd     = CenterField(g)
+    f_grnd_acx = XFaceField(g)
+    f_grnd_acy = YFaceField(g)
+
+    # Smooth linear ramp again, but this time area-based should give
+    # *fractional* aa values for cells near the GL.
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                              gz_nx = 11)
+    Fa = interior(f_grnd)
+
+    # Fully floating away from GL.
+    @test Fa[1, 3, 1] == 0.0
+    # Fully grounded away from GL.
+    @test Fa[5, 3, 1] == 1.0
+
+    # Cell at GL (i=3) — fractional, ~0.5 by symmetry.
+    @test 0.4 < Fa[3, 3, 1] < 0.6
+
+    # Adjacent cells should also have intermediate fractions.
+    @test 0 < Fa[2, 3, 1] < 1.0 || Fa[2, 3, 1] == 0.0
+    @test 0 < Fa[4, 3, 1] < 1.0 || Fa[4, 3, 1] == 1.0
+end
+
+@testset "tpo: calc_f_grnd_pinning_points!" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f_grnd_pin = CenterField(g)
+    H_ice      = CenterField(g)
+    f_ice      = CenterField(g)
+    z_bed      = CenterField(g)
+    z_bed_sd   = CenterField(g)
+    z_sl       = CenterField(g)
+
+    rho_ice, rho_sw = 910.0, 1028.0
+    rho_ratio = rho_ice / rho_sw
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(f_ice), 1.0)
+
+    # Cell (1,1): floating (z_base above z_bed), σ > 0 → fractional pinning.
+    H = 500.0
+    interior(H_ice)[1, 1, 1] = H
+    interior(z_bed)[1, 1, 1] = -2000.0
+    interior(z_bed_sd)[1, 1, 1] = 1000.0
+    z_base = -rho_ratio * H            # ≈ -442.6
+
+    # Cell (2,1): floating, σ = 0 → f_grnd_pin = 0.
+    interior(H_ice)[2, 1, 1] = H
+    interior(z_bed)[2, 1, 1] = -2000.0
+    interior(z_bed_sd)[2, 1, 1] = 0.0
+
+    # Cell (3,1): clearly grounded (z_base below z_bed) → 0.
+    interior(H_ice)[3, 1, 1] = H
+    interior(z_bed)[3, 1, 1] = 100.0
+    interior(z_bed_sd)[3, 1, 1] = 1000.0
+
+    # Cell (4,1): floating, σ very small → expect ~0.
+    interior(H_ice)[4, 1, 1] = H
+    interior(z_bed)[4, 1, 1] = -2000.0
+    interior(z_bed_sd)[4, 1, 1] = 1.0
+
+    calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                z_bed, z_bed_sd, z_sl,
+                                rho_ice, rho_sw)
+    Fp = interior(f_grnd_pin)
+
+    # Cell 1: P&D 2012 Eq. 13:
+    #   f = 0.5 · max(0, 1 − (z_base − z_bed) / σ)
+    #     = 0.5 · max(0, 1 − (-442.6 − -2000)/1000) = 0.5·max(0, 1 − 1.557) = 0
+    # (positive expression: above-cap distance > σ, so floor at 0.)
+    @test Fp[1, 1, 1] == 0.0
+
+    # Cell 2: σ=0 → f_grnd_pin = 0 by definition.
+    @test Fp[2, 1, 1] == 0.0
+
+    # Cell 3: grounded (bed above shelf draft) → not in the floating
+    # branch → 0.
+    @test Fp[3, 1, 1] == 0.0
+
+    # Cell 4: σ tiny, large draft-to-bed gap → 0.
+    @test Fp[4, 1, 1] == 0.0
+
+    # Now test a positive case: shallow shelf above a shallow bed
+    # with finite spread.
+    interior(H_ice)[1, 2, 1] = 200.0
+    interior(z_bed)[1, 2, 1] = -250.0
+    interior(z_bed_sd)[1, 2, 1] = 1000.0
+    # z_base = -rho_ratio·200 = -177.04
+    # f = 0.5·max(0, 1 − (-177.04 - -250)/1000)
+    #   = 0.5·max(0, 1 − 0.073) = 0.5 · 0.927 = 0.463
+    calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                z_bed, z_bed_sd, z_sl,
+                                rho_ice, rho_sw)
+    Fp = interior(f_grnd_pin)
+    expected = 0.5 * (1.0 - ((-rho_ratio * 200.0) - (-250.0)) / 1000.0)
+    @test Fp[1, 2, 1] ≈ expected
+end
+
+@testset "tpo: calc_grounded_fractions! — gl_sep dispatch" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd     = CenterField(g)
+    f_grnd_a   = CenterField(g)
+    f_grnd_b   = CenterField(g)
+    f_grnd_c   = CenterField(g)
+    f_grnd_acx = XFaceField(g)
+    f_grnd_acy = YFaceField(g)
+    f_grnd_ab  = CenterField(g)
+
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = Float64(i - 3)
+    end
+
+    # gl_sep == 1 → linear; aa is binary {0, 1}.
+    calc_grounded_fractions!(f_grnd_a, f_grnd_acx, f_grnd_acy, nothing,
+                             H_grnd, 1)
+    Fa = interior(f_grnd_a)
+    @test Fa[1, 3, 1] == 0.0
+    @test Fa[5, 3, 1] == 1.0
+    @test Fa[3, 3, 1] == 0.0   # H_grnd=0 → not >0 → floating per binary
+
+    # gl_sep == 2 → area; aa cell at GL is fractional ≈ 0.5.
+    calc_grounded_fractions!(f_grnd_b, f_grnd_acx, f_grnd_acy, nothing,
+                             H_grnd, 2; gz_nx = 11)
+    Fb = interior(f_grnd_b)
+    @test 0.4 < Fb[3, 3, 1] < 0.6
+
+    # gl_sep == 3 → CISM-quad; aa at GL is also fractional but via
+    # bilinear interpolation (different number than gl_sep=2 in general).
+    calc_grounded_fractions!(f_grnd_c, f_grnd_acx, f_grnd_acy, f_grnd_ab,
+                             H_grnd, 3)
+    Fc = interior(f_grnd_c)
+    @test 0.0 <= Fc[3, 3, 1] <= 1.0
+    @test Fc[1, 3, 1] == 0.0
+    @test Fc[5, 3, 1] == 1.0
+
+    # Bogus gl_sep errors.
+    @test_throws ErrorException calc_grounded_fractions!(f_grnd_a, f_grnd_acx,
+        f_grnd_acy, nothing, H_grnd, 99)
+end
+
+# ------------------------------------------------------------------
+# Dynamics-only thickness/cover fields (ssa_lat_bc dispatch)
+# ------------------------------------------------------------------
+
+@testset "tpo: extend_floating_slab! — single-cell seed" begin
+    # 7x7 grid; one grounded cell at (4, 4) surrounded by ocean.
+    # After 2 iterations the slab should reach 2 cells in each
+    # direction (a 5x5 cross / square).
+    Nx = 7
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 7.0), y=(0.0, 7.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice  = CenterField(g)
+    f_grnd = CenterField(g)
+
+    fill!(interior(H_ice), 0.0)
+    fill!(interior(f_grnd), 0.0)
+
+    # Seed: grounded ice cell at (4, 4).
+    interior(H_ice)[4, 4, 1]  = 1000.0
+    interior(f_grnd)[4, 4, 1] = 1.0
+
+    extend_floating_slab!(H_ice, f_grnd; H_slab=1.0, n_ext=2)
+    H = interior(H_ice)
+
+    # Direct neighbours of (4,4) get the slab in iter 1.
+    @test H[3, 4, 1] == 1.0
+    @test H[5, 4, 1] == 1.0
+    @test H[4, 3, 1] == 1.0
+    @test H[4, 5, 1] == 1.0
+
+    # Two cells out (in iter 2): direct neighbours of slab cells.
+    @test H[2, 4, 1] == 1.0
+    @test H[6, 4, 1] == 1.0
+    @test H[4, 2, 1] == 1.0
+    @test H[4, 6, 1] == 1.0
+
+    # Diagonal of seed: not direct, but adjacent to a slab cell after
+    # iter 1, so iter 2 picks it up.
+    @test H[3, 3, 1] == 1.0
+    @test H[5, 5, 1] == 1.0
+
+    # Cells > 2 from seed stay 0.
+    @test H[1, 4, 1] == 0.0
+    @test H[7, 4, 1] == 0.0
+
+    # The seed itself unchanged.
+    @test H[4, 4, 1] == 1000.0
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — default (pass-through)" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # H_ice = 100 at (2,2), 50 at (2,3) [partial f_ice], 0 elsewhere.
+    interior(H_ice)[2, 2, 1] = 100.0
+    interior(f_ice)[2, 2, 1] = 1.0
+    interior(H_ice)[2, 3, 1] = 50.0
+    interior(f_ice)[2, 3, 1] = 0.5
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "floating")
+
+    @test interior(H_ice_dyn) == interior(H_ice)
+    @test interior(f_ice_dyn) == interior(f_ice)
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — slab" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # (2,2): fully covered, 100 m. (2,3): partial cover (f<1) but
+    # H_ice = 50. (3,3): ice-free.
+    interior(H_ice)[2, 2, 1] = 100.0
+    interior(f_ice)[2, 2, 1] = 1.0
+    interior(H_ice)[2, 3, 1] = 50.0
+    interior(f_ice)[2, 3, 1] = 0.5
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "slab")
+    Hd = interior(H_ice_dyn)
+
+    # Fully-covered cell unchanged.
+    @test Hd[2, 2, 1] == 100.0
+    # Partial-cover cell bumped to 1.0.
+    @test Hd[2, 3, 1] == 1.0
+    # Ice-free cells (f_ice = 0) get f_ice < 1 → also bumped to 1.0.
+    @test Hd[1, 1, 1] == 1.0
+    @test Hd[3, 3, 1] == 1.0
+
+    # f_ice_dyn binary from H_ice_dyn — every cell now has H > 0 → 1.
+    @test all(interior(f_ice_dyn) .== 1.0)
+end
+
+@testset "tpo: calc_dynamic_ice_fields! — slab-ext" begin
+    Nx = 5
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 5.0), y=(0.0, 5.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_ice_dyn = CenterField(g)
+    f_ice_dyn = CenterField(g)
+    H_ice     = CenterField(g)
+    f_ice     = CenterField(g)
+    f_grnd    = CenterField(g)
+    z_bed     = CenterField(g)
+    z_sl      = CenterField(g)
+
+    fill!(interior(z_sl), 0.0)
+    fill!(interior(z_bed), -500.0)
+
+    # Single grounded ice cell at (3, 3); rest is ocean.
+    interior(H_ice)[3, 3, 1] = 1000.0
+    interior(f_ice)[3, 3, 1] = 1.0
+    interior(f_grnd)[3, 3, 1] = 1.0
+
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
+                             H_ice, f_ice, f_grnd,
+                             z_bed, z_sl, 910.0, 1028.0,
+                             "slab-ext";
+                             H_slab=1.0, n_ext=1)
+    Hd = interior(H_ice_dyn)
+
+    # Seed unchanged.
+    @test Hd[3, 3, 1] == 1000.0
+
+    # Direct neighbours got the slab from extend_floating_slab!.
+    @test Hd[2, 3, 1] == 1.0
+    @test Hd[4, 3, 1] == 1.0
+    @test Hd[3, 2, 1] == 1.0
+    @test Hd[3, 4, 1] == 1.0
+
+    # 2 cells away (n_ext=1): unchanged.
+    @test Hd[1, 3, 1] == 0.0
+    @test Hd[5, 3, 1] == 0.0
 end

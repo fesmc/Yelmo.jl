@@ -167,7 +167,7 @@ function calving_step!(y::YelmoModel, dt::Float64)
 
     # 10. Apply kill, refresh f_ice.
     apply_tendency!(y.tpo.H_ice, y.tpo.cmb, dt; adjust_mb = true)
-    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+    calc_f_ice!(y)
 
     # 11. Post-kill consistency: H ≤ 0 over below-SL ocean cells flips
     # lsf to ocean. Skipped for "equil" so the front stays pinned even

@@ -8,17 +8,32 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
-export calc_H_grnd!, determine_grounded_fractions!
+using ..YelmoCore: fill_corner_halos!
+
+export calc_H_grnd!, determine_grounded_fractions!,
+       calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
+       calc_f_grnd_pinning_points!,
+       calc_grounded_fractions!
 
 """
     calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl, rho_ice, rho_sw) -> H_grnd
 
-Flotation diagnostic: `H_grnd = H_ice - max(z_sl - z_bed, 0) * rho_sw / rho_ice`.
-Positive ⇒ grounded (anchored to bed); negative ⇒ floating.
+Flotation diagnostic. Two-branch formula matching
+`physics/topography.f90:806 calc_H_grnd`:
 
-Lightweight helper; no neighbour stencils. Mirrors the scattered
-formula used throughout `yelmo_topography.f90`.
+  - Bed below sea level (`z_sl > z_bed`):
+    `H_grnd = H_ice - (z_sl - z_bed) · rho_sw/rho_ice`
+    — overburden minus water-column thickness.
+  - Bed at or above sea level (`z_sl ≤ z_bed`):
+    `H_grnd = H_ice + (z_bed - z_sl)`
+    — ice thickness plus bed elevation above sea level. Ensures
+    ice-free land also has `H_grnd > 0` so it classifies as
+    grounded in subsequent kernels.
+
+Positive ⇒ grounded (anchored to bed or above-SL land); negative ⇒
+floating. Lightweight helper; no neighbour stencils.
 """
 function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
                       rho_ice::Real, rho_sw::Real)
@@ -26,20 +41,14 @@ function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
     H   = interior(H_ice)
     Zb  = interior(z_bed)
     Zsl = interior(z_sl)
-    rho_ratio = rho_sw / rho_ice
+    rho_sw_ice = rho_sw / rho_ice
     @inbounds for j in axes(Hg, 2), i in axes(Hg, 1)
-        depth   = Zsl[i, j, 1] - Zb[i, j, 1]
-        H_float = depth > 0.0 ? depth * rho_ratio : 0.0
-        Hg[i, j, 1] = H[i, j, 1] - H_float
+        depth = Zsl[i, j, 1] - Zb[i, j, 1]
+        Hg[i, j, 1] = depth > 0.0 ?
+            H[i, j, 1] - rho_sw_ice * depth :
+            H[i, j, 1] + (Zb[i, j, 1] - Zsl[i, j, 1])
     end
     return H_grnd
-end
-
-# Out-of-domain reads of the flotation field resolve to 0 (open ocean —
-# no ice, bed at sea level by construction). Matches the Dirichlet-zero
-# halo used elsewhere in the module.
-@inline function _f_or_zero(F::AbstractMatrix, i::Int, j::Int, nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? F[i, j] : 0.0
 end
 
 """
@@ -62,7 +71,10 @@ Algorithm (Leguy et al. 2021, ported via IMAU-ICE v2.0):
      acx-/acy-/ab-fractions are quadrant means at the corresponding
      face-/corner-staggered positions.
 
-Out-of-domain neighbour reads of `f_flt` resolve to 0.
+Halo handling: `H_grnd`'s halos are filled via `fill_halo_regions!`,
+so neighbour reads honour the field's grid topology and boundary
+conditions automatically (Neumann-zero clamp by default; Periodic
+wrap on Periodic axes).
 
 Port of `physics/topography.f90:determine_grounded_fractions`.
 """
@@ -70,20 +82,18 @@ function determine_grounded_fractions!(f_grnd, H_grnd;
                                        f_grnd_acx = nothing,
                                        f_grnd_acy = nothing,
                                        f_grnd_ab  = nothing)
+    fill_halo_regions!(H_grnd)
+    fill_corner_halos!(H_grnd)
+
     Hg = interior(H_grnd)
     nx = size(Hg, 1)
     ny = size(Hg, 2)
-
-    f_flt = Matrix{Float64}(undef, nx, ny)
-    @inbounds for j in 1:ny, i in 1:nx
-        f_flt[i, j] = -Hg[i, j, 1]
-    end
 
     f_NW = Matrix{Float64}(undef, nx, ny)
     f_NE = Matrix{Float64}(undef, nx, ny)
     f_SW = Matrix{Float64}(undef, nx, ny)
     f_SE = Matrix{Float64}(undef, nx, ny)
-    _cism_quads!(f_NW, f_NE, f_SW, f_SE, f_flt, nx, ny)
+    _cism_quads!(f_NW, f_NE, f_SW, f_SE, H_grnd, nx, ny)
 
     Fa = interior(f_grnd)
     @inbounds for j in 1:ny, i in 1:nx
@@ -122,26 +132,28 @@ end
 
 # Per-cell quadrant-grounded-fraction kernel.
 # Mirrors `determine_grounded_fractions_CISM_quads` in
-# `physics/topography.f90:1978`.
-function _cism_quads!(f_NW, f_NE, f_SW, f_SE, f_flt, nx::Int, ny::Int)
+# `physics/topography.f90:1978`. Reads `H_grnd` halos directly (filled
+# upstream) and computes `f_flt = -H_grnd` inline — saves an
+# allocation versus materialising a separate `f_flt` field.
+function _cism_quads!(f_NW, f_NE, f_SW, f_SE, H_grnd, nx::Int, ny::Int)
     @inbounds for j in 1:ny, i in 1:nx
-        f_m  = f_flt[i, j]
-        fW   = 0.5 * (_f_or_zero(f_flt, i-1, j,   nx, ny) + f_m)
-        fE   = 0.5 * (f_m + _f_or_zero(f_flt, i+1, j, nx, ny))
-        fN   = 0.5 * (f_m + _f_or_zero(f_flt, i,   j+1, nx, ny))
-        fS   = 0.5 * (f_m + _f_or_zero(f_flt, i,   j-1, nx, ny))
-        fNW  = 0.25 * (_f_or_zero(f_flt, i-1, j+1, nx, ny) +
-                       _f_or_zero(f_flt, i,   j+1, nx, ny) +
-                       _f_or_zero(f_flt, i-1, j,   nx, ny) + f_m)
-        fNE  = 0.25 * (_f_or_zero(f_flt, i,   j+1, nx, ny) +
-                       _f_or_zero(f_flt, i+1, j+1, nx, ny) +
-                       f_m + _f_or_zero(f_flt, i+1, j, nx, ny))
-        fSW  = 0.25 * (_f_or_zero(f_flt, i-1, j,   nx, ny) + f_m +
-                       _f_or_zero(f_flt, i-1, j-1, nx, ny) +
-                       _f_or_zero(f_flt, i,   j-1, nx, ny))
-        fSE  = 0.25 * (f_m + _f_or_zero(f_flt, i+1, j, nx, ny) +
-                       _f_or_zero(f_flt, i,   j-1, nx, ny) +
-                       _f_or_zero(f_flt, i+1, j-1, nx, ny))
+        f_m  = -H_grnd[i,   j,   1]
+        fW   = 0.5  * (-H_grnd[i-1, j,   1] + f_m)
+        fE   = 0.5  * (f_m + -H_grnd[i+1, j,   1])
+        fN   = 0.5  * (f_m + -H_grnd[i,   j+1, 1])
+        fS   = 0.5  * (f_m + -H_grnd[i,   j-1, 1])
+        fNW  = 0.25 * (-H_grnd[i-1, j+1, 1] +
+                       -H_grnd[i,   j+1, 1] +
+                       -H_grnd[i-1, j,   1] + f_m)
+        fNE  = 0.25 * (-H_grnd[i,   j+1, 1] +
+                       -H_grnd[i+1, j+1, 1] +
+                       f_m + -H_grnd[i+1, j, 1])
+        fSW  = 0.25 * (-H_grnd[i-1, j,   1] + f_m +
+                       -H_grnd[i-1, j-1, 1] +
+                       -H_grnd[i,   j-1, 1])
+        fSE  = 0.25 * (f_m + -H_grnd[i+1, j,   1] +
+                       -H_grnd[i,   j-1, 1] +
+                       -H_grnd[i+1, j-1, 1])
 
         f_NW[i, j] = _calc_fraction_above_zero(fNW,  fN, fW,  f_m)
         f_NE[i, j] = _calc_fraction_above_zero(fN,  fNE, f_m, fE)
@@ -369,4 +381,281 @@ function _calc_fraction_above_zero(f_NW, f_NE, f_SW, f_SE)
     end
 
     return clamp(phi, 0.0, 1.0)
+end
+
+# ----------------------------------------------------------------------
+# `gl_sep = 1` — linear interpolation between grounded/floating cells
+# ----------------------------------------------------------------------
+
+"""
+    calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+        -> f_grnd
+
+Compute the binary aa-node `f_grnd` (1 if `H_grnd > 0`, else 0) and
+the linearly-interpolated face fractions `f_grnd_acx`, `f_grnd_acy`
+from the flotation diagnostic `H_grnd`. At a grounding-line face the
+fraction is `f = -H_grnd₁ / (H_grnd₂ - H_grnd₁)` where `H_grnd₁` is
+the grounded-side value and `H_grnd₂` the floating-side value
+(zero crossing of a linear interpolant).
+
+Halo handling: `H_grnd` halos are filled via `fill_halo_regions!` so
+boundary faces honour the grid topology + BCs. The Fortran's edge
+fix-up (`f_grnd_x[nx,:] = f_grnd_x[nx-1,:]`) is replaced by halo
+reads on the eastern/northern boundary face.
+
+Port of `physics/topography.f90:1108 calc_f_grnd_subgrid_linear`.
+This is the `gl_sep = 1` variant.
+"""
+function calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+    fill_halo_regions!(H_grnd)
+
+    Fa  = interior(f_grnd)
+    Fx  = interior(f_grnd_acx)
+    Fy  = interior(f_grnd_acy)
+    Hg  = interior(H_grnd)
+    nx, ny = size(Fa, 1), size(Fa, 2)
+
+    # aa-node: binary f_grnd (matches the Fortran where ... 1.0 / 0.0).
+    @inbounds for j in 1:ny, i in 1:nx
+        Fa[i, j, 1] = Hg[i, j, 1] > 0.0 ? 1.0 : 0.0
+    end
+
+    # x-face: linear interp of H_grnd between aa-cells (i-1) and (i).
+    @inbounds for j in axes(Fx, 2), i in axes(Fx, 1)
+        Fx[i, j, 1] = _linear_face_fraction(H_grnd[i-1, j, 1], H_grnd[i, j, 1])
+    end
+
+    # y-face.
+    @inbounds for j in axes(Fy, 2), i in axes(Fy, 1)
+        Fy[i, j, 1] = _linear_face_fraction(H_grnd[i, j-1, 1], H_grnd[i, j, 1])
+    end
+
+    return f_grnd
+end
+
+# Linear face-fraction between two aa-node H_grnd values. Cells with
+# the same flotation sign give 0 (both floating) or 1 (both
+# grounded); a sign change linearises through the zero crossing.
+@inline function _linear_face_fraction(H1::Real, H2::Real)
+    if H1 > 0.0 && H2 <= 0.0
+        return -H1 / (H2 - H1)
+    elseif H1 <= 0.0 && H2 > 0.0
+        # Symmetric formula with `H_grnd_1` taken from the grounded side.
+        return -H2 / (H1 - H2)
+    elseif H1 <= 0.0 && H2 <= 0.0
+        return 0.0
+    else
+        return 1.0
+    end
+end
+
+# ----------------------------------------------------------------------
+# `gl_sep = 2` — area-based subgrid evaluation with `gz_nx` interp pts
+# ----------------------------------------------------------------------
+
+"""
+    calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                              gz_nx=15) -> f_grnd
+
+Compute aa-node `f_grnd` by evaluating the bilinear interpolant of
+`H_grnd` at the corners (ab-nodes) of each cell, then sampling the
+interpolant on a `gz_nx × gz_nx` regular sub-grid and counting the
+fraction above zero. Face fractions `f_grnd_acx` / `f_grnd_acy` are
+the average of the aa fractions on each side (the Fortran routine
+overrides the per-face subgrid sampling with this average — line
+1083+ — and we follow that active variant).
+
+Halo handling: `H_grnd` halos are filled via `fill_halo_regions!`
+plus `fill_corner_halos!` (the 4-corner ab-node averages reach into
+diagonals).
+
+Port of `physics/topography.f90:959 calc_f_grnd_subgrid_area`.
+This is the `gl_sep = 2` variant.
+"""
+function calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                                   gz_nx::Int = 15)
+    gz_nx > 1 || error("calc_f_grnd_subgrid_area!: gz_nx must be > 1 (got $gz_nx).")
+
+    fill_halo_regions!(H_grnd)
+    fill_corner_halos!(H_grnd)
+
+    Fa = interior(f_grnd)
+    Fx = interior(f_grnd_acx)
+    Fy = interior(f_grnd_acy)
+    nx, ny = size(Fa, 1), size(Fa, 2)
+
+    inv_n = 1.0 / (gz_nx * gz_nx)
+
+    # Phase 1: aa-node fraction via 4-corner ab-node averaging then
+    # bilinear sub-cell sampling.
+    @inbounds for j in 1:ny, i in 1:nx
+        # H_grnd at the four ab-corners (NE, NW, SW, SE).
+        Hg_NE = 0.25 * (H_grnd[i,   j,   1] + H_grnd[i+1, j,   1] +
+                        H_grnd[i+1, j+1, 1] + H_grnd[i,   j+1, 1])
+        Hg_NW = 0.25 * (H_grnd[i,   j,   1] + H_grnd[i-1, j,   1] +
+                        H_grnd[i-1, j+1, 1] + H_grnd[i,   j+1, 1])
+        Hg_SW = 0.25 * (H_grnd[i,   j,   1] + H_grnd[i-1, j,   1] +
+                        H_grnd[i-1, j-1, 1] + H_grnd[i,   j-1, 1])
+        Hg_SE = 0.25 * (H_grnd[i,   j,   1] + H_grnd[i+1, j,   1] +
+                        H_grnd[i+1, j-1, 1] + H_grnd[i,   j-1, 1])
+
+        Hg_min = min(Hg_NE, Hg_NW, Hg_SW, Hg_SE)
+        Hg_max = max(Hg_NE, Hg_NW, Hg_SW, Hg_SE)
+
+        if Hg_max >= 0.0 && Hg_min < 0.0
+            # Subgrid GL — sample the bilinear interpolant on a
+            # gz_nx × gz_nx sub-cell grid and count points >= 0.
+            Fa[i, j, 1] = _bilinear_grounded_fraction(Hg_NW, Hg_NE,
+                                                      Hg_SW, Hg_SE,
+                                                      gz_nx, inv_n)
+        elseif Hg_min >= 0.0
+            Fa[i, j, 1] = 1.0
+        else
+            Fa[i, j, 1] = 0.0
+        end
+    end
+
+    # Phase 2: face fractions = arithmetic mean of the two adjacent aa
+    # values (Fortran's active `if (.TRUE.)` branch at line 1083+).
+    # Boundary face values come from halo reads on the aa-fraction
+    # field — but f_grnd's halos aren't filled here yet, so we read
+    # interior with clamping for now. The Fortran's `f_grnd_acx[nx,:]
+    # = f_grnd_acx[nx-1,:]` edge fix is reproduced by clamping below.
+    @inbounds for j in axes(Fx, 2), i in axes(Fx, 1)
+        i_l = max(i - 1, 1)
+        i_r = min(i,     nx)
+        Fx[i, j, 1] = 0.5 * (Fa[i_l, j, 1] + Fa[i_r, j, 1])
+    end
+    @inbounds for j in axes(Fy, 2), i in axes(Fy, 1)
+        j_l = max(j - 1, 1)
+        j_r = min(j,     ny)
+        Fy[i, j, 1] = 0.5 * (Fa[i, j_l, 1] + Fa[i, j_r, 1])
+    end
+
+    return f_grnd
+end
+
+# Sub-cell sampling of the bilinear interpolant defined by four
+# ab-corner values. Returns `count(samples >= 0) / gz_nx²`. The
+# corners are passed in (NW, NE, SW, SE) order.
+function _bilinear_grounded_fraction(Hg_NW::Real, Hg_NE::Real,
+                                     Hg_SW::Real, Hg_SE::Real,
+                                     gz_nx::Int, inv_n::Float64)
+    n_grnd = 0
+    @inbounds for jj in 1:gz_nx, ii in 1:gz_nx
+        u = (ii - 0.5) / gz_nx           # 0 < u < 1, `u=0` ↔ west edge
+        v = (jj - 0.5) / gz_nx           # 0 < v < 1, `v=0` ↔ south edge
+        H = (1 - u) * (1 - v) * Hg_SW +
+            u       * (1 - v) * Hg_SE +
+            (1 - u) * v       * Hg_NW +
+            u       * v       * Hg_NE
+        H >= 0.0 && (n_grnd += 1)
+    end
+    return n_grnd * inv_n
+end
+
+# ----------------------------------------------------------------------
+# Subgrid pinning-point fraction
+# ----------------------------------------------------------------------
+
+"""
+    calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                z_bed, z_bed_sd, z_sl, rho_ice, rho_sw)
+        -> f_grnd_pin
+
+For each floating ice cell, compute the fraction of the cell whose
+sub-grid bed could touch the base of the ice shelf, given a
+distribution of bed elevations `N(z_bed, z_bed_sd)`. Uses the
+Pollard & DeConto (2012, Eq. 13) approximation:
+
+    f = 0.5 · max(0, 1 − (z_base − z_bed) / σ_bed)
+
+with `z_base = z_sl − rho_ice/rho_sw · H_eff` (the ice-shelf draft).
+Cells where the bed is shallower than the draft are floating-by-
+default in the cell-mean sense but may have grounded sub-cell
+patches. Cells with `σ_bed = 0` are always 0.
+
+Per-cell, no neighbour reads — no halo handling needed.
+
+Port of `physics/topography.f90:1224 calc_f_grnd_pinning_points`.
+"""
+function calc_f_grnd_pinning_points!(f_grnd_pin, H_ice, f_ice,
+                                     z_bed, z_bed_sd, z_sl,
+                                     rho_ice::Real, rho_sw::Real)
+    Fp  = interior(f_grnd_pin)
+    H   = interior(H_ice)
+    Fi  = interior(f_ice)
+    Zb  = interior(z_bed)
+    Zsd = interior(z_bed_sd)
+    Zsl = interior(z_sl)
+
+    rho_ice_sw = rho_ice / rho_sw
+
+    @inbounds for j in axes(Fp, 2), i in axes(Fp, 1)
+        h = H[i, j, 1]
+        f = Fi[i, j, 1]
+
+        # Effective ice thickness (no `set_frac_zero` here — match
+        # Fortran's `calc_H_eff(...)` without the kwarg).
+        H_eff = f > 0.0 ? h / f : h
+
+        # Ice-shelf draft assuming floating.
+        z_base = Zsl[i, j, 1] - rho_ice_sw * H_eff
+
+        zb = Zb[i, j, 1]
+        if z_base > zb
+            sigma = Zsd[i, j, 1]
+            if sigma == 0.0
+                Fp[i, j, 1] = 0.0
+            else
+                # Pollard & DeConto (2012), Eq. 13.
+                Fp[i, j, 1] = 0.5 * max(0.0, 1.0 - (z_base - zb) / sigma)
+            end
+        else
+            Fp[i, j, 1] = 0.0
+        end
+    end
+    return f_grnd_pin
+end
+
+# ----------------------------------------------------------------------
+# `gl_sep` dispatch — pick the right f_grnd variant
+# ----------------------------------------------------------------------
+
+"""
+    calc_grounded_fractions!(f_grnd, f_grnd_acx, f_grnd_acy, f_grnd_ab,
+                             H_grnd, gl_sep; gz_nx=15) -> f_grnd
+
+Dispatch over the `ytopo.gl_sep` parameter:
+
+  - `gl_sep == 1` → `calc_f_grnd_subgrid_linear!` (linear interp).
+    Writes aa, acx, acy. `f_grnd_ab` is left untouched.
+  - `gl_sep == 2` → `calc_f_grnd_subgrid_area!` with `gz_nx`
+    sub-cell points per side. Writes aa, acx, acy.
+  - `gl_sep == 3` → `determine_grounded_fractions!` (CISM-quad,
+    Leguy et al. 2021). Writes aa, acx, acy, ab.
+
+`f_grnd_ab` is populated only by the CISM-quad variant; pass
+`nothing` to skip it for the other branches.
+
+Port of `physics/topography.f90:949 select case(tpo%par%gl_sep)`.
+"""
+function calc_grounded_fractions!(f_grnd, f_grnd_acx, f_grnd_acy, f_grnd_ab,
+                                  H_grnd, gl_sep::Integer;
+                                  gz_nx::Int = 15)
+    if gl_sep == 1
+        calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+    elseif gl_sep == 2
+        calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                                  gz_nx = gz_nx)
+    elseif gl_sep == 3
+        determine_grounded_fractions!(f_grnd, H_grnd;
+                                      f_grnd_acx = f_grnd_acx,
+                                      f_grnd_acy = f_grnd_acy,
+                                      f_grnd_ab  = f_grnd_ab)
+    else
+        error("calc_grounded_fractions!: gl_sep=$(gl_sep) not supported. " *
+              "Use 1 (linear), 2 (area), or 3 (CISM-quad).")
+    end
+    return f_grnd
 end
