@@ -13,6 +13,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_fmb_total!
 
@@ -21,17 +22,6 @@ export calc_fmb_total!
 # `physics/topography.f90:781`.
 @inline function _calc_H_eff(H_ice::Real, f_ice::Real)
     return f_ice > 0.0 ? H_ice / f_ice : H_ice
-end
-
-# Saturated lookup: `H_ice` at (i,j) if in-bounds, else 0.
-@inline function _h_ice_or_zero(H::AbstractArray, i::Int, j::Int,
-                                nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? H[i, j, 1] : 0.0
-end
-
-@inline function _bmb_or_zero(B::AbstractArray, i::Int, j::Int,
-                              nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? B[i, j, 1] : 0.0
 end
 
 """
@@ -54,9 +44,13 @@ Where `dz` is the submerged front depth: `H_eff * rho_ice/rho_sw` for
 floating cells, `max(H_eff - H_grnd, 0) * rho_ice/rho_sw` for grounded
 marine cells.
 
-Out-of-domain neighbour reads of `H_ice` resolve to 0 (open ocean), so
-boundary cells correctly count the domain-edge as an ice-free
-neighbour.
+Halo handling: `H_ice` and `bmb_shlf` halos resolve via their grid
+topology + boundary conditions. `H_ice` carries
+`ValueBoundaryCondition(0)` (Dirichlet), so its halo at a Bounded
+edge is `-first_interior` — distinct from 0 unless the boundary cell
+is itself ice-free, which means a marine boundary cell does *not*
+spuriously count the domain edge as an ice-free neighbour. Periodic
+axes wrap.
 
 Port of `physics/topography.f90:1658:calc_fmb_total`.
 """
@@ -68,7 +62,6 @@ function calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
                          dx::Real)
     F   = interior(fmb)
     Fs  = interior(fmb_shlf)
-    Bs  = interior(bmb_shlf)
     H   = interior(H_ice)
     Hg  = interior(H_grnd)
     Fi  = interior(f_ice)
@@ -91,6 +84,9 @@ function calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
               "Supported: 0 (pass-through), 1 (bmb_shlf-scaled), 2 (fmb_shlf-scaled).")
     end
 
+    fill_halo_regions!(H_ice)
+    fmb_method == 1 && fill_halo_regions!(bmb_shlf)
+
     @inbounds for j in 1:ny, i in 1:nx
         h_here  = H[i, j, 1]
         hg_here = Hg[i, j, 1]
@@ -105,10 +101,10 @@ function calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
             continue
         end
 
-        nW = _h_ice_or_zero(H, i-1, j,   nx, ny)
-        nE = _h_ice_or_zero(H, i+1, j,   nx, ny)
-        nS = _h_ice_or_zero(H, i,   j-1, nx, ny)
-        nN = _h_ice_or_zero(H, i,   j+1, nx, ny)
+        nW = H_ice[i-1, j,   1]
+        nE = H_ice[i+1, j,   1]
+        nS = H_ice[i,   j-1, 1]
+        nN = H_ice[i,   j+1, 1]
 
         n_margin = (nW == 0.0 ? 1 : 0) + (nE == 0.0 ? 1 : 0) +
                    (nS == 0.0 ? 1 : 0) + (nN == 0.0 ? 1 : 0)
@@ -131,14 +127,10 @@ function calc_fmb_total!(fmb, fmb_shlf, bmb_shlf,
         area_flt = n_margin * dz * dx
 
         if fmb_method == 1
-            bmb_shlf_W = _bmb_or_zero(Bs, i-1, j,   nx, ny)
-            bmb_shlf_E = _bmb_or_zero(Bs, i+1, j,   nx, ny)
-            bmb_shlf_S = _bmb_or_zero(Bs, i,   j-1, nx, ny)
-            bmb_shlf_N = _bmb_or_zero(Bs, i,   j+1, nx, ny)
-            bmb_sum = (nW == 0.0 ? bmb_shlf_W : 0.0) +
-                      (nE == 0.0 ? bmb_shlf_E : 0.0) +
-                      (nS == 0.0 ? bmb_shlf_S : 0.0) +
-                      (nN == 0.0 ? bmb_shlf_N : 0.0)
+            bmb_sum = (nW == 0.0 ? bmb_shlf[i-1, j,   1] : 0.0) +
+                      (nE == 0.0 ? bmb_shlf[i+1, j,   1] : 0.0) +
+                      (nS == 0.0 ? bmb_shlf[i,   j-1, 1] : 0.0) +
+                      (nN == 0.0 ? bmb_shlf[i,   j+1, 1] : 0.0)
             bmb_eff = bmb_sum / n_margin
             F[i, j, 1] = bmb_eff * (area_flt / area_tot) * fmb_scale
         else  # fmb_method == 2

@@ -26,20 +26,10 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior, location
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!
-
-# Clamped read for lsf — Neumann (zero-gradient) at domain edges. Using
-# Dirichlet-zero as in `_aa_or_zero` would inject spurious zero level
-# sets at the boundary; for redistancing of a near-saturated field, a
-# zero-gradient extension is the right boundary condition.
-@inline function _clamp_read(F::AbstractMatrix, i::Int, j::Int,
-                             nx::Int, ny::Int)
-    ii = clamp(i, 1, nx)
-    jj = clamp(j, 1, ny)
-    return F[ii, jj]
-end
 
 # Resolve a Field or a bare 3-D array view down to a 2-D matrix. Lets
 # callers hand us either an Oceananigans Field or `interior(field)` /
@@ -223,9 +213,10 @@ from drifting).
 Pseudo-timestep is `dτ = 0.5 · min(dx, dy)`, satisfying the CFL
 limit for the explicit Godunov scheme.
 
-Boundary condition: zero-gradient (Neumann), so out-of-domain reads
-copy the edge value rather than introducing a spurious zero level
-set at the boundary.
+Boundary condition: inherited from `lsf`'s grid topology + BCs.
+With the default Neumann-zero clamp on Bounded sides, halo reads
+return the edge value (zero-gradient extension); Periodic axes
+wrap automatically.
 
 Replaces the Fortran `dt_lsf` periodic re-flag (`lsf > 0 → 1`,
 `lsf ≤ 0 → -1`) and the post-advection neighbour-snap. `n_iter`
@@ -243,12 +234,13 @@ function lsf_redistance!(lsf, dx::Real, dy::Real; n_iter::Int = 5)
     new_phi = similar(L)
 
     for _ in 1:n_iter
+        fill_halo_regions!(lsf)
         @inbounds for j in 1:ny, i in 1:nx
             phi = L[i, j]
-            a = (phi - _clamp_read(L, i - 1, j, nx, ny)) / dx
-            b = (_clamp_read(L, i + 1, j, nx, ny) - phi) / dx
-            c = (phi - _clamp_read(L, i, j - 1, nx, ny)) / dy
-            d = (_clamp_read(L, i, j + 1, nx, ny) - phi) / dy
+            a = (phi - lsf[i - 1, j, 1]) / dx
+            b = (lsf[i + 1, j, 1] - phi) / dx
+            c = (phi - lsf[i, j - 1, 1]) / dy
+            d = (lsf[i, j + 1, 1] - phi) / dy
 
             s0  = phi0[i, j]
             sgn = s0 / sqrt(s0 * s0 + eps * eps)

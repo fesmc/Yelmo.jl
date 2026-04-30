@@ -1,6 +1,11 @@
 module YelmoCore
 
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
+using Oceananigans.Grids: topology
+using Oceananigans.BoundaryConditions: FieldBoundaryConditions,
+                                       ValueBoundaryCondition,
+                                       GradientBoundaryCondition,
+                                       fill_halo_regions!
 using NCDatasets
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
@@ -16,6 +21,8 @@ export init_state!, step!, load_state!
 export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
+export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
+export fill_halo_regions!, fill_corner_halos!
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
@@ -43,29 +50,80 @@ const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
 matches_patterns(name, patterns) = any(p -> occursin(p, name), patterns)
 
 # ---------------------------------------------------------------------------
-# Grid construction
+# Grid construction and boundary resolution
 # ---------------------------------------------------------------------------
 
-yelmo_define_grids(g::NamedTuple) =
-    yelmo_define_grids(g.xc, g.yc, g.zeta_ac, g.zeta_r_ac)
+# Convert a user-friendly `boundaries` argument to an Oceananigans
+# horizontal-axis topology pair `(X, Y)`. Accepts:
+#
+#   - Symbol shortcut: `:bounded`, `:periodic`, `:periodic_x`, `:periodic_y`
+#   - 2-tuple of Symbols: `(:periodic, :bounded)` etc.
+#   - Direct Oceananigans tuple of types: `(Periodic, Bounded)`,
+#     optionally with a trailing 3rd entry which is ignored.
+#
+# The vertical (`z`) topology is always inferred from the calling
+# context (Flat for 2D, Bounded for 3D), so this helper only resolves
+# the horizontal pair.
+"""
+    resolve_boundaries(boundaries) -> (X, Y)
 
-function yelmo_define_grids(xc, yc, zeta_ac, zeta_r_ac)
+Resolve a user-friendly `boundaries` specifier to a pair of
+Oceananigans horizontal topology types. Returns `(X, Y)` where each
+entry is `Bounded` or `Periodic`. Used by the grid constructors and
+by callers that need to inspect the active topology.
+
+Supported forms: `:bounded`, `:periodic`, `:periodic_x`,
+`:periodic_y`, `(:periodic, :bounded)`, `(Bounded, Periodic)`, etc.
+"""
+function resolve_boundaries(boundaries)
+    boundaries === :bounded     && return (Bounded,  Bounded)
+    boundaries === :periodic    && return (Periodic, Periodic)
+    boundaries === :periodic_x  && return (Periodic, Bounded)
+    boundaries === :periodic_y  && return (Bounded,  Periodic)
+
+    if boundaries isa Tuple && length(boundaries) >= 2
+        x = _topology_from(boundaries[1])
+        y = _topology_from(boundaries[2])
+        return (x, y)
+    end
+
+    error("resolve_boundaries: unrecognised boundaries=$(boundaries). " *
+          "Use a Symbol (:bounded, :periodic, :periodic_x, :periodic_y), " *
+          "a 2-tuple of Symbols (e.g. (:periodic, :bounded)), or a tuple " *
+          "of Oceananigans topology types (e.g. (Bounded, Periodic)).")
+end
+
+@inline _topology_from(t::Symbol) = t === :periodic ? Periodic :
+                                    t === :bounded  ? Bounded  :
+                                    error("Unknown topology symbol :$(t). " *
+                                          "Use :bounded or :periodic.")
+@inline _topology_from(::Type{Periodic}) = Periodic
+@inline _topology_from(::Type{Bounded})  = Bounded
+@inline _topology_from(t) = error("Cannot interpret topology entry $(t).")
+
+yelmo_define_grids(g::NamedTuple; kwargs...) =
+    yelmo_define_grids(g.xc, g.yc, g.zeta_ac, g.zeta_r_ac; kwargs...)
+
+function yelmo_define_grids(xc, yc, zeta_ac, zeta_r_ac;
+                            boundaries = :bounded)
     Nx, Ny = length(xc), length(yc)
     dx, dy = xc[2] - xc[1], yc[2] - yc[1]
     xlims = (xc[1] - dx/2, xc[end] + dx/2)
     ylims = (yc[1] - dy/2, yc[end] + dy/2)
 
+    Tx, Ty = resolve_boundaries(boundaries)
+
     grid2d = RectilinearGrid(size=(Nx, Ny),
                              x=xlims, y=ylims,
-                             topology=(Bounded, Bounded, Flat))
+                             topology=(Tx, Ty, Flat))
 
     grid3d_ice = RectilinearGrid(size=(Nx, Ny, length(zeta_ac) - 1),
                                  x=xlims, y=ylims, z=zeta_ac,
-                                 topology=(Bounded, Bounded, Bounded))
+                                 topology=(Tx, Ty, Bounded))
 
     grid3d_rock = RectilinearGrid(size=(Nx, Ny, length(zeta_r_ac) - 1),
                                   x=xlims, y=ylims, z=zeta_r_ac,
-                                  topology=(Bounded, Bounded, Bounded))
+                                  topology=(Tx, Ty, Bounded))
 
     return grid2d, grid3d_ice, grid3d_rock
 end
@@ -83,7 +141,13 @@ function make_field(varname::Union{AbstractString,Symbol}, grid::RectilinearGrid
     elseif matches_patterns(varname, ZFACE_VARIABLES)
         return ZFaceField(grid)
     else
-        return CenterField(grid)
+        # Default Center fields get Neumann-zero (clamp / zero-gradient)
+        # on Bounded sides. Halo reads after `fill_halo_regions!` then
+        # return the first interior cell — semantically "extend the
+        # field across the boundary" — matching the Fortran `infinite`
+        # boundary-code default. Periodic sides wrap automatically via
+        # the grid topology.
+        return neumann_2d_field(grid)
     end
 end
 
@@ -102,12 +166,104 @@ _alloc_group(vlist, g2d, g3d, g3r) =
     NamedTuple{keys(vlist)}(_alloc_field(vlist[k], g2d, g3d, g3r) for k in keys(vlist))
 
 """
+    neumann_2d_field(grid; value=0)
+
+Construct a 2D `CenterField` on `grid` whose horizontal boundary
+conditions are zero-gradient (Neumann) on the four sides of any
+`Bounded` axis. This populates the halo with the first interior cell
+after `fill_halo_regions!`, the natural choice for diagnostic /
+state fields where the physically meaningful interpretation of "outside
+the domain" is "extend the value at the boundary." Periodic axes
+wrap automatically and ignore the per-side BC entries.
+
+This is the default boundary-condition palette for `tpo`/`thrm`/`mat`/
+`dyn`/`bnd`/`dta` group fields allocated through `make_field`. Use
+`dirichlet_2d_field` instead when the field's physical interpretation
+demands a specific *face value* outside the domain (e.g. `H_ice = 0`
+for advection mass conservation).
+"""
+function neumann_2d_field(grid::RectilinearGrid; value::Real = 0.0)
+    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
+        east  = GradientBoundaryCondition(value),
+        west  = GradientBoundaryCondition(value),
+        south = GradientBoundaryCondition(value),
+        north = GradientBoundaryCondition(value),
+    )
+    return CenterField(grid; boundary_conditions=bcs)
+end
+
+"""
+    fill_corner_halos!(field) -> field
+
+Fill the four corner halo regions of a 2D `field` consistently with
+the grid's per-axis topology. `Oceananigans.fill_halo_regions!` only
+populates the four orthogonal sides of the halo for Bounded axes —
+it leaves the (i ≤ 0, j ≤ 0) etc. corner halo cells unwritten because
+the standard finite-volume operators don't read them. Kernels that
+*do* need diagonal halo reads (chamfer distance transforms, the
+sub-grid-grounded-fraction quad stencil, ...) must call this helper
+*after* `fill_halo_regions!` to populate the corners.
+
+Per axis:
+
+  - `Periodic`: corner halo wraps to the opposite side of the
+    interior (e.g. SW corner halo cell `(1-hi, 1-hj)` = interior
+    `(Nx-hi+1, Ny-hj+1)`).
+  - `Bounded`: corner halo clamps to the nearest interior corner
+    (e.g. SW corner halo = interior `(1, 1)`).
+
+Mixed topologies (e.g. periodic-x + bounded-y) compose component-wise.
+The helper is a no-op for fields whose grids are `Flat` in either
+horizontal axis (no horizontal halo to fill).
+"""
+function fill_corner_halos!(field)
+    grid = field.grid
+    Tx = topology(grid, 1)
+    Ty = topology(grid, 2)
+
+    (Tx === Flat || Ty === Flat) && return field
+
+    Nx = size(field, 1)
+    Ny = size(field, 2)
+    Hx = grid.Hx
+    Hy = grid.Hy
+
+    @inbounds for k in axes(parent(field), 3),
+                  hj in 1:Hy, hi in 1:Hx
+        # SW corner: (i, j) = (1 - hi, 1 - hj).
+        ix_sw = Tx === Periodic ? Nx - hi + 1 : 1
+        jy_sw = Ty === Periodic ? Ny - hj + 1 : 1
+        field[1 - hi, 1 - hj, k] = field[ix_sw, jy_sw, k]
+
+        # SE corner: (Nx + hi, 1 - hj).
+        ix_se = Tx === Periodic ? hi : Nx
+        jy_se = Ty === Periodic ? Ny - hj + 1 : 1
+        field[Nx + hi, 1 - hj, k] = field[ix_se, jy_se, k]
+
+        # NW corner: (1 - hi, Ny + hj).
+        ix_nw = Tx === Periodic ? Nx - hi + 1 : 1
+        jy_nw = Ty === Periodic ? hj : Ny
+        field[1 - hi, Ny + hj, k] = field[ix_nw, jy_nw, k]
+
+        # NE corner: (Nx + hi, Ny + hj).
+        ix_ne = Tx === Periodic ? hi : Nx
+        jy_ne = Ty === Periodic ? hj : Ny
+        field[Nx + hi, Ny + hj, k] = field[ix_ne, jy_ne, k]
+    end
+    return field
+end
+
+"""
+    dirichlet_2d_field(grid, value)
+
 Construct a 2D `CenterField` on `grid` with Dirichlet `value` boundary
 conditions on every non-Flat horizontal face (east/west/south/north).
 Used for ice-sheet fields like `H_ice` whose physical boundary
-condition is "no ice past the domain edge."
+condition is "no ice past the domain edge" — the upwind advection
+operator reads the face values directly via Oceananigans' standard
+halo machinery without per-cell branching.
 """
-function _dirichlet_2d_field(grid::RectilinearGrid, value::Real)
+function dirichlet_2d_field(grid::RectilinearGrid, value::Real)
     bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
         east  = ValueBoundaryCondition(value),
         west  = ValueBoundaryCondition(value),
@@ -142,7 +298,8 @@ Read coordinate arrays from a NetCDF restart and build the 2D and 3D
 Oceananigans `RectilinearGrid`s. `grid3d_ice` and `grid3d_rock` may be
 `nothing` if the file does not contain the corresponding vertical axes.
 """
-function load_grids_from_restart(filename::AbstractString)
+function load_grids_from_restart(filename::AbstractString;
+                                 boundaries = :bounded)
     ds = NCDataset(filename)
 
     xc = Vector{Float64}(ds["xc"][:])
@@ -169,12 +326,14 @@ function load_grids_from_restart(filename::AbstractString)
     xlims = (xc[1] - dx/2, xc[end] + dx/2)
     ylims = (yc[1] - dy/2, yc[end] + dy/2)
 
+    Tx, Ty = resolve_boundaries(boundaries)
+
     grid2d = RectilinearGrid(size=(Nx, Ny),
                              x=xlims, y=ylims,
-                             topology=(Bounded, Bounded, Flat))
+                             topology=(Tx, Ty, Flat))
 
-    grid3d_ice = _build_3d_grid(ds, "zeta", "zeta_ac", Nx, Ny, xlims, ylims)
-    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims)
+    grid3d_ice = _build_3d_grid(ds, "zeta", "zeta_ac", Nx, Ny, xlims, ylims, Tx, Ty)
+    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty)
 
     close(ds)
     return grid2d, grid3d_ice, grid3d_rock
@@ -184,7 +343,8 @@ end
 # present, otherwise reconstruct them from cell-center coordinates in
 # `center_var` (`zeta_ac[i] = (zeta[i-1] + zeta[i]) / 2` for interior
 # faces, with the boundary faces clamped to the first/last center).
-function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims)
+function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims,
+                        Tx::DataType, Ty::DataType)
     if haskey(ds, face_var)
         z_face = Vector{Float64}(ds[face_var][:])
     elseif haskey(ds, center_var)
@@ -195,7 +355,7 @@ function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims)
     end
     return RectilinearGrid(size=(Nx, Ny, length(z_face) - 1),
                            x=xlims, y=ylims, z=z_face,
-                           topology=(Bounded, Bounded, Bounded))
+                           topology=(Tx, Ty, Bounded))
 end
 
 function _faces_from_centers(zc::AbstractVector)
@@ -361,6 +521,7 @@ function YelmoModel(restart_file::String, time::Float64;
                     rundir::String = "./",
                     p = nothing,
                     c::YelmoConstants = YelmoConstants(),
+                    boundaries = :bounded,
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
                     strict::Bool = true)
 
@@ -369,7 +530,7 @@ function YelmoModel(restart_file::String, time::Float64;
         p = YelmoModelParameters(alias)
     end
 
-    g, gt, gr = load_grids_from_restart(restart_file)
+    g, gt, gr = load_grids_from_restart(restart_file; boundaries=boundaries)
     gt === nothing && error("Restart file $(restart_file) has no ice vertical axis; cannot build ice grid.")
     gr === nothing && error("Restart file $(restart_file) has no rock vertical axis; cannot build rock grid.")
 
@@ -394,7 +555,7 @@ function YelmoModel(restart_file::String, time::Float64;
     # boundary conditions on the domain edge. The upwind advection
     # operator reads these via Oceananigans' standard halo machinery
     # without per-cell branching in the kernel.
-    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = _dirichlet_2d_field(g, 0.0),)))
+    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = dirichlet_2d_field(g, 0.0),)))
 
     y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 

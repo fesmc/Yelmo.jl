@@ -13,22 +13,13 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export set_tau_relax!, calc_G_relaxation!
 
 # Marker meaning "this cell is not relaxed". Matches Fortran convention
 # (set_tau_relax fills cells outside the relaxation mask with -1.0).
 const _TAU_OFF = -1.0
-
-# Saturated lookup with a sentinel: if (i,j) is out of bounds, return
-# `out_of_bounds_value`. Used to read `f_grnd` neighbours for the
-# topo_rel == 2 grounding-line "edge" detection, where domain edges
-# should NOT be treated as floating neighbours (they're outside the
-# physical mesh, not unrooted ice).
-@inline function _f_grnd_or(F::AbstractArray, i::Int, j::Int,
-                            nx::Int, ny::Int, default::Float64)
-    return (1 <= i <= nx && 1 <= j <= ny) ? F[i, j, 1] : default
-end
 
 """
     set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref,
@@ -65,19 +56,23 @@ function set_tau_relax!(tau_relax, H_ice, f_grnd, mask_grz, H_ref,
         end
 
     elseif topo_rel == 2
+        # `f_grnd` halos resolve via grid topology + BC. With the
+        # default Neumann-zero clamp on Bounded sides, edge cells
+        # inherit the first interior value — so a domain edge of
+        # grounded ice does NOT spuriously trigger the grounding-line
+        # rule (matches the original `default=1.0` semantics).
+        # Periodic axes wrap.
+        fill_halo_regions!(f_grnd)
         @inbounds for j in 1:ny, i in 1:nx
             fg_here = Fg[i, j, 1]
             hr_here = Hr[i, j, 1]
             if fg_here == 0.0 || hr_here == 0.0
                 Tau[i, j, 1] = tau
             elseif fg_here > 0.0
-                # Read out-of-bounds as `1.0` (grounded) so domain
-                # edges don't spuriously trigger the grounding-zone
-                # rule. Mirrors get_neighbor_indices_bc_codes default.
-                fW = _f_grnd_or(Fg, i-1, j,   nx, ny, 1.0)
-                fE = _f_grnd_or(Fg, i+1, j,   nx, ny, 1.0)
-                fS = _f_grnd_or(Fg, i,   j-1, nx, ny, 1.0)
-                fN = _f_grnd_or(Fg, i,   j+1, nx, ny, 1.0)
+                fW = f_grnd[i-1, j,   1]
+                fE = f_grnd[i+1, j,   1]
+                fS = f_grnd[i,   j-1, 1]
+                fN = f_grnd[i,   j+1, 1]
                 edge = (fW == 0.0) | (fE == 0.0) | (fS == 0.0) | (fN == 0.0)
                 Tau[i, j, 1] = edge ? tau : _TAU_OFF
             else

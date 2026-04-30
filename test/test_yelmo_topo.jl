@@ -1461,7 +1461,7 @@ end
         interior(f_grnd)[i, j, 1] = 1.0
     end
 
-    calc_distance_to_grounding_line!(dist_gl, f_grnd, dx; bc=:zero)
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, dx)
     D = interior(dist_gl)
 
     # 1. Grounding-line cells (grounded with floating direct neighbour)
@@ -1495,35 +1495,61 @@ end
     @test D[8, 4, 1] ≈ -2.0
 end
 
-@testset "tpo: calc_distance_to_grounding_line! — bc modes" begin
-    # 4x4 grid with grounded ice everywhere → no floating cells in the
-    # interior at all. With bc=:zero the boundary halo is "phantom
-    # ocean", so all edge cells are GL sources. With bc=:mirror the
-    # halo extends interior values, so no cell sees a floating
-    # neighbour and there is no GL anywhere.
+@testset "tpo: calc_distance_to_grounding_line! — Neumann boundary" begin
+    # All-grounded 4x4 grid. With the default Neumann-zero clamp BC on
+    # Bounded sides, halo f_grnd = first interior = grounded — so no
+    # cell sees a floating neighbour, and there is no GL anywhere.
+    # Distance is +Inf everywhere (positive because all cells are
+    # grounded; no sign flip in Phase 3).
     Nx = 4
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, 4.0), y=(0.0, 4.0),
                         topology=(Bounded, Bounded, Flat))
-    f_grnd  = CenterField(g)
+    f_grnd  = CenterField(g)   # default BC = Neumann zero
     dist_gl = CenterField(g)
-
     fill!(interior(f_grnd), 1.0)
 
-    # bc = :zero — every edge cell becomes a GL source.
-    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0; bc=:zero)
-    D = interior(dist_gl)
-    @test D[1, 1, 1] == 0.0
-    @test D[1, 4, 1] == 0.0
-    @test D[4, 4, 1] == 0.0
-    @test D[2, 2, 1] ≈ 1.0   # one cell in from the edge
-
-    # bc = :mirror — halo clamps to nearest interior, so no edge cell
-    # sees a floating neighbour. Distance is +Inf everywhere.
-    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0; bc=:mirror)
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0)
     D = interior(dist_gl)
     @test all(isinf, D)
     @test all(>(0), D)
+end
+
+@testset "tpo: calc_distance_to_grounding_line! — periodic axes" begin
+    # 8x8 grid with a single grounded cell at (1,1). Test that under
+    # full-periodic topology, the chamfer distance from the diametric
+    # corner (5,5) wraps around the boundary (chamfer distance via
+    # wrap is 4·√2 ≈ 5.66, vs. straight-through 4·√2 also — they're
+    # equal in this geometry, but periodic-aware code must produce a
+    # finite distance).
+    Nx = 8
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 8.0), y=(0.0, 8.0),
+                        topology=(Periodic, Periodic, Flat))
+    f_grnd  = CenterField(g)
+    dist_gl = CenterField(g)
+
+    fill!(interior(f_grnd), 0.0)
+    interior(f_grnd)[1, 1, 1] = 1.0   # single grounded cell at corner
+
+    calc_distance_to_grounding_line!(dist_gl, f_grnd, 1.0)
+    D = interior(dist_gl)
+
+    # The single grounded cell is a GL source (all 4 direct neighbours
+    # are floating, including via wrap).
+    @test D[1, 1, 1] == 0.0
+
+    # All floating cells get finite (negative) chamfer distance — no
+    # cell remains -Inf, since periodic wrap connects every cell to
+    # the source.
+    @test all(isfinite, D)
+    @test all(D[i, j, 1] <= 0.0 for j in 1:Nx, i in 1:Nx)
+
+    # Periodic wrap: cell (1, 8) is one cell south of (1, 1) via the
+    # north wrap → distance 1.
+    @test D[1, 8, 1] ≈ -1.0
+    @test D[8, 1, 1] ≈ -1.0
+    @test D[8, 8, 1] ≈ -sqrt(2.0)   # diagonal wrap
 end
 
 @testset "tpo: calc_distance_to_ice_margin!" begin
@@ -1540,7 +1566,7 @@ end
         interior(f_ice)[i, j, 1] = 1.0
     end
 
-    calc_distance_to_ice_margin!(dist_mrgn, f_ice, 100.0; bc=:zero)
+    calc_distance_to_ice_margin!(dist_mrgn, f_ice, 100.0)
     D = interior(dist_mrgn)
 
     # Ice perimeter is the margin → dist = 0.
@@ -1655,4 +1681,126 @@ end
     @test MASK_BED_FLOAT   == 5
     @test MASK_BED_ISLAND  == 6
     @test MASK_BED_PARTIAL == 7
+end
+
+# ------------------------------------------------------------------
+# Boundary plumbing — grid topology, BC palette, corner halos
+# ------------------------------------------------------------------
+
+using Yelmo.YelmoCore: resolve_boundaries, neumann_2d_field, dirichlet_2d_field,
+                       fill_corner_halos!
+using Oceananigans.BoundaryConditions: fill_halo_regions!
+
+@testset "core: resolve_boundaries" begin
+    @test resolve_boundaries(:bounded)    == (Bounded,  Bounded)
+    @test resolve_boundaries(:periodic)   == (Periodic, Periodic)
+    @test resolve_boundaries(:periodic_x) == (Periodic, Bounded)
+    @test resolve_boundaries(:periodic_y) == (Bounded,  Periodic)
+
+    @test resolve_boundaries((:periodic, :bounded))  == (Periodic, Bounded)
+    @test resolve_boundaries((:bounded,  :periodic)) == (Bounded,  Periodic)
+
+    # Direct Oceananigans tuples pass through unchanged.
+    @test resolve_boundaries((Periodic, Bounded))           == (Periodic, Bounded)
+    @test resolve_boundaries((Bounded, Periodic, Flat))     == (Bounded,  Periodic)
+
+    @test_throws ErrorException resolve_boundaries(:bogus)
+    @test_throws ErrorException resolve_boundaries((:bogus, :bounded))
+end
+
+@testset "core: neumann/dirichlet field BCs" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+
+    fN = neumann_2d_field(g)
+    fill!(interior(fN), 5.0)
+    fill_halo_regions!(fN)
+    # Neumann zero / clamp: halo = first interior.
+    @test fN[0,    1, 1] ≈ 5.0
+    @test fN[Nx+1, 1, 1] ≈ 5.0
+
+    fD = dirichlet_2d_field(g, 0.0)
+    fill!(interior(fD), 5.0)
+    fill_halo_regions!(fD)
+    # Dirichlet zero face value: halo = -first_interior so the face
+    # mean is 0.
+    @test fD[0,    1, 1] ≈ -5.0
+    @test fD[Nx+1, 1, 1] ≈ -5.0
+end
+
+@testset "core: fill_corner_halos! — bounded clamps to nearest corner" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Bounded, Bounded, Flat))
+    f = neumann_2d_field(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0   # SW
+    int[Nx, 1,  1] = 12.0   # SE
+    int[1,  Nx, 1] = 13.0   # NW
+    int[Nx, Nx, 1] = 14.0   # NE
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    @test f[0,    0,    1] == 11.0    # SW corner clamps to (1,1)
+    @test f[Nx+1, 0,    1] == 12.0    # SE clamps to (Nx,1)
+    @test f[0,    Nx+1, 1] == 13.0    # NW clamps to (1,Nx)
+    @test f[Nx+1, Nx+1, 1] == 14.0    # NE clamps to (Nx,Nx)
+end
+
+@testset "core: fill_corner_halos! — periodic wraps to opposite corner" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Periodic, Periodic, Flat))
+    f = CenterField(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0   # SW interior
+    int[Nx, 1,  1] = 12.0   # SE
+    int[1,  Nx, 1] = 13.0   # NW
+    int[Nx, Nx, 1] = 14.0   # NE
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    # SW corner halo (0, 0) wraps to (Nx, Nx).
+    @test f[0,    0,    1] == 14.0
+    # SE corner halo (Nx+1, 0) wraps to (1, Nx).
+    @test f[Nx+1, 0,    1] == 13.0
+    # NW corner halo (0, Nx+1) wraps to (Nx, 1).
+    @test f[0,    Nx+1, 1] == 12.0
+    # NE corner halo (Nx+1, Nx+1) wraps to (1, 1).
+    @test f[Nx+1, Nx+1, 1] == 11.0
+end
+
+@testset "core: fill_corner_halos! — mixed periodic-x + bounded-y" begin
+    Nx = 4
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, 4.0), y=(0.0, 4.0),
+                        topology=(Periodic, Bounded, Flat))
+    f = CenterField(g)
+    int = interior(f)
+    fill!(int, 0.0)
+    int[1,  1,  1] = 11.0
+    int[Nx, 1,  1] = 12.0
+    int[1,  Nx, 1] = 13.0
+    int[Nx, Nx, 1] = 14.0
+
+    fill_halo_regions!(f)
+    fill_corner_halos!(f)
+
+    # SW corner: x wraps (Nx → 0 halo), y clamps (1 → 0 halo) →
+    # source = (Nx, 1) = 12.
+    @test f[0,    0,    1] == 12.0
+    # SE corner: x wraps (1 → Nx+1 halo), y clamps → source (1, 1) = 11.
+    @test f[Nx+1, 0,    1] == 11.0
+    # NW corner: x wraps, y clamps → source (Nx, Nx) = 14.
+    @test f[0,    Nx+1, 1] == 14.0
+    # NE corner: x wraps, y clamps → source (1, Nx) = 13.
+    @test f[Nx+1, Nx+1, 1] == 13.0
 end

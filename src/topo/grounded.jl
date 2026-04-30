@@ -8,6 +8,9 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.BoundaryConditions: fill_halo_regions!
+
+using ..YelmoCore: fill_corner_halos!
 
 export calc_H_grnd!, determine_grounded_fractions!
 
@@ -35,13 +38,6 @@ function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
     return H_grnd
 end
 
-# Out-of-domain reads of the flotation field resolve to 0 (open ocean —
-# no ice, bed at sea level by construction). Matches the Dirichlet-zero
-# halo used elsewhere in the module.
-@inline function _f_or_zero(F::AbstractMatrix, i::Int, j::Int, nx::Int, ny::Int)
-    return (1 <= i <= nx && 1 <= j <= ny) ? F[i, j] : 0.0
-end
-
 """
     determine_grounded_fractions!(f_grnd, H_grnd;
                                   f_grnd_acx=nothing,
@@ -62,7 +58,10 @@ Algorithm (Leguy et al. 2021, ported via IMAU-ICE v2.0):
      acx-/acy-/ab-fractions are quadrant means at the corresponding
      face-/corner-staggered positions.
 
-Out-of-domain neighbour reads of `f_flt` resolve to 0.
+Halo handling: `H_grnd`'s halos are filled via `fill_halo_regions!`,
+so neighbour reads honour the field's grid topology and boundary
+conditions automatically (Neumann-zero clamp by default; Periodic
+wrap on Periodic axes).
 
 Port of `physics/topography.f90:determine_grounded_fractions`.
 """
@@ -70,20 +69,18 @@ function determine_grounded_fractions!(f_grnd, H_grnd;
                                        f_grnd_acx = nothing,
                                        f_grnd_acy = nothing,
                                        f_grnd_ab  = nothing)
+    fill_halo_regions!(H_grnd)
+    fill_corner_halos!(H_grnd)
+
     Hg = interior(H_grnd)
     nx = size(Hg, 1)
     ny = size(Hg, 2)
-
-    f_flt = Matrix{Float64}(undef, nx, ny)
-    @inbounds for j in 1:ny, i in 1:nx
-        f_flt[i, j] = -Hg[i, j, 1]
-    end
 
     f_NW = Matrix{Float64}(undef, nx, ny)
     f_NE = Matrix{Float64}(undef, nx, ny)
     f_SW = Matrix{Float64}(undef, nx, ny)
     f_SE = Matrix{Float64}(undef, nx, ny)
-    _cism_quads!(f_NW, f_NE, f_SW, f_SE, f_flt, nx, ny)
+    _cism_quads!(f_NW, f_NE, f_SW, f_SE, H_grnd, nx, ny)
 
     Fa = interior(f_grnd)
     @inbounds for j in 1:ny, i in 1:nx
@@ -122,26 +119,28 @@ end
 
 # Per-cell quadrant-grounded-fraction kernel.
 # Mirrors `determine_grounded_fractions_CISM_quads` in
-# `physics/topography.f90:1978`.
-function _cism_quads!(f_NW, f_NE, f_SW, f_SE, f_flt, nx::Int, ny::Int)
+# `physics/topography.f90:1978`. Reads `H_grnd` halos directly (filled
+# upstream) and computes `f_flt = -H_grnd` inline — saves an
+# allocation versus materialising a separate `f_flt` field.
+function _cism_quads!(f_NW, f_NE, f_SW, f_SE, H_grnd, nx::Int, ny::Int)
     @inbounds for j in 1:ny, i in 1:nx
-        f_m  = f_flt[i, j]
-        fW   = 0.5 * (_f_or_zero(f_flt, i-1, j,   nx, ny) + f_m)
-        fE   = 0.5 * (f_m + _f_or_zero(f_flt, i+1, j, nx, ny))
-        fN   = 0.5 * (f_m + _f_or_zero(f_flt, i,   j+1, nx, ny))
-        fS   = 0.5 * (f_m + _f_or_zero(f_flt, i,   j-1, nx, ny))
-        fNW  = 0.25 * (_f_or_zero(f_flt, i-1, j+1, nx, ny) +
-                       _f_or_zero(f_flt, i,   j+1, nx, ny) +
-                       _f_or_zero(f_flt, i-1, j,   nx, ny) + f_m)
-        fNE  = 0.25 * (_f_or_zero(f_flt, i,   j+1, nx, ny) +
-                       _f_or_zero(f_flt, i+1, j+1, nx, ny) +
-                       f_m + _f_or_zero(f_flt, i+1, j, nx, ny))
-        fSW  = 0.25 * (_f_or_zero(f_flt, i-1, j,   nx, ny) + f_m +
-                       _f_or_zero(f_flt, i-1, j-1, nx, ny) +
-                       _f_or_zero(f_flt, i,   j-1, nx, ny))
-        fSE  = 0.25 * (f_m + _f_or_zero(f_flt, i+1, j, nx, ny) +
-                       _f_or_zero(f_flt, i,   j-1, nx, ny) +
-                       _f_or_zero(f_flt, i+1, j-1, nx, ny))
+        f_m  = -H_grnd[i,   j,   1]
+        fW   = 0.5  * (-H_grnd[i-1, j,   1] + f_m)
+        fE   = 0.5  * (f_m + -H_grnd[i+1, j,   1])
+        fN   = 0.5  * (f_m + -H_grnd[i,   j+1, 1])
+        fS   = 0.5  * (f_m + -H_grnd[i,   j-1, 1])
+        fNW  = 0.25 * (-H_grnd[i-1, j+1, 1] +
+                       -H_grnd[i,   j+1, 1] +
+                       -H_grnd[i-1, j,   1] + f_m)
+        fNE  = 0.25 * (-H_grnd[i,   j+1, 1] +
+                       -H_grnd[i+1, j+1, 1] +
+                       f_m + -H_grnd[i+1, j, 1])
+        fSW  = 0.25 * (-H_grnd[i-1, j,   1] + f_m +
+                       -H_grnd[i-1, j-1, 1] +
+                       -H_grnd[i,   j-1, 1])
+        fSE  = 0.25 * (f_m + -H_grnd[i+1, j,   1] +
+                       -H_grnd[i,   j-1, 1] +
+                       -H_grnd[i+1, j-1, 1])
 
         f_NW[i, j] = _calc_fraction_above_zero(fNW,  fN, fW,  f_m)
         f_NE[i, j] = _calc_fraction_above_zero(fN,  fNE, f_m, fE)
