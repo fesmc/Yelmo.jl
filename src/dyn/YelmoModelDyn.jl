@@ -27,7 +27,26 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel
 
 import ..YelmoCore: dyn_step!
 
-export dyn_step!
+export dyn_step!,
+       calc_driving_stress!, calc_driving_stress_gl!
+
+include("driving_stress.jl")
+
+# Cell-spacing helpers — local copies of the topo-module pattern.
+# Stretched grids are not yet supported; flag explicitly so an
+# accidental non-uniform grid surfaces immediately rather than as
+# silently wrong driving-stress values.
+function _dx(grid::RectilinearGrid)
+    Δx = grid.Δxᶜᵃᵃ
+    Δx isa Number || error("YelmoModelDyn requires a uniform x-spacing for now (got $(typeof(Δx))).")
+    return abs(Δx)
+end
+
+function _dy(grid::RectilinearGrid)
+    Δy = grid.Δyᵃᶜᵃ
+    Δy isa Number || error("YelmoModelDyn requires a uniform y-spacing for now (got $(typeof(Δy))).")
+    return abs(Δy)
+end
 
 """
     dyn_step!(y::YelmoModel, dt) -> y
@@ -65,6 +84,26 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #    by the `duxydt` diagnostic in step 9).
     interior(y.dyn.ux_bar_prev) .= interior(y.dyn.ux_bar)
     interior(y.dyn.uy_bar_prev) .= interior(y.dyn.uy_bar)
+
+    # 2. Driving stress on ac-staggered faces.
+    calc_driving_stress!(y.dyn.taud_acx, y.dyn.taud_acy,
+                         y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+                         y.tpo.dzsdx, y.tpo.dzsdy,
+                         _dx(y.g), y.p.ydyn.taud_lim,
+                         y.c.rho_ice, y.c.g)
+
+    # 3. Optional grounding-line refinement of the driving stress.
+    #    Default `taud_gl_method = 0` keeps this a no-op. The Fortran
+    #    reference always calls with `beta_gl_stag = 1`; mirror that.
+    if y.p.ydyn.taud_gl_method != 0
+        calc_driving_stress_gl!(y.dyn.taud_acx, y.dyn.taud_acy,
+                                y.tpo.H_ice_dyn, y.tpo.z_srf,
+                                y.bnd.z_bed, y.bnd.z_sl, y.tpo.H_grnd,
+                                y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy,
+                                _dx(y.g),
+                                y.c.rho_ice, y.c.rho_sw, y.c.g,
+                                y.p.ydyn.taud_gl_method, 1)
+    end
 
     # 6. Solver dispatch. 3a only handles "fixed".
     solver = y.p.ydyn.solver
