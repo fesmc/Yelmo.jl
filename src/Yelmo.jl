@@ -26,7 +26,8 @@ using .YelmoIO
 export VariableMeta, parse_variable_table
 
 # YelmoConst
-export YelmoConstants, yelmo_constants, earth_constants
+export YelmoConstants, yelmo_constants, earth_constants,
+       eismint_constants, mismip3d_constants, trough_constants
 # (MASK_ICE_* are also exported from YelmoCore for back-compat — see below.)
 
 # YelmoPar

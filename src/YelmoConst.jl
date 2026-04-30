@@ -22,7 +22,8 @@ Two flavours of constants live here:
 """
 module YelmoConst
 
-export YelmoConstants, yelmo_constants, earth_constants
+export YelmoConstants, yelmo_constants, earth_constants,
+       eismint_constants, mismip3d_constants, trough_constants
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
 # ---------------------------------------------------------------------------
@@ -90,9 +91,74 @@ yelmo_constants(; kwargs...) = YelmoConstants(; kwargs...)
     earth_constants(; kwargs...) -> YelmoConstants
 
 Earth-default constants, identical to `YelmoConstants(; kwargs...)`
-but explicit — kept for symmetry with future planet-specific
-constructors and for documentation searchability.
+but explicit — kept for symmetry with the named-experiment
+constructors below and for documentation searchability.
 """
 earth_constants(; kwargs...) = YelmoConstants(; kwargs...)
+
+# ---------------------------------------------------------------------------
+# Named experiment constants — match the per-group entries in the Fortran
+# `yelmo/input/yelmo_phys_const.nml`. Each diverges from Earth in a small
+# subset of fields; the rest fall through to the YelmoConstants defaults.
+# Mirrors the `select case (phys_const)` dispatch in
+# `yelmo_boundaries.f90:ybound_define_physical_constants`.
+# ---------------------------------------------------------------------------
+
+const _EISMINT_DEFAULTS = (
+    sec_year   = 31556926.0,   # EISMINT-specific year length
+    rho_ice    = 917.0,
+    T_pmp_beta = 9.7e-8,       # EISMINT2 (β1 = 8.66e-4 K/m)
+)
+
+const _MISMIP3D_DEFAULTS = (
+    sec_year   = 31556926.0,
+    rho_ice    = 900.0,
+    T_pmp_beta = 9.7e-8,
+)
+
+const _TROUGH_DEFAULTS = (
+    sec_year   = 31556926.0,
+    rho_ice    = 918.0,
+    T_pmp_beta = 9.7e-8,
+)
+
+"""
+    eismint_constants(; kwargs...) -> YelmoConstants
+
+Constants for the EISMINT / EISMINT1 / EISMINT2 intercomparison
+suite. Diverges from `earth_constants()` in `sec_year`
+(31_556_926.0), `rho_ice` (917.0), and `T_pmp_beta` (9.7e-8); other
+fields fall through to the `YelmoConstants` defaults. `kwargs...`
+override any field on top of these.
+
+Matches the `&EISMINT` group in the Fortran
+`yelmo/input/yelmo_phys_const.nml`.
+"""
+eismint_constants(; kwargs...) =
+    YelmoConstants(; _EISMINT_DEFAULTS..., kwargs...)
+
+"""
+    mismip3d_constants(; kwargs...) -> YelmoConstants
+
+Constants for the MISMIP / MISMIP3D experiments. Same `sec_year`
+and `T_pmp_beta` as EISMINT but `rho_ice = 900.0`.
+
+Matches the `&MISMIP3D` group in the Fortran
+`yelmo/input/yelmo_phys_const.nml`.
+"""
+mismip3d_constants(; kwargs...) =
+    YelmoConstants(; _MISMIP3D_DEFAULTS..., kwargs...)
+
+"""
+    trough_constants(; kwargs...) -> YelmoConstants
+
+Constants for the TROUGH experiment. Same `sec_year` and
+`T_pmp_beta` as EISMINT but `rho_ice = 918.0`.
+
+Matches the `&TROUGH` group in the Fortran
+`yelmo/input/yelmo_phys_const.nml`.
+"""
+trough_constants(; kwargs...) =
+    YelmoConstants(; _TROUGH_DEFAULTS..., kwargs...)
 
 end # module YelmoConst
