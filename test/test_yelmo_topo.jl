@@ -1082,3 +1082,275 @@ end
     @test all(diff(rel_errs) .< 0.0)        # strictly monotone refinement
     @test all(1.7 .<= rates .<= 2.3)        # all rates ~ 2nd-order
 end
+
+# ------------------------------------------------------------------
+# Calving (phase 7) — kernel-level + end-to-end smoke tests.
+# ------------------------------------------------------------------
+
+using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params
+
+# Helper: tiny Bounded grid for kernel-level calving tests.
+_calv_grid(nx, ny; dx=1.0) = RectilinearGrid(size=(nx, ny),
+                                              x=(0.0, nx*dx), y=(0.0, ny*dx),
+                                              topology=(Bounded, Bounded, Flat))
+
+@testset "tpo: lsf_init!" begin
+    g = _calv_grid(8, 3)
+    H   = CenterField(g); fill!(interior(H),   0.0)
+    zb  = CenterField(g); fill!(interior(zb), -100.0)
+    zsl = CenterField(g); fill!(interior(zsl),  0.0)
+    lsf = CenterField(g)
+
+    # Ice in left half; cliff (above SL) at i=7.
+    for i in 1:4, j in 1:3; interior(H)[i, j, 1] = 100.0; end
+    for j in 1:3; interior(zb)[7, j, 1] = 50.0; end
+
+    lsf_init!(lsf, H, zb, zsl)
+    expected = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0]
+    @test interior(lsf)[:, 1, 1] == expected
+    @test interior(lsf)[:, 2, 1] == expected
+end
+
+@testset "tpo: extrapolate_ocn_ac!" begin
+    g = _calv_grid(8, 2)
+
+    # acx case.
+    w  = XFaceField(g); fill!(interior(w), 0.0)
+    ux = XFaceField(g); fill!(interior(ux), 0.0)
+    for i in 3:6, j in 1:2
+        interior(w)[i, j, 1]  = 5.0
+        interior(ux)[i, j, 1] = 5.0
+    end
+    ux_orig = copy(interior(ux))
+    extrapolate_ocn_acx!(w; reference = ux)
+    @test all(interior(w)[:, 1, 1] .== 5.0)         # filled in both directions
+    @test interior(ux) == ux_orig                    # reference must not be mutated
+
+    # Empty row stays zero.
+    fill!(interior(w),  0.0); fill!(interior(ux), 0.0)
+    extrapolate_ocn_acx!(w; reference = ux)
+    @test all(interior(w) .== 0.0)
+
+    # acy case.
+    w2  = YFaceField(g); fill!(interior(w2), 0.0)
+    uy  = YFaceField(g); fill!(interior(uy), 0.0)
+    for i in 1:8, j in 2:2
+        interior(w2)[i, j, 1] = 7.0
+        interior(uy)[i, j, 1] = 7.0
+    end
+    extrapolate_ocn_acy!(w2; reference = uy)
+    @test all(interior(w2)[1, :, 1] .== 7.0)
+end
+
+@testset "tpo: lsf_redistance!" begin
+    g = _calv_grid(20, 3)
+    lsf = CenterField(g)
+
+    # Sharp ±10 step at i=10/11 boundary.
+    for i in 1:20, j in 1:3
+        interior(lsf)[i, j, 1] = i <= 10 ? -10.0 : 10.0
+    end
+
+    lsf_redistance!(lsf, 1.0, 1.0; n_iter = 30)
+
+    # Zero level set preserved between cells 10 and 11.
+    @test interior(lsf)[10, 1, 1] ≈ -0.5 atol = 1e-3
+    @test interior(lsf)[11, 1, 1] ≈  0.5 atol = 1e-3
+
+    # |∇φ| = 1 near the front (cells 8..13).
+    diffs = [interior(lsf)[i+1, 1, 1] - interior(lsf)[i, 1, 1] for i in 8:12]
+    @test all(abs.(diffs .- 1.0) .< 1e-3)
+
+    # Far from the front the Sussman scheme leaves residual deviation,
+    # but signs are still preserved.
+    @test all(interior(lsf)[1:10,  :, :] .< 0.0)
+    @test all(interior(lsf)[11:20, :, :] .> 0.0)
+end
+
+@testset "tpo: lsf_update! (transport)" begin
+    g = _calv_grid(20, 3)
+    lsf = CenterField(g)
+    u   = XFaceField(g); fill!(interior(u), 0.5)   # eastward at 0.5 m/yr
+    v   = YFaceField(g); fill!(interior(v), 0.0)
+    crx = XFaceField(g); fill!(interior(crx), 0.0)
+    cry = YFaceField(g); fill!(interior(cry), 0.0)
+
+    # Step front at i=10/11: ice on left (-1), ocean on right (+1).
+    for i in 1:20, j in 1:3
+        interior(lsf)[i, j, 1] = i <= 10 ? -1.0 : 1.0
+    end
+
+    # Advance 1 yr; with cr=0, lsf passively translates at +0.5 cells/yr.
+    lsf_update!(lsf, u, v, crx, cry, 1.0; cfl_safety = 0.5)
+
+    # The zero level set should have moved to the east. Specifically the
+    # cell at i=11 (was +1) should now be near 0 (the front passed through).
+    @test interior(lsf)[11, 1, 1] < 1.0
+    @test interior(lsf)[11, 1, 1] >= 0.0
+    @test all(interior(lsf) .>= -1.0)
+    @test all(interior(lsf) .<=  1.0)
+end
+
+@testset "tpo: calc_calving_equil_ac!" begin
+    g = _calv_grid(4, 3)
+    u = XFaceField(g); fill!(interior(u), 100.0)
+    v = YFaceField(g); fill!(interior(v),  50.0)
+    crx = XFaceField(g)
+    cry = YFaceField(g)
+
+    calc_calving_equil_ac!(crx, cry, u, v)
+    @test all(interior(crx) .== -100.0)
+    @test all(interior(cry) .==  -50.0)
+end
+
+@testset "tpo: calc_calving_threshold_ac!" begin
+    g = _calv_grid(5, 3)
+    H = CenterField(g); fill!(interior(H), 0.0)
+    F = CenterField(g); fill!(interior(F), 0.0)
+    u = XFaceField(g); fill!(interior(u), 100.0)
+    v = YFaceField(g); fill!(interior(v),   0.0)
+    crx = XFaceField(g)
+    cry = YFaceField(g)
+
+    # Ice in cells i=2..3, j=2..2.
+    for i in 2:3, j in 2:2
+        interior(H)[i, j, 1] = 100.0
+        interior(F)[i, j, 1] = 1.0
+    end
+
+    calc_calving_threshold_ac!(crx, cry, u, v, H, F, 200.0)
+    # Faces at j=2 (XFaceField has nx+1 = 6 faces):
+    #   i=1: ocean/ocean,  H_acx=0,   wv=2.0,  cr=-200
+    #   i=2: ocean→ice,    H_acx=100, wv=1.5,  cr=-150 (ice-side stagger)
+    #   i=3: ice/ice,      H_acx=100, wv=1.5,  cr=-150
+    #   i=4: ice→ocean,    H_acx=100, wv=1.5,  cr=-150
+    #   i=5: ocean/ocean,  H_acx=0,   wv=2.0,  cr=-200
+    #   i=6: ocean/(out),  H_acx=0,   wv=2.0,  cr=-200
+    expected = [-200.0, -150.0, -150.0, -150.0, -200.0, -200.0]
+    @test interior(crx)[:, 2, 1] ≈ expected atol = 1e-12
+
+    # Hc must be positive.
+    @test_throws ErrorException calc_calving_threshold_ac!(crx, cry, u, v, H, F, 0.0)
+end
+
+@testset "tpo: merge_calving_rates!" begin
+    g = _calv_grid(4, 3)
+    u = XFaceField(g); fill!(interior(u), 100.0)
+    v = YFaceField(g); fill!(interior(v),   0.0)
+
+    cmbfx = XFaceField(g); fill!(interior(cmbfx), -10.0)
+    cmbfy = YFaceField(g); fill!(interior(cmbfy),  -5.0)
+    cmbgx = XFaceField(g); fill!(interior(cmbgx), 999.0)
+    cmbgy = YFaceField(g); fill!(interior(cmbgy), 999.0)
+    crx   = XFaceField(g)
+    cry   = YFaceField(g)
+
+    fgax = XFaceField(g)
+    fgay = YFaceField(g)
+    zb   = CenterField(g)
+    zsl  = CenterField(g); fill!(interior(zsl), 0.0)
+
+    # Branch 1: floating face → use cmb_flt.
+    fill!(interior(fgax), 0.0); fill!(interior(fgay), 0.0)
+    fill!(interior(zb), -500.0)
+    merge_calving_rates!(crx, cry, cmbfx, cmbfy, cmbgx, cmbgy,
+                         u, v, fgax, fgay, zb, zsl)
+    @test all(interior(crx) .== -10.0)
+    @test all(interior(cry) .==  -5.0)
+
+    # Branch 2: grounded face below SL → use cmb_grnd.
+    fill!(interior(fgax), 1.0); fill!(interior(fgay), 1.0)
+    merge_calving_rates!(crx, cry, cmbfx, cmbfy, cmbgx, cmbgy,
+                         u, v, fgax, fgay, zb, zsl)
+    @test all(interior(crx) .== 999.0)
+
+    # Branch 3: grounded face above SL → pin at -u_bar.
+    fill!(interior(zb), 100.0)
+    merge_calving_rates!(crx, cry, cmbfx, cmbfy, cmbgx, cmbgy,
+                         u, v, fgax, fgay, zb, zsl)
+    @test all(interior(crx) .== -100.0)
+    @test all(interior(cry) .==    0.0)
+end
+
+@testset "tpo: calving_step! kill on synthetic shelf" begin
+    # 16-km grid with a shelf in the left half. Use a huge calving-rate
+    # forcing so retreat is large enough to kill cells in 1 step.
+    nx, ny = 8, 4
+    dx = 16.0e3
+    g = _calv_grid(nx, ny; dx=dx)
+
+    # Synthetic boundary fields.
+    z_bed = CenterField(g);  fill!(interior(z_bed), -500.0)
+    z_sl  = CenterField(g);  fill!(interior(z_sl),     0.0)
+    smb_ref = CenterField(g); fill!(interior(smb_ref), 0.0)
+
+    p = YelmoModelParameters("calv-kill";
+        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
+                             dmb_method=0, topo_rel=0),
+        ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
+                             calv_grnd_method="zero", dt_lsf=0.0),
+    )
+    y = YelmoModel(RESTART_PATH, 0.0; alias="calv-kill", p=p, strict=false)
+
+    # Replace state with the synthetic geometry: shelf cells i=1..4.
+    # Force mask_ice = DYNAMIC everywhere so the post-advection mask
+    # pass doesn't wipe our patched ice (the restart's mask_ice may
+    # mark most of the synthetic grid as MASK_ICE_NONE).
+    fill!(interior(y.tpo.H_ice),    0.0)
+    fill!(interior(y.bnd.z_bed),   -500.0)
+    fill!(interior(y.bnd.z_sl),       0.0)
+    fill!(interior(y.bnd.smb_ref),    0.0)
+    fill!(interior(y.bnd.mask_ice),
+          Float64(Yelmo.YelmoCore.MASK_ICE_DYNAMIC))
+    H_pre_full = interior(y.tpo.H_ice)
+    nx_full, ny_full = size(H_pre_full, 1), size(H_pre_full, 2)
+    for i in 1:min(4, nx_full), j in 1:ny_full
+        H_pre_full[i, j, 1] = 500.0
+    end
+
+    # Patch the lsf so the right half is ocean (lsf=+1) including a
+    # column that overlaps the existing ice (i=4) — this forces a kill.
+    lsf_init!(y.tpo.lsf, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl)
+    target_i = min(4, nx_full)
+    for j in 1:ny_full
+        interior(y.tpo.lsf)[target_i, j, 1] = 1.0
+    end
+
+    Yelmo.step!(y, 1.0)
+
+    # Column `target_i` had H = 500 with lsf > 0 ⇒ kill: H → 0, cmb < 0.
+    @test all(interior(y.tpo.H_ice)[target_i, :, 1] .== 0.0)
+    @test all(interior(y.tpo.cmb)[target_i, :, 1] .< 0.0)
+    @test interior(y.tpo.cmb)[target_i, 1, 1] ≈ -500.0 atol = 1e-9
+
+    # Mass balance still closes.
+    err_total = maximum(abs.(interior(y.tpo.dHidt) .-
+                             (interior(y.tpo.dHidt_dyn) .+
+                              interior(y.tpo.mb_net))))
+    @test err_total < 1e-9
+end
+
+@testset "tpo: calving_step! method dispatch" begin
+    # vm-m16 errors (mat not yet ported); unknown method also errors.
+    p_vm = YelmoModelParameters("calv-vm";
+        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
+                             dmb_method=0, topo_rel=0),
+        ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16"),
+    )
+    y_vm = YelmoModel(RESTART_PATH, 0.0; alias="calv-vm",
+                      p=p_vm, strict=false)
+    lsf_init!(y_vm.tpo.lsf, y_vm.tpo.H_ice, y_vm.bnd.z_bed, y_vm.bnd.z_sl)
+    fill!(interior(y_vm.bnd.smb_ref), 0.0)
+    @test_throws ErrorException Yelmo.step!(y_vm, 1.0)
+
+    p_bogus = YelmoModelParameters("calv-bogus";
+        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
+                             dmb_method=0, topo_rel=0),
+        ycalv = ycalv_params(use_lsf=true, calv_flt_method="bogus"),
+    )
+    y_b = YelmoModel(RESTART_PATH, 0.0; alias="calv-bogus",
+                    p=p_bogus, strict=false)
+    lsf_init!(y_b.tpo.lsf, y_b.tpo.H_ice, y_b.bnd.z_bed, y_b.bnd.z_sl)
+    fill!(interior(y_b.bnd.smb_ref), 0.0)
+    @test_throws ErrorException Yelmo.step!(y_b, 1.0)
+end
