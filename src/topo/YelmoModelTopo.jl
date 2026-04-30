@@ -6,8 +6,9 @@ ice thickness `H_ice` via mass conservation and updates derived
 quantities (`z_srf`, `z_base`, `dHidt`, `dHidt_dyn`, `f_grnd`,
 `f_ice`).
 
-Public surface: `topo_step!(y::YelmoModel, dt)`, called from
-`step!(::YelmoModel, dt)` in fixed phase order.
+Public surface: `topo_step!(y::YelmoModel, dt)`, dispatched from
+`YelmoCore.step!(::YelmoModel, dt)` in fixed phase order alongside
+the other `<comp>_step!` generics.
 
 Milestone 2b: advection (from 2a) followed by surface mass balance
 (SMB) and a residual cleanup tendency (`mb_resid`) that handles
@@ -22,7 +23,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
-import ..YelmoCore: step!
+import ..YelmoCore: topo_step!
 
 export topo_step!, advect_tracer!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
@@ -60,22 +61,6 @@ include("bed_mask.jl")
 include("surface.jl")
 include("gradients.jl")
 include("dynamic_thickness.jl")
-
-"""
-    step!(y::YelmoModel, dt) -> y
-
-Pure-Julia model time-step. In milestone 2b this is `topo_step!`
-followed by stub no-ops for `dyn`, `mat`, `thrm` (which arrive in
-later milestones, each as their own per-component `<comp>_step!`
-called from here in fixed phase order).
-"""
-function step!(y::YelmoModel, dt::Float64)
-    topo_step!(y, dt)
-    # dyn_step!(y, dt)   — future milestone 3
-    # mat_step!(y, dt)   — future milestone 4
-    # therm_step!(y, dt) — future milestone 5
-    return y
-end
 
 """
     topo_step!(y::YelmoModel, dt) -> y

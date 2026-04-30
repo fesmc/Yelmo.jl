@@ -18,6 +18,7 @@ using ..YelmoModelPar: YelmoModelParameters
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
+export topo_step!, dyn_step!, mat_step!, therm_step!
 export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
@@ -701,11 +702,33 @@ function init_state!(y::YelmoModel, time::Float64; kwargs...)
     return y
 end
 
-# step!(::YelmoModel, dt) is provided by YelmoModelTopo, which orchestrates
-# the per-component physics chain. The generic function is declared here so
-# downstream modules (YelmoMirrorCore, YelmoModelTopo) can extend it via
-# `import ..YelmoCore: step!`.
-function step! end
+# ---------------------------------------------------------------------------
+# Per-component time-stepping generics
+# ---------------------------------------------------------------------------
+#
+# Each phase of the model has its own `<comp>_step!(y, dt)` function declared
+# here as a forward-only generic. The phase modules (YelmoModelTopo,
+# eventually YelmoModelDyn / YelmoModelMat / YelmoModelTherm) `import` the
+# matching generic and add the actual method body. Forward declaration here
+# lets the orchestrator below dispatch to the per-phase methods at runtime
+# without YelmoCore needing to depend on the phase modules.
+function topo_step!  end
+function dyn_step!   end
+function mat_step!   end
+function therm_step! end
+
+# `step!(::YelmoModel, dt)` orchestrates the per-component physics chain in
+# a fixed phase order (tpo → dyn → mat → therm). Methods for the
+# `<comp>_step!` calls below are added by the corresponding phase modules
+# at load time. `YelmoMirror` overrides `step!` in `YelmoMirrorCore` to call
+# the C API instead of the per-phase chain.
+function step!(y::YelmoModel, dt::Float64)
+    topo_step!(y, dt)
+    # dyn_step!(y,   dt)   — milestone 3
+    # mat_step!(y,   dt)   — milestone 4
+    # therm_step!(y, dt)   — milestone 5
+    return y
+end
 
 # ---------------------------------------------------------------------------
 # compare_state — backend-agnostic field-wise diff for regression tests
