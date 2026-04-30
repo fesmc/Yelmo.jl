@@ -23,12 +23,17 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 import ..YelmoCore: step!
 
-export topo_step!, advect_thickness!,
+export topo_step!, advect_tracer!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
        calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!,
-       set_tau_relax!, calc_G_relaxation!
+       set_tau_relax!, calc_G_relaxation!,
+       calc_calving_equil_ac!, calc_calving_threshold_ac!,
+       calc_calving_vonmises_m16_ac!, merge_calving_rates!,
+       lsf_init!, lsf_update!, lsf_redistance!,
+       extrapolate_ocn_acx!, extrapolate_ocn_acy!,
+       calving_step!
 
 include("advection.jl")
 include("mass_balance.jl")
@@ -38,6 +43,9 @@ include("basal.jl")
 include("frontal.jl")
 include("discharge.jl")
 include("relaxation.jl")
+include("calving_ac.jl")
+include("lsf.jl")
+include("calving.jl")
 
 """
     step!(y::YelmoModel, dt) -> y
@@ -97,7 +105,7 @@ Advance topography state by `dt` years. Phase order matches Fortran's
 14. Refresh `f_ice` after relaxation.
 15. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
 16. Refresh `f_ice`.
-17. `mb_net = smb + bmb + fmb + dmb + mb_relax + mb_resid`.
+17. `mb_net = smb + bmb + fmb + dmb + cmb + mb_relax + mb_resid`.
 18. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
     `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
 19. Advance `y.time`.
@@ -111,8 +119,8 @@ function topo_step!(y::YelmoModel, dt::Float64)
     interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
-        advect_thickness!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
-                          cfl_safety = y.p.yelmo.cfl_max)
+        advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
+                       cfl_safety = y.p.yelmo.cfl_max)
     end
 
     _apply_mask_ice_pass!(y, H_prev)
@@ -182,7 +190,13 @@ function topo_step!(y::YelmoModel, dt::Float64)
     mbal_tendency!(y.tpo.dmb, y.tpo.H_ice, y.tpo.f_grnd, y.tpo.dmb_ref, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.dmb, dt; adjust_mb=true)
 
-    # DMB may have moved margins; refresh f_ice before relaxation.
+    # DMB may have moved margins; refresh f_ice before calving.
+    calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
+
+    # Phase 7: level-set calving. No-op when `ycalv.use_lsf` is false.
+    calving_step!(y, dt)
+
+    # Calving may have killed cells; refresh f_ice before relaxation.
     calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 
     # Optional relaxation toward a reference state (Fortran phase 8).
@@ -229,6 +243,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
                               interior(y.tpo.bmb) .+
                               interior(y.tpo.fmb) .+
                               interior(y.tpo.dmb) .+
+                              interior(y.tpo.cmb) .+
                               interior(y.tpo.mb_relax) .+
                               interior(y.tpo.mb_resid)
 

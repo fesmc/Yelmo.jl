@@ -53,11 +53,16 @@ export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoModelTopo
-export topo_step!, advect_thickness!
+export topo_step!, advect_tracer!
 export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
 export calc_H_grnd!, determine_grounded_fractions!
 export calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!
 export set_tau_relax!, calc_G_relaxation!
+export calc_calving_equil_ac!, calc_calving_threshold_ac!,
+       calc_calving_vonmises_m16_ac!, merge_calving_rates!
+export lsf_init!, lsf_update!, lsf_redistance!,
+       extrapolate_ocn_acx!, extrapolate_ocn_acy!
+export calving_step!
 
 # YelmoIO
 export init_output

@@ -70,6 +70,12 @@
 | 66 | pc_corr_dmb       | xc, yc      | m/yr        | Corrected discharge mass balance                   |
 | 67 | pc_corr_cmb       | xc, yc      | m/yr        | Corrected calving mass balance                     |
 | 68 | tau_relax         | xc, yc      |             | Relaxed tau time                                   |
-| 69 | lsf               | xc, yc      |             | Level-set function                                 |
-| 70 | cmb_flt_x         | xc, yc      | m/yr        | Floating calving rate (x-direction)                |
-| 71 | cmb_flt_y         | xc, yc      | m/yr        | Floating calving rate (y-direction)                |
+| 69 | lsf               | xc, yc      |             | Level-set function (φ < 0 ice, φ > 0 ocean)        |
+| 70 | lsf_n             | xc, yc      |             | Level-set function from previous timestep          |
+| 71 | dlsfdt            | xc, yc      | 1/yr        | Level-set function rate of change                  |
+| 72 | cmb_flt_acx       | xc, yc      | m/yr        | Floating calving rate (acx nodes)                  |
+| 73 | cmb_flt_acy       | xc, yc      | m/yr        | Floating calving rate (acy nodes)                  |
+| 74 | cmb_grnd_acx      | xc, yc      | m/yr        | Marine-terminating grounded calving rate (acx)     |
+| 75 | cmb_grnd_acy      | xc, yc      | m/yr        | Marine-terminating grounded calving rate (acy)     |
+| 76 | cr_acx            | xc, yc      | m/yr        | Merged calving-front velocity (acx nodes)          |
+| 77 | cr_acy            | xc, yc      | m/yr        | Merged calving-front velocity (acy nodes)          |

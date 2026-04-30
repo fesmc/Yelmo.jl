@@ -12,7 +12,7 @@ and recorded individually.
 | # | Phase | Helper(s) | Output | Notes |
 |---|---|---|---|---|
 | 1 | Snapshot `H_ice` | — | `H_prev`, `tpo.H_ice_n` | `H_ice_n` feeds the `topo_rel_field == "H_ice_n"` relaxation target. |
-| 2 | Advection | `advect_thickness!` | `tpo.H_ice` | Skipped if `ytopo.topo_fixed`. |
+| 2 | Advection | `advect_tracer!` | `tpo.H_ice` | Skipped if `ytopo.topo_fixed`. Generic 2D tracer advection; reused by `lsf_update!`. |
 | 3 | Mask post-step | `_apply_mask_ice_pass!` | `tpo.H_ice` | `bnd.mask_ice ∈ {NONE, FIXED, DYNAMIC}` per cell. |
 | 4 | Snapshot for `dHidt_dyn` | — | `H_after_dyn` | Captures the dynamic contribution before any tendency. |
 | 5 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | Binary stub for v1; fractional later. |
@@ -24,7 +24,7 @@ and recorded individually.
 | 11 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
 | 12 | **DMB** | `calc_mb_discharge!`, `mbal_tendency!`, `apply_tendency!` | `tpo.dmb_ref`, `tpo.dmb`, `tpo.H_ice` | v1 stub: only `dmb_method = 0` (no-op) is implemented. |
 | 13 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 14 | **Calving** | — | — | **Not yet ported.** Fortran phase 7. |
+| 14 | **Calving** | `calving_step!` | `tpo.cmb`, `tpo.lsf`, `tpo.cr_acx`, `tpo.cr_acy`, `tpo.dlsfdt`, `tpo.cmb_flt`, `tpo.cmb_grnd`, `tpo.H_ice` | Level-set flux method only (no aa/mb-form). Gated on `ycalv.use_lsf`. See [`calving.md`](./calving.md). |
 | 15 | **Relaxation** (optional) | `set_tau_relax!`, `calc_G_relaxation!`, `apply_tendency!` | `tpo.tau_relax`, `tpo.mb_relax`, `tpo.H_ice` | Skipped when `ytopo.topo_rel == 0`. |
 | 16 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
 | 17 | **Residual cleanup** | `resid_tendency!`, `apply_tendency!` | `tpo.mb_resid`, `tpo.H_ice` | Min-thickness margins, islands, neighbour cap. |
@@ -40,7 +40,9 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 **Done**
 
-- Phase 1 (advection): `advect_thickness!` — explicit upwind via Oceananigans operators.
+- Phase 1 (advection): `advect_tracer!` — generic 2D tracer advection
+  (explicit upwind via Oceananigans operators), used both for `H_ice`
+  here and for `lsf` in calving.
 - Phases 2–6, 8–13, 15–18 (the per-cell mass-balance pipeline).
 - Subgrid `f_grnd` via the full CISM bilinear-interpolation scheme,
   with a numerically stable `_calc_fraction_above_zero` kernel that
@@ -49,9 +51,12 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 - Optional ice-thickness relaxation toward `bnd.H_ice_ref` or
   `tpo.H_ice_n`, supporting `topo_rel ∈ {-1, 1, 2, 3}`.
 
-**Deferred to milestone 2c (calving)**
+**Done (milestone 2c — calving)**
 
-- Phase 14 — calving methods (threshold, vM-L19, eigencalving, kill).
+- Phase 14 — level-set flux calving via `calving_step!`. Three laws
+  ported (`equil`, `threshold`, `vm-m16` stub). Sussman/Osher
+  redistancing replaces the Fortran neighbour-snap reset and `dt_lsf`
+  re-flag. Full pipeline documented in [`calving.md`](./calving.md).
 
 **Deferred to later milestones**
 
@@ -77,15 +82,18 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 - `thrm`: `bmb_grnd`
 
 **Written** (`tpo` group): the entire ytopo state — `H_ice`, `H_grnd`,
-`H_ice_n`, `f_ice`, `f_grnd`, `f_grnd_bmb`, `tau_relax`, `z_srf`,
-`z_base`, `dHidt`, `dHidt_dyn`, `mb_net`, `smb`, `bmb`, `fmb`, `dmb`,
-`mb_relax`, `mb_resid`, `bmb_ref`, `fmb_ref`, `dmb_ref`.
+`H_ice_n`, `f_ice`, `f_grnd`, `f_grnd_acx`, `f_grnd_acy`,
+`f_grnd_bmb`, `tau_relax`, `z_srf`, `z_base`, `dHidt`, `dHidt_dyn`,
+`mb_net`, `smb`, `bmb`, `fmb`, `dmb`, `cmb`, `mb_relax`, `mb_resid`,
+`bmb_ref`, `fmb_ref`, `dmb_ref`, plus the calving sub-state (`lsf`,
+`lsf_n`, `dlsfdt`, `cr_acx`, `cr_acy`, `cmb_flt`, `cmb_flt_acx`,
+`cmb_flt_acy`, `cmb_grnd`, `cmb_grnd_acx`, `cmb_grnd_acy`).
 
 ## Tests
 
 `test/test_yelmo_topo.jl` covers:
 
-- Kernel-level: `advect_thickness!`, `calc_f_ice!`, `calc_H_grnd!`,
+- Kernel-level: `advect_tracer!`, `calc_f_ice!`, `calc_H_grnd!`,
   `determine_grounded_fractions!`, `calc_bmb_total!`,
   `calc_fmb_total!`, `calc_mb_discharge!`, `set_tau_relax!`,
   `calc_G_relaxation!`.
@@ -99,3 +107,10 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
     `(a, b, c)` triples.
   - Circular-GL convergence (Tier 2): clean O(dx²) at all four
     refinement levels (rates 2.02 / 2.01 / 2.01).
+- Calving (phase 14): nine testsets covering `lsf_init!`, the
+  ocean-extrapolation sweeps, Sussman/Osher redistancing
+  (`|∇φ| = 1` recovery and zero-set preservation), passive LSF
+  transport, every law (`equil`, `threshold`, `vm-m16` error path),
+  the merge logic, and an end-to-end kill on a synthetic shelf with
+  `mass-balance closure to 1e-9`. See [`calving.md`](./calving.md)
+  for the test inventory.
