@@ -145,18 +145,14 @@ function extrapolate_ocn_acy!(w_acy; reference = w_acy)
 end
 
 """
-    lsf_update!(lsf, w_acx, w_acy, u_bar, v_bar,
-                cr_acx, cr_acy, dt;
+    lsf_update!(lsf, u_bar, v_bar, cr_acx, cr_acy, dt;
                 cfl_safety=0.1) -> lsf
 
 Advance `lsf` by `dt` years. Builds the calving-front velocity
-`w = u_bar + cr` into the supplied scratch fields `w_acx`/`w_acy`,
-extrapolates it into the ocean along its natural axis, advects `lsf`
-at `w` via `advect_tracer!`, and saturates the result to `[-1, 1]`.
-
-Caller owns the scratch buffers `w_acx` (XFaceField) and `w_acy`
-(YFaceField); this avoids per-step allocation. The buffers are
-overwritten on entry.
+`w = u_bar + cr`, extrapolates it into the ocean along its natural
+axis, advects `lsf` at `w` via `advect_tracer!`, and saturates the
+result to `[-1, 1]`. The two scratch face-fields for `w` are
+allocated internally (cheap; one pair per call).
 
 Port of `LSFupdate` in `lsf_module.f90`. Differences from Fortran:
 
@@ -167,11 +163,14 @@ Port of `LSFupdate` in `lsf_module.f90`. Differences from Fortran:
     handles drift instead.
 """
 function lsf_update!(lsf,
-                     w_acx, w_acy,
                      u_bar, v_bar,
                      cr_acx, cr_acy,
                      dt::Real;
                      cfl_safety::Real = 0.1)
+    grid = lsf.grid
+    w_acx = XFaceField(grid)
+    w_acy = YFaceField(grid)
+
     Wx = interior(w_acx)
     Wy = interior(w_acy)
     Ux = interior(u_bar)

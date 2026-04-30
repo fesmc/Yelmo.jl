@@ -62,6 +62,7 @@ export calc_calving_equil_ac!, calc_calving_threshold_ac!,
        calc_calving_vonmises_m16_ac!, merge_calving_rates!
 export lsf_init!, lsf_update!, lsf_redistance!,
        extrapolate_ocn_acx!, extrapolate_ocn_acy!
+export calving_step!
 
 # YelmoIO
 export init_output
