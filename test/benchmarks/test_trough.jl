@@ -46,28 +46,81 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 const _T_OUT = 1000.0
 const _SPEC  = TroughBenchmark(:F17; dx_km=8.0)
 
-# Trough-physics parameters for the file-based YelmoModel — matches
-# the values written to `specs/yelmo_TROUGH.nml` so the solver
-# config is consistent with the fixture's reference state.
+# Trough-physics parameters for the file-based YelmoModel — must
+# echo every override from `specs/yelmo_TROUGH.nml` so the solver
+# config is consistent with the fixture's reference state. Defaults
+# from `ytill_params`, `yneff_params`, `ymat_params`, and
+# `ydyn_params` follow the Fortran *global* defaults; the trough
+# namelist overrides several of them and we must mirror that here.
+#
+# Phase 1 diagnostic (commit 84b284b) traced a residual ~50% lockstep
+# gap to ytill defaults `is_angle=false`, `cf_ref=0.8` falling
+# through, producing c_bed ~53× too large. Fixing the ytill block
+# (and auditing yneff / ymat / ydyn while we're at it) closes it.
 function _trough_yelmo_params()
     return YelmoModelParameters("trough_f17_load";
+        # &ydyn — overrides namelist values for an SSA-only lockstep
+        # check. solver = "ssa" diverges from the namelist's "diva"
+        # by design (test exercises the SSA kernel against the
+        # YelmoMirror reference). Other ydyn fields match namelist.
         ydyn = ydyn_params(
-            solver         = "ssa",
-            visc_method    = 1,
-            beta_method    = 2,
-            beta_const     = 1e3,
-            beta_q         = 1.0/3.0,
-            beta_u0        = 31556926.0,
-            ssa_lat_bc     = "floating",
+            solver         = "ssa",                 # namelist: "diva" — overridden for SSA-only test
+            visc_method    = 1,                     # namelist: 1
+            beta_method    = 2,                     # namelist: 2 (default is 1)
+            beta_const     = 1e3,                   # namelist: 1e3
+            beta_q         = 1.0/3.0,               # namelist: 0.3333333 (default is 1.0)
+            beta_u0        = 31556926.0,            # namelist: 31556926 (default is 100)
+            beta_gl_stag   = 3,                     # namelist: 3 (default is 1)
+            beta_min       = 0.0,                   # namelist: 0.0 (default is 100.0)
+            ssa_lat_bc     = "floating",            # namelist: "floating"
             ssa_solver     = SSASolver(rtol            = 1e-4,
                                        itmax           = 200,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7),
+                                       picard_tol      = 1e-3,    # namelist ssa_iter_conv = 1e-3
+                                       picard_iter_max = 20,      # namelist ssa_iter_max  = 20
+                                       picard_relax    = 0.7),    # namelist ssa_iter_rel  = 0.7
         ),
+        # &yneff — namelist sets method=3 with nxi=5 subgrid sampling,
+        # but Yelmo.jl has nxi > 0 deferred (errors on non-zero nxi
+        # in calc_ydyn_neff!). Use method=-1 (external) so the
+        # fixture's loaded N_eff is preserved as-is. Phase 1 diag
+        # confirmed N_eff matches the fixture exactly under this
+        # path; switching to method=3 with nxi=0 would compute a
+        # slightly different N_eff than Fortran's nxi=5 result.
         yneff = yneff_params(method = -1, const_ = 1e7),
-        ytill = ytill_params(method = -1),
-        ymat  = ymat_params(n_glen = 3.0),
+        # &ytill — namelist:
+        #   method=1, scale_zb=0, scale_sed=0, is_angle=True, n_sd=1,
+        #   f_sed=1.0, sed_min=5.0, sed_max=15.0, z0=-300, z1=200,
+        #   cf_min=5.0, cf_ref=10.0
+        # Defaults that DIFFER and must be overridden: scale_zb,
+        # is_angle, n_sd, f_sed, cf_min, cf_ref. (Other fields happen
+        # to match the global default already, but we pass them
+        # explicitly anyway for clarity / to lock the test to the
+        # namelist.)
+        ytill = ytill_params(
+            method    = 1,
+            scale_zb  = 0,
+            scale_sed = 0,
+            is_angle  = true,
+            n_sd      = 1,
+            f_sed     = 1.0,
+            sed_min   = 5.0,
+            sed_max   = 15.0,
+            z0        = -300.0,
+            z1        =  200.0,
+            cf_min    =  5.0,
+            cf_ref    = 10.0,
+        ),
+        # &ymat — namelist overrides:
+        #   rf_const=3.1536e-18, de_max=0.5, enh_shear/stream/shlf=1.0
+        # (defaults are 1e-18, 2.0, 3.0/3.0/0.7).
+        ymat  = ymat_params(
+            n_glen     = 3.0,
+            rf_const   = 3.1536e-18,
+            de_max     = 0.5,
+            enh_shear  = 1.0,
+            enh_stream = 1.0,
+            enh_shlf   = 1.0,
+        ),
     )
 end
 
@@ -78,6 +131,19 @@ end
 
     # =====================================================================
     # 1. File-based load.
+    #
+    # NOTE: the Fortran TROUGH-F17 grid is periodic in y (the trough
+    # wraps around). The natural fix is `boundaries = :periodic_y`,
+    # but `_load_into_field!(::Field{Center, Face, Center}, ...)` in
+    # YelmoCore.jl currently assumes a Bounded YFaceField (Ny+1
+    # faces) when broadcasting Center-stored fixture data; under
+    # Periodic-y the YFaceField has Ny faces and the broadcast
+    # raises DimensionMismatch. Loading on `:bounded` works but
+    # leaves the y=1 / y=Ny rows of `ux_bar` clamped to zero by the
+    # SSA solver's no-slip BC (vs ~350 m/yr in the fixture), which
+    # contributes the bulk of the residual `err_ux` lockstep gap.
+    # Closing that gap requires extending the periodic-Face loader
+    # in production code, deferred to a follow-up task.
     # =====================================================================
     p = _trough_yelmo_params()
     y_file = YelmoModel(fixture_path, _T_OUT;
