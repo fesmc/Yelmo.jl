@@ -167,11 +167,22 @@ routed into the appropriate component group by the generic
 
 Errors with a hint to run `regenerate.jl` if the fixture is missing.
 
-Returned keys: `xc`, `yc`, `H_ice`, `z_bed`, plus whichever optional
-fields the fixture carries (`f_grnd`, `ux_b`, `uy_b`, `ATT`, …).
-Only fields that exist in the NetCDF and match a schema variable
-are forwarded; unknown keys are skipped silently in the
-`YelmoModel(::AbstractBenchmark, t)` constructor.
+Returned keys: `xc`, `yc`, plus whichever schema-Center fields the
+fixture carries (`H_ice`, `z_bed`, `f_grnd`, `smb_ref`, `T_srf`,
+`Q_geo`).
+
+Face-staggered fields (`ux_b`, `uy_b`, `ux_bar`, `uy_bar`, `ATT`)
+are *deliberately not* returned by `state()`: their on-disk layout
+matches Yelmo Fortran's `(xc, yc)` cell-centred convention, but the
+in-memory `YelmoModel` allocates them as `XFaceField`/`YFaceField`
+with halo-included sizes `(Nx+1, Ny)` / `(Nx, Ny+1)`. Loading them
+through `_assign_field!` would shape-mismatch. The regression test
+loads the file-based `YelmoModel(restart_file, time)` for
+face-staggered comparisons and uses `state(b, t)` only for the
+Center-aligned state.
+
+Yelmo Fortran restarts store Float32 — values are promoted to
+Float64 here to match Yelmo.jl's Field eltypes.
 """
 function state(b::TroughBenchmark, t::Real)
     path = _trough_fixture_path(b, t)
@@ -187,19 +198,16 @@ function state(b::TroughBenchmark, t::Real)
         # km or m).
         out = Dict{Symbol,Any}(:xc => b.xc, :yc => b.yc)
 
-        # Optional fields: forward only those present in the fixture.
-        # The 2D state fields the regression test compares are
-        # H_ice / z_bed / f_grnd / ux_b / uy_b. ATT is 3D.
+        # Optional Center-aligned fields: forward only those present
+        # in the fixture. Yelmo Fortran restarts have a trailing
+        # singleton time-dim on 2D fields → drop it via [:, :, 1].
         for name in ("H_ice", "z_bed", "f_grnd",
-                     "ux_b", "uy_b", "ux_bar", "uy_bar",
                      "smb_ref", "T_srf", "Q_geo")
             if haskey(ds, name)
-                arr = Array(ds[name][:, :])
-                out[Symbol(name)] = arr
+                raw = ds[name][:, :, :]
+                arr2d = ndims(raw) == 3 ? raw[:, :, 1] : raw
+                out[Symbol(name)] = Array{Float64}(arr2d)
             end
-        end
-        if haskey(ds, "ATT")
-            out[:ATT] = Array(ds["ATT"][:, :, :])
         end
 
         return NamedTuple(out)
