@@ -170,3 +170,45 @@ end
     # Variant validation.
     @test_throws ErrorException TroughBenchmark(:F18; dx_km=8.0)
 end
+
+# ----------------------------------------------------------------------
+# HOMCBenchmark construction smoke. The 180° anti-symmetry SSA test
+# lives in `test_hom_c.jl` (post-dyn_step!). Here we just verify the
+# struct constructor + axis bounds + state shape.
+# ----------------------------------------------------------------------
+
+@testset "benchmarks: HOMCBenchmark(:C, L=80) construction" begin
+    b = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
+    @test b.variant === :C
+    @test b.L_km    == 80.0
+    @test b.dx_km   == 2.0
+    @test length(b.xc) == 40                  # L/dx = 40
+    @test length(b.yc) == 40
+    # Cell centres at (0.5·dx, 1.5·dx, …, (Nx - 0.5)·dx) in metres.
+    @test b.xc[1]   ≈ 1000.0                 # 0.5 · 2 km
+    @test b.xc[end] ≈ 79_000.0               # (40 - 0.5) · 2 km
+    @test b.yc[1]   ≈ 1000.0
+    @test b.yc[end] ≈ 79_000.0
+
+    # Material defaults match the Yelmo Fortran namelist.
+    @test b.H        ≈ 1000.0
+    @test b.A_glen   ≈ 1e-16
+    @test b.n_glen   ≈ 3.0
+    @test b.beta0    ≈ 1000.0
+    @test b.beta_amp ≈ 1000.0   # Yelmo Fortran convention (NOT 0.9)
+    @test b.alpha_rad ≈ 0.1 * π / 180.0
+
+    # state(b, 0) shape and values.
+    s = state(b, 0.0)
+    @test size(s.H_ice) == (40, 40)
+    @test all(s.H_ice .== 1000.0)
+    # z_bed = -x · tan α - H. Linear in x, constant in y.
+    @test s.z_bed[1, 1]    ≈ -b.xc[1]   * tan(b.alpha_rad) - b.H
+    @test s.z_bed[end, 1]  ≈ -b.xc[end] * tan(b.alpha_rad) - b.H
+    @test all(abs.(diff(s.z_bed; dims=2)) .< 1e-10)   # constant in y
+
+    # Variant validation.
+    @test_throws ErrorException HOMCBenchmark(:A; L_km=80.0, dx_km=2.0)
+    # Non-integer Nx rejected.
+    @test_throws ErrorException HOMCBenchmark(:C; L_km=80.0, dx_km=3.0)
+end
