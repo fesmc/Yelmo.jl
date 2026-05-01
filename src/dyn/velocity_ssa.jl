@@ -1378,7 +1378,22 @@ function calc_velocity_ssa!(y)
         end
 
         # ---- Step 3: depth-integrated viscosity. ----
+        # Boundary visc fields under the Option C convention: the
+        # 3D `visc_eff` Center stagger does NOT include the bed
+        # (zeta = 0) or surface (zeta = 1) endpoints. Approximate the
+        # boundary visc by the nearest-Center value — exact for
+        # `visc_method = 0` (constant `visc_const` fills all centres,
+        # so the endpoints inherit the same value) and for isothermal
+        # uniform-ATT cases under `visc_method = 1, 2`; approximate for
+        # temperature-dependent ATT. Matches the SIA convention for
+        # ATT_bed / ATT_surf in `calc_velocity_sia!`. Revisit when
+        # therm wires temperature-dependent ATT (milestone 3g).
+        @views interior(sc.ssa_visc_eff_b)[:, :, 1] .=
+            interior(y.dyn.visc_eff)[:, :, 1]
+        @views interior(sc.ssa_visc_eff_s)[:, :, 1] .=
+            interior(y.dyn.visc_eff)[:, :, end]
         calc_visc_eff_int!(y.dyn.visc_eff_int, y.dyn.visc_eff,
+                           sc.ssa_visc_eff_b, sc.ssa_visc_eff_s,
                            y.tpo.H_ice, y.tpo.f_ice, zeta_c)
 
         # ---- Step 4: beta on aa-cells (uses current ux_b/uy_b/c_bed). ----
