@@ -195,9 +195,9 @@ end
     @test errs_y[20.0] < errs_y[50.0]
     @test errs_y[10.0] < errs_y[20.0]
 
-    # Loose absolute threshold at the finest grid. Locked-in user
-    # decision Q10: deliberately loose for now; do NOT tighten on
-    # first-pass empirical results.
-    @test errs_x[10.0] < 0.20
-    @test errs_y[10.0] < 0.20
+    # Absolute threshold at the finest grid. Tightened from the
+    # initial 0.20 to 0.10 once the empirical errors stabilised
+    # (err_x ~ 0.074, err_y ~ 0.065 at dx = 10 km).
+    @test errs_x[10.0] < 0.10
+    @test errs_y[10.0] < 0.10
 end
