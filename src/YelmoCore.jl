@@ -567,10 +567,10 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
 
-    # SIA-only solver scratch buffers; not in the dyn schema because
+    # SIA / SSA solver scratch buffers; not in the dyn schema because
     # they are recomputed every `dyn_step!` and not part of the model
     # state. Exposed as `y.dyn.scratch.<name>`. See
-    # `src/dyn/velocity_sia.jl`.
+    # `src/dyn/velocity_sia.jl` (SIA) and `src/dyn/viscosity.jl` (SSA).
     #
     #   - `sia_tau_xz` / `sia_tau_yz` (3D, on `gt`): per-layer SIA
     #     vertical shear stresses at Center positions.
@@ -579,8 +579,14 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     #     3D `ux_i` / `uy_i` Center stagger does NOT include the
     #     surface endpoint under Option C. Read by `dyn_step!` to
     #     assemble `ux_s = ux_i_s + ux_b` (and analogously for uy_s).
-    sia_scratch = (sia_tau_xz = XFaceField(gt), sia_tau_yz = YFaceField(gt),
-                   ux_i_s     = XFaceField(g),  uy_i_s     = YFaceField(g))
+    #   - `ssa_n_aa_ab` (2D, on `g`): corner-staggered viscosity cache
+    #     `Field((Face(), Face(), Center()), g)`. Output of
+    #     `stagger_visc_aa_ab!`; consumed by the SSA matrix assembly
+    #     (PR-A.2). Allocated here so the buffer is ready when the SSA
+    #     solver wires up.
+    sia_scratch = (sia_tau_xz  = XFaceField(gt), sia_tau_yz  = YFaceField(gt),
+                   ux_i_s      = XFaceField(g),  uy_i_s      = YFaceField(g),
+                   ssa_n_aa_ab = Field((Face(), Face(), Center()), g))
     dyn = merge(dyn, (scratch = sia_scratch,))
 
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0

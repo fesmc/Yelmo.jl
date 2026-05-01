@@ -68,10 +68,14 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded
+using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
+
+# Topology-aware neighbour-index helpers (`_neighbor_im1` / `_neighbor_jm1`)
+# and face-write helpers (`_ip1_modular` / `_jp1_modular`) live in
+# `topology_helpers.jl` (included earlier by `YelmoModelDyn.jl`).
 
 """
     calc_shear_stress_3D!(tau_xz, tau_yz,
@@ -119,20 +123,37 @@ function calc_shear_stress_3D!(tau_xz, tau_yz,
     Nx, Ny = size(interior(f_ice), 1), size(interior(f_ice), 2)
     Nz = length(zeta_aa)
 
+    # Topology-aware face writes: under Bounded the eastern/northern
+    # face write `[i+1, ...]` / `[..., j+1, ...]` is in bounds; under
+    # Periodic it wraps modularly to slot 1. Reads of `Tx[i+1, ...]` /
+    # `Ty[..., j+1, ...]` use the same helper so the indexing is
+    # consistent on both sides.
+    Tx_top = topology(tau_xz.grid, 1)
+    Ty_top = topology(tau_yz.grid, 2)
+
     @inbounds for k in 1:Nz
         one_m_zk = 1.0 - Float64(zeta_aa[k])
         for j in 1:Ny, i in 1:Nx
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             # X-face: Fortran tau_xz(i, j, k) ↔ Tx index (i+1, j, 1).
-            Txz[i+1, j, k] = -one_m_zk * Tx[i+1, j, 1]
+            Txz[ip1f, j, k] = -one_m_zk * Tx[ip1f, j, 1]
             # Y-face: Fortran tau_yz(i, j, k) ↔ Ty index (i, j+1, 1).
-            Tyz[i, j+1, k] = -one_m_zk * Ty[i, j+1, 1]
+            Tyz[i, jp1f, k] = -one_m_zk * Ty[i, jp1f, 1]
         end
     end
 
-    # Replicate the leading face slot per-layer (matches the
-    # YelmoMirror loader convention and `calc_driving_stress!`).
-    @views Txz[1, :, :] .= Txz[2, :, :]
-    @views Tyz[:, 1, :] .= Tyz[:, 2, :]
+    # Replicate the leading face slot per-layer (matches the YelmoMirror
+    # loader convention and `calc_driving_stress!`). Only meaningful
+    # under Bounded — under Periodic the "leading" slot 1 is the wrapped
+    # eastern/northern face that was just written, so the replicate is a
+    # no-op self-assignment.
+    if Tx_top === Bounded
+        @views Txz[1, :, :] .= Txz[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Tyz[:, 1, :] .= Tyz[:, 2, :]
+    end
 
     return tau_xz, tau_yz
 end
@@ -213,10 +234,14 @@ function calc_uxy_sia_3D!(ux, uy,
     grid = ux.grid
     Tx_top = topology(grid, 1)
     Ty_top = topology(grid, 2)
-    if !(Tx_top === Bounded && Ty_top === Bounded)
-        error("calc_uxy_sia_3D!: requires (Bounded, Bounded, *) horizontal topology; " *
-              "got ($(Tx_top), $(Ty_top), …). Periodic-y support is deferred to milestone 3d.")
-    end
+    # PR-A.1 polish: face-write convention is now generalised via
+    # `_ip1_modular` / `_jp1_modular`, so Bounded and Periodic are both
+    # accepted on x and y. The kernel still requires the topology to be
+    # one of those two (no Flat / Stretched on the horizontal axes).
+    (Tx_top === Bounded || Tx_top === Periodic) || error(
+        "calc_uxy_sia_3D!: x-topology must be Bounded or Periodic; got $(Tx_top).")
+    (Ty_top === Bounded || Ty_top === Periodic) || error(
+        "calc_uxy_sia_3D!: y-topology must be Bounded or Periodic; got $(Ty_top).")
 
     Ux  = interior(ux)
     Uy  = interior(uy)
@@ -252,14 +277,16 @@ function calc_uxy_sia_3D!(ux, uy,
         dzeta_bed = Float64(zeta_aa[1])
 
         for j in 1:Ny, i in 1:Nx
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             # Shear stress 4-corner average at zeta = 0 (closed form):
             # tau_xz_bed at face (i+1, j) and (i+1, j+1).
-            txz_up_bed = 0.5 * (-taud_acx[i+1, j,   1] + (-taud_acx[i+1, j+1, 1]))
-            txz_up_k1  = 0.5 * (tau_xz[i+1, j,   k] + tau_xz[i+1, j+1, k])
+            txz_up_bed = 0.5 * (-taud_acx[ip1f, j,    1] + (-taud_acx[ip1f, j+1, 1]))
+            txz_up_k1  = 0.5 * (tau_xz[ip1f, j,    k] + tau_xz[ip1f, j+1, k])
             txz_n      = 0.5 * (txz_up_bed + txz_up_k1)
 
-            tyz_up_bed = 0.5 * (-taud_acy[i,   j+1, 1] + (-taud_acy[i+1, j+1, 1]))
-            tyz_up_k1  = 0.5 * (tau_yz[i,   j+1, k] + tau_yz[i+1, j+1, k])
+            tyz_up_bed = 0.5 * (-taud_acy[i,    jp1f, 1] + (-taud_acy[i+1, jp1f, 1]))
+            tyz_up_k1  = 0.5 * (tau_yz[i,    jp1f, k] + tau_yz[i+1, jp1f, k])
             tyz_n      = 0.5 * (tyz_up_bed + tyz_up_k1)
 
             tau_eff_sq_n = txz_n^2 + tyz_n^2
@@ -281,20 +308,24 @@ function calc_uxy_sia_3D!(ux, uy,
         end
 
         for j in 1:Ny, i in 1:Nx
-            jm1 = max(j - 1, 1)
-            im1 = max(i - 1, 1)
+            # `fact_ab` is a plain Matrix (no halo). The wrap depends on
+            # axis topology: Bounded → clamp to 1; Periodic → wrap.
+            jm1  = _neighbor_jm1(j, Ny, Ty_top)
+            im1  = _neighbor_im1(i, Nx, Tx_top)
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
 
             # x-face: bed segment contribution. ux_bed = 0, so
             # ux[k=1] = 0 + 0.5 * fact_ac_x * (tau_xz[k=1] + tau_xz_bed).
             fact_ac_x = 0.5 * (fact_ab[i, j] + fact_ab[i, jm1])
-            Ux[i+1, j, k] = 0.0 +
-                            fact_ac_x * 0.5 *
-                            (tau_xz[i+1, j, k] + (-taud_acx[i+1, j, 1]))
+            Ux[ip1f, j, k] = 0.0 +
+                             fact_ac_x * 0.5 *
+                             (tau_xz[ip1f, j, k] + (-taud_acx[ip1f, j, 1]))
 
             fact_ac_y = 0.5 * (fact_ab[i, j] + fact_ab[im1, j])
-            Uy[i, j+1, k] = 0.0 +
-                            fact_ac_y * 0.5 *
-                            (tau_yz[i, j+1, k] + (-taud_acy[i, j+1, 1]))
+            Uy[i, jp1f, k] = 0.0 +
+                             fact_ac_y * 0.5 *
+                             (tau_yz[i, jp1f, k] + (-taud_acy[i, jp1f, 1]))
         end
     end
 
@@ -306,16 +337,18 @@ function calc_uxy_sia_3D!(ux, uy,
         # factor) for layer k via 4-cell averages of ATT/H plus the
         # effective shear-stress factor.
         for j in 1:Ny, i in 1:Nx
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             # tau_xz: Fortran tau_xz(i,   j,   k) ↔ tau_xz[i+1, j,   k]
             #         Fortran tau_xz(i,   j+1, k) ↔ tau_xz[i+1, j+1, k]
-            txz_up = 0.5 * (tau_xz[i+1, j, k]   + tau_xz[i+1, j+1, k])
-            txz_dn = 0.5 * (tau_xz[i+1, j, k-1] + tau_xz[i+1, j+1, k-1])
+            txz_up = 0.5 * (tau_xz[ip1f, j, k]   + tau_xz[ip1f, j+1, k])
+            txz_dn = 0.5 * (tau_xz[ip1f, j, k-1] + tau_xz[ip1f, j+1, k-1])
             txz_n  = 0.5 * (txz_up + txz_dn)
 
             # tau_yz: Fortran tau_yz(i,   j, k) ↔ tau_yz[i,   j+1, k]
             #         Fortran tau_yz(i+1, j, k) ↔ tau_yz[i+1, j+1, k]
-            tyz_up = 0.5 * (tau_yz[i, j+1, k]   + tau_yz[i+1, j+1, k])
-            tyz_dn = 0.5 * (tau_yz[i, j+1, k-1] + tau_yz[i+1, j+1, k-1])
+            tyz_up = 0.5 * (tau_yz[i, jp1f, k]   + tau_yz[i+1, jp1f, k])
+            tyz_dn = 0.5 * (tau_yz[i, jp1f, k-1] + tau_yz[i+1, jp1f, k-1])
             tyz_n  = 0.5 * (tyz_up + tyz_dn)
 
             tau_eff_sq_n = txz_n^2 + tyz_n^2
@@ -341,18 +374,20 @@ function calc_uxy_sia_3D!(ux, uy,
         # Second inner loop: stagger fact_ab to acx / acy faces, then
         # apply the depth recurrence.
         for j in 1:Ny, i in 1:Nx
-            jm1 = max(j - 1, 1)
-            im1 = max(i - 1, 1)
+            jm1  = _neighbor_jm1(j, Ny, Ty_top)
+            im1  = _neighbor_im1(i, Nx, Tx_top)
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
 
             # x-face: Fortran ux(i, j, k) ↔ Ux[i+1, j, k].
             fact_ac_x = 0.5 * (fact_ab[i, j] + fact_ab[i, jm1])
-            Ux[i+1, j, k] = Ux[i+1, j, k-1] +
-                            fact_ac_x * 0.5 * (tau_xz[i+1, j, k] + tau_xz[i+1, j, k-1])
+            Ux[ip1f, j, k] = Ux[ip1f, j, k-1] +
+                             fact_ac_x * 0.5 * (tau_xz[ip1f, j, k] + tau_xz[ip1f, j, k-1])
 
             # y-face: Fortran uy(i, j, k) ↔ Uy[i, j+1, k].
             fact_ac_y = 0.5 * (fact_ab[i, j] + fact_ab[im1, j])
-            Uy[i, j+1, k] = Uy[i, j+1, k-1] +
-                            fact_ac_y * 0.5 * (tau_yz[i, j+1, k] + tau_yz[i, j+1, k-1])
+            Uy[i, jp1f, k] = Uy[i, jp1f, k-1] +
+                             fact_ac_y * 0.5 * (tau_yz[i, jp1f, k] + tau_yz[i, jp1f, k-1])
         end
     end
 
@@ -509,17 +544,22 @@ function calc_velocity_sia!(ux_i, uy_i, ux_i_bar, uy_i_bar,
     dzeta_surf = 1.0 - Float64(zeta_c[Nz])
     fact_ab_surf = Matrix{Float64}(undef, Nx, Ny)
 
+    Tx_top = topology(ux_i.grid, 1)
+    Ty_top = topology(ux_i.grid, 2)
+
     @inbounds for j in 1:Ny, i in 1:Nx
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         # 4-corner shear-stress average at zeta = zeta_c[Nz]
         # (Center) and zeta = 1 (surface, where tau = 0 closed form).
         txz_up_surf = 0.0
-        txz_up_Nz   = 0.5 * (tau_xz_buf[i+1, j,   Nz] +
-                             tau_xz_buf[i+1, j+1, Nz])
+        txz_up_Nz   = 0.5 * (tau_xz_buf[ip1f, j,   Nz] +
+                             tau_xz_buf[ip1f, j+1, Nz])
         txz_n       = 0.5 * (txz_up_Nz + txz_up_surf)
 
         tyz_up_surf = 0.0
-        tyz_up_Nz   = 0.5 * (tau_yz_buf[i,   j+1, Nz] +
-                             tau_yz_buf[i+1, j+1, Nz])
+        tyz_up_Nz   = 0.5 * (tau_yz_buf[i,   jp1f, Nz] +
+                             tau_yz_buf[i+1, jp1f, Nz])
         tyz_n       = 0.5 * (tyz_up_Nz + tyz_up_surf)
 
         tau_eff_sq_n = txz_n^2 + tyz_n^2
@@ -539,61 +579,82 @@ function calc_velocity_sia!(ux_i, uy_i, ux_i_bar, uy_i_bar,
     end
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        jm1 = max(j - 1, 1)
-        im1 = max(i - 1, 1)
+        jm1  = _neighbor_jm1(j, Ny, Ty_top)
+        im1  = _neighbor_im1(i, Nx, Tx_top)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
 
         fact_ac_x = 0.5 * (fact_ab_surf[i, j] + fact_ab_surf[i, jm1])
         # tau_xz_surf = 0, so the segment increment uses (0 + tau_xz[Nz]).
-        Ux_is[i+1, j, 1] = Ux_i[i+1, j, Nz] +
-                           fact_ac_x * 0.5 *
-                           (0.0 + tau_xz_buf[i+1, j, Nz])
+        Ux_is[ip1f, j, 1] = Ux_i[ip1f, j, Nz] +
+                            fact_ac_x * 0.5 *
+                            (0.0 + tau_xz_buf[ip1f, j, Nz])
 
         fact_ac_y = 0.5 * (fact_ab_surf[i, j] + fact_ab_surf[im1, j])
-        Uy_is[i, j+1, 1] = Uy_i[i, j+1, Nz] +
-                           fact_ac_y * 0.5 *
-                           (0.0 + tau_yz_buf[i, j+1, Nz])
+        Uy_is[i, jp1f, 1] = Uy_i[i, jp1f, Nz] +
+                            fact_ac_y * 0.5 *
+                            (0.0 + tau_yz_buf[i, jp1f, Nz])
     end
 
     # Replicate the leading face slot to match the YelmoMirror loader
     # convention used elsewhere in dyn (mirrors `calc_driving_stress!`).
-    @views Ux_is[1, :, :] .= Ux_is[2, :, :]
-    @views Uy_is[:, 1, :] .= Uy_is[:, 2, :]
+    # Only meaningful under Bounded — under Periodic the leading slot is
+    # the wrapped eastern/northern face, already populated by the loop.
+    if Tx_top === Bounded
+        @views Ux_is[1, :, :] .= Ux_is[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Uy_is[:, 1, :] .= Uy_is[:, 2, :]
+    end
 
     # 5. Depth-averages via trapezoidal integration with explicit
-    # bed (= 0) and surface (= ux_i_s) boundary values. `Ux_i` is
-    # XFace-staggered: pass slices [2:Nx+1, :, :] to the helper, which
-    # internally treats them as Nx × Ny × Nz aa-style arrays.
+    # bed (= 0) and surface (= ux_i_s) boundary values.
+    #
+    # The XFaceField has interior shape `(Nx+1, Ny, 1)` under Bounded-x
+    # and `(Nx, Ny, 1)` under Periodic-x. Under Bounded the face values
+    # live at `[2:Nx+1, :, :]`; the leading slot `[1, :, :]` is the
+    # boundary replicate. Under Periodic the entire interior `[1:Nx, :, :]`
+    # holds face values (slot 1 is the wrapped Nx-th face). Use a
+    # topology-dispatched slice to feed the helper.
     Ux_bar = interior(ux_i_bar)
     Uy_bar = interior(uy_i_bar)
 
     # Allocate a small zero-buffer for the bed boundary value (u = 0).
-    # Sized for the face-shifted slices.
+    # Sized for the face-shifted slices (always Nx × Ny × 1, since the
+    # helper consumes Nx aa-cells worth of face values regardless of
+    # topology).
     zero_xface = zeros(Nx, Ny, 1)
     zero_yface = zeros(Nx, Ny, 1)
 
-    # X-face: write to Ux_bar[2:Nx+1, :, 1] reading
-    # Ux_i[2:Nx+1, :, 1:Nz] / Ux_is[2:Nx+1, :, 1].
+    x_face_range = Tx_top === Bounded ? (2:Nx+1) : (1:Nx)
+    y_face_range = Ty_top === Bounded ? (2:Ny+1) : (1:Ny)
+
+    # X-face depth-average.
     let
-        out_view  = @view Ux_bar[2:Nx+1, :, :]
-        var_view  = @view Ux_i[2:Nx+1, :, :]
-        surf_view = @view Ux_is[2:Nx+1, :, :]
+        out_view  = @view Ux_bar[x_face_range, :, :]
+        var_view  = @view Ux_i[x_face_range, :, :]
+        surf_view = @view Ux_is[x_face_range, :, :]
         _vert_int_trapz_with_boundary!(out_view, var_view,
                                        zero_xface, surf_view, zeta_c)
     end
-    # Y-face: write to Uy_bar[:, 2:Ny+1, 1] reading
-    # Uy_i[:, 2:Ny+1, 1:Nz] / Uy_is[:, 2:Ny+1, 1].
+    # Y-face depth-average.
     let
-        out_view  = @view Uy_bar[:, 2:Ny+1, :]
-        var_view  = @view Uy_i[:, 2:Ny+1, :]
-        surf_view = @view Uy_is[:, 2:Ny+1, :]
+        out_view  = @view Uy_bar[:, y_face_range, :]
+        var_view  = @view Uy_i[:, y_face_range, :]
+        surf_view = @view Uy_is[:, y_face_range, :]
         _vert_int_trapz_with_boundary!(out_view, var_view,
                                        zero_yface, surf_view, zeta_c)
     end
 
     # Replicate the leading face slot for the depth-average (matches
     # the leading-slot replication on the XFace / YFace fields above).
-    @views Ux_bar[1, :, :] .= Ux_bar[2, :, :]
-    @views Uy_bar[:, 1, :] .= Uy_bar[:, 2, :]
+    # Same Bounded-only gating.
+    if Tx_top === Bounded
+        @views Ux_bar[1, :, :] .= Ux_bar[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Uy_bar[:, 1, :] .= Uy_bar[:, 2, :]
+    end
 
     return ux_i, uy_i, ux_i_bar, uy_i_bar, ux_i_s, uy_i_s
 end
