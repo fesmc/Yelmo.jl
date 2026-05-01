@@ -3,3 +3,5 @@ Manifest.toml
 plots
 *.nml
 .claude/worktrees
+docs/build
+logs

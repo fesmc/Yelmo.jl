@@ -2,10 +2,9 @@
 
 `topo_step!(y::YelmoModel, dt)` advances the topography component
 `y.tpo` by `dt` years. Phase order matches the Fortran reference
-[`yelmo_topography.f90:calc_ytopo_pc`](../yelmo/src/yelmo_topography.f90)
-predictor/corrector body (line 172 onward), one phase per
-`apply_tendency!` call so each contribution to `mb_net` is realised
-and recorded individually.
+`yelmo_topography.f90:calc_ytopo_pc` predictor/corrector body
+(line 172 onward), one phase per `apply_tendency!` call so each
+contribution to `mb_net` is realised and recorded individually.
 
 ## Phase pipeline
 
@@ -24,13 +23,13 @@ and recorded individually.
 | 11 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
 | 12 | **DMB** | `calc_mb_discharge!`, `mbal_tendency!`, `apply_tendency!` | `tpo.dmb_ref`, `tpo.dmb`, `tpo.H_ice` | v1 stub: only `dmb_method = 0` (no-op) is implemented. |
 | 13 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 14 | **Calving** | `calving_step!` | `tpo.cmb`, `tpo.lsf`, `tpo.cr_acx`, `tpo.cr_acy`, `tpo.dlsfdt`, `tpo.cmb_flt`, `tpo.cmb_grnd`, `tpo.H_ice` | Level-set flux method only (no aa/mb-form). Gated on `ycalv.use_lsf`. See [`calving.md`](./calving.md). |
+| 14 | **Calving** | `calving_step!` | `tpo.cmb`, `tpo.lsf`, `tpo.cr_acx`, `tpo.cr_acy`, `tpo.dlsfdt`, `tpo.cmb_flt`, `tpo.cmb_grnd`, `tpo.H_ice` | Level-set flux method only (no aa/mb-form). Gated on `ycalv.use_lsf`. See [the calving page](calving.md). |
 | 15 | **Relaxation** (optional) | `set_tau_relax!`, `calc_G_relaxation!`, `apply_tendency!` | `tpo.tau_relax`, `tpo.mb_relax`, `tpo.H_ice` | Skipped when `ytopo.topo_rel == 0`. |
 | 16 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
 | 17 | **Residual cleanup** | `resid_tendency!`, `apply_tendency!` | `tpo.mb_resid`, `tpo.H_ice` | Min-thickness margins, islands, neighbour cap. |
 | 18 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
 | 19 | Net mass balance | — | `tpo.mb_net` | `smb + bmb + fmb + dmb + mb_relax + mb_resid`. |
-| 20 | Diagnostics | `_update_diagnostics!` | `tpo.H_grnd`, `tpo.f_grnd`, `tpo.z_srf`, `tpo.z_base`, `tpo.dHidt`, `tpo.dHidt_dyn` | Final-state refresh. `f_grnd` is subgrid (CISM scheme). |
+| 20 | Diagnostics | `_update_diagnostics!` | `tpo.H_grnd`, `tpo.f_grnd*`, `tpo.f_grnd_pin`, `tpo.z_srf`, `tpo.z_base`, `tpo.dHidt`, `tpo.dHidt_dyn`, `tpo.dist_grline`, `tpo.dist_margin`, `tpo.mask_grz`, `tpo.mask_bed`, `tpo.mask_frnt`, `tpo.dzsdx/dy`, `tpo.dHidx/y`, `tpo.dzbdx/dy`, `tpo.H_ice_dyn`, `tpo.f_ice_dyn` | Final-state refresh. `f_grnd` dispatches on `ytopo.gl_sep` (linear / area / CISM). Distance fields, masks, gradients, and dynamic-thickness fields are computed here so `dyn_step!` can read them. |
 | 21 | `y.time += dt` | — | — | |
 
 Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
@@ -47,7 +46,7 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 - Subgrid `f_grnd` via the full CISM bilinear-interpolation scheme,
   with a numerically stable `_calc_fraction_above_zero` kernel that
   improves on the Fortran reference. See
-  [`grounded-fraction.md`](./grounded-fraction.md) for the math.
+  [the grounded-fraction page](grounded-fraction.md) for the math.
 - Optional ice-thickness relaxation toward `bnd.H_ice_ref` or
   `tpo.H_ice_n`, supporting `topo_rel ∈ {-1, 1, 2, 3}`.
 
@@ -56,7 +55,7 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 - Phase 14 — level-set flux calving via `calving_step!`. Three laws
   ported (`equil`, `threshold`, `vm-m16` stub). Sussman/Osher
   redistancing replaces the Fortran neighbour-snap reset and `dt_lsf`
-  re-flag. Full pipeline documented in [`calving.md`](./calving.md).
+  re-flag. Full pipeline documented in [the calving page](calving.md).
 
 **Deferred to later milestones**
 
@@ -116,5 +115,5 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
   (`|∇φ| = 1` recovery and zero-set preservation), passive LSF
   transport, every law (`equil`, `threshold`, `vm-m16` error path),
   the merge logic, and an end-to-end kill on a synthetic shelf with
-  `mass-balance closure to 1e-9`. See [`calving.md`](./calving.md)
+  `mass-balance closure to 1e-9`. See [the calving page](calving.md)
   for the test inventory.
