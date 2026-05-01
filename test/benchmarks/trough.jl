@@ -133,3 +133,222 @@ _spec_name(b::TroughBenchmark) = "trough_$(lowercase(string(b.variant)))"
 
 # `analytical_velocity` is NOT defined for TroughBenchmark — falls
 # through to the default error stub in `benchmarks.jl`.
+
+# ----------------------------------------------------------------------
+# Fixture path resolution.
+# ----------------------------------------------------------------------
+
+# Resolve the canonical fixture path for `b` at time `t`, relative to
+# the committed `test/benchmarks/fixtures/` directory. Single-time
+# fixtures only — multi-time deferred per locked-in milestone-3d
+# decision Q11.
+const _TROUGH_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+
+function _trough_fixture_path(b::TroughBenchmark, t::Real;
+                              fixtures_dir::AbstractString = _TROUGH_FIXTURES_DIR)
+    return joinpath(fixtures_dir,
+                    "$(_spec_name(b))_t$(Int(round(Float64(t)))).nc")
+end
+
+# ----------------------------------------------------------------------
+# state(b, t): TroughBenchmark has NO closed-form solution. We read
+# the YelmoMirror-produced fixture from disk and route it through the
+# same in-memory YelmoModel(b, t) constructor BUELER uses. If the
+# fixture is missing, error with a hint to run regenerate.jl.
+# ----------------------------------------------------------------------
+
+"""
+    state(b::TroughBenchmark, t::Real) -> NamedTuple
+
+Read the committed YelmoMirror fixture for `b` at time `t` and return
+a NamedTuple whose keys map onto Yelmo schema variables (and are
+routed into the appropriate component group by the generic
+`YelmoModel(::AbstractBenchmark, t)` constructor in `benchmarks.jl`).
+
+Errors with a hint to run `regenerate.jl` if the fixture is missing.
+
+Returned keys: `xc`, `yc`, `H_ice`, `z_bed`, plus whichever optional
+fields the fixture carries (`f_grnd`, `ux_b`, `uy_b`, `ATT`, …).
+Only fields that exist in the NetCDF and match a schema variable
+are forwarded; unknown keys are skipped silently in the
+`YelmoModel(::AbstractBenchmark, t)` constructor.
+"""
+function state(b::TroughBenchmark, t::Real)
+    path = _trough_fixture_path(b, t)
+    isfile(path) || error(
+        "TroughBenchmark.state: fixture missing at $path. " *
+        "Run `julia --project=test test/benchmarks/regenerate.jl " *
+        "$(_spec_name(b)) --overwrite` first.")
+
+    NCDataset(path, "r") do ds
+        # Always forward the grid axes from the benchmark struct (so
+        # the in-memory and file-based loads use bit-identical xc/yc
+        # in metres, regardless of whether the fixture stored them in
+        # km or m).
+        out = Dict{Symbol,Any}(:xc => b.xc, :yc => b.yc)
+
+        # Optional fields: forward only those present in the fixture.
+        # The 2D state fields the regression test compares are
+        # H_ice / z_bed / f_grnd / ux_b / uy_b. ATT is 3D.
+        for name in ("H_ice", "z_bed", "f_grnd",
+                     "ux_b", "uy_b", "ux_bar", "uy_bar",
+                     "smb_ref", "T_srf", "Q_geo")
+            if haskey(ds, name)
+                arr = Array(ds[name][:, :])
+                out[Symbol(name)] = arr
+            end
+        end
+        if haskey(ds, "ATT")
+            out[:ATT] = Array(ds["ATT"][:, :, :])
+        end
+
+        return NamedTuple(out)
+    end
+end
+
+# ----------------------------------------------------------------------
+# Trough F17 initial-state callback (the YelmoMirror dispatch input).
+# Mirrors `trough_f17_topo_init` (yelmo_trough.f90:357) faithfully:
+# compute z_bed from the F17 formula, set H_ice = 50 m everywhere
+# inside the calving front (xc < x_cf), zero beyond. Plus the
+# uniform forcing (T_srf, smb, Q_geo, z_sl, T_shlf, H_sed, calv_mask)
+# from yelmo_trough.f90:111-119 + define_calving_front:306-321.
+# ----------------------------------------------------------------------
+
+# Compute F17 z_bed for one (x_km, y_km) point. Ports
+# yelmo_trough.f90:382-396.
+@inline function _trough_f17_zbed(x_km::Real, y_km::Real,
+                                  fc_km::Real, dc_m::Real, wc_km::Real;
+                                  zb_deep::Real = -720.0)
+    zb_x = -150.0 - 0.84 * abs(Float64(x_km))                   # [m]
+    e1 = -2.0 * (Float64(y_km) - Float64(wc_km)) / Float64(fc_km)
+    e2 =  2.0 * (Float64(y_km) + Float64(wc_km)) / Float64(fc_km)
+    zb_y = (Float64(dc_m) / (1.0 + exp(e1))) +
+           (Float64(dc_m) / (1.0 + exp(e2)))                    # [m]
+    return max(zb_x + zb_y, Float64(zb_deep))
+end
+
+# Apply the F17 initial state to a YelmoMirror in-place. Reads
+# `b.xc`/`b.yc` (metres) → converts to km for the F17 formula → fills
+# z_bed, H_ice, surface forcing, calving mask. Then `yelmo_sync!`s
+# Julia state back to Fortran so `init_state!` sees the trough
+# topography.
+#
+# `time` is the simulation time at the call (passed through by
+# `BenchmarkSpec.setup_initial_state!`; unused for the F17 setup
+# since the IC has no time dependence).
+function _setup_trough_initial_state!(ymirror, b::TroughBenchmark, time::Real)
+    Nx = length(b.xc)
+    Ny = length(b.yc)
+
+    # Scratch arrays for the (Nx, Ny) interior fields. Build in pure
+    # Julia, then copy into the YelmoMirror Field interiors.
+    z_bed = zeros(Nx, Ny)
+    H_ice = zeros(Nx, Ny)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        x_km = b.xc[i] * 1e-3
+        y_km = b.yc[j] * 1e-3
+        z_bed[i, j] = _trough_f17_zbed(x_km, y_km,
+                                        b.fc_km, b.dc_m, b.wc_km)
+        H_ice[i, j] = (x_km <= b.x_cf_km) ? 50.0 : 0.0
+    end
+
+    # === Push 2D fields into the YelmoMirror — mirrors the Fortran
+    # block at yelmo_trough.f90:206-211 plus the boundary loads at
+    # 112-119 plus the calving-front mask at 237.
+    _assign_field!(ymirror.bnd.z_bed,    z_bed)
+    _assign_field!(ymirror.tpo.H_ice,    H_ice)
+
+    # Boundary forcing (uniform). z_sl=0, bmb_shlf=0, H_sed=0.
+    fill!(interior(ymirror.bnd.z_sl),     0.0)
+    fill!(interior(ymirror.bnd.bmb_shlf), 0.0)
+    fill!(interior(ymirror.bnd.H_sed),    0.0)
+
+    # T_shlf = T0 (using the pressure-melting reference from
+    # YelmoConstants — match the Fortran `yelmo1%bnd%c%T0`
+    # = 273.15 K).
+    T0 = 273.15
+    fill!(interior(ymirror.bnd.T_shlf), T0)
+
+    # T_srf = T0 + Tsrf_const [K]
+    fill!(interior(ymirror.bnd.T_srf), T0 + b.Tsrf_const)
+
+    # smb (m/yr), Q_geo (mW/m²)
+    fill!(interior(ymirror.bnd.smb_ref), b.smb_const)
+    fill!(interior(ymirror.bnd.Q_geo),   b.Qgeo_const)
+
+    # Calving mask: `True` where x ≥ x_cf  (i.e. ice will be calved
+    # beyond the calving front). Stored as Float64 (0/1) in the
+    # YelmoMirror — mirrors the Fortran logical → C-API double
+    # round-trip.
+    calv_mask = zeros(Nx, Ny)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        x_km = b.xc[i] * 1e-3
+        calv_mask[i, j] = (x_km >= b.x_cf_km) ? 1.0 : 0.0
+    end
+    _assign_field!(ymirror.bnd.calv_mask, calv_mask)
+
+    # Sync Julia → Fortran so init_state! sees the trough topography.
+    yelmo_sync!(ymirror)
+
+    return ymirror
+end
+
+# ----------------------------------------------------------------------
+# write_fixture!(b, path; times) — single-time wrapper around
+# `run_mirror_benchmark!`. Builds a `BenchmarkSpec` from the trough
+# parameters, drives YelmoMirror to `times[1]`, writes the restart,
+# moves the resulting NetCDF to `path` if needed.
+# ----------------------------------------------------------------------
+
+"""
+    write_fixture!(b::TroughBenchmark, path::AbstractString;
+                   times = [1000.0]) -> Vector{String}
+
+Drive YelmoMirror through the F17 initial-state setup and a single
+end-time integration, writing the resulting restart NetCDF to `path`.
+
+Single-time only in this milestone — multi-time fixtures (a `time`
+dimension with multiple snapshots) are deferred per the locked-in
+milestone-3d decision Q11.
+
+Returns a 1-element `Vector{String}` containing `path`.
+"""
+function write_fixture!(b::TroughBenchmark, path::AbstractString;
+                        times::AbstractVector{<:Real} = [1000.0])
+    length(times) == 1 ||
+        error("write_fixture!(TroughBenchmark, …): multi-time fixtures " *
+              "deferred to a future milestone (got $(length(times)) times).")
+    t_out = Float64(first(times))
+
+    isfile(b.namelist_path) || error(
+        "TroughBenchmark.write_fixture!: namelist not found at " *
+        "$(b.namelist_path).")
+
+    spec = BenchmarkSpec(
+        name           = _spec_name(b),
+        namelist_path  = b.namelist_path,
+        grid           = (xc = b.xc, yc = b.yc,
+                          grid_name = "TROUGH-F17"),
+        time_init      = 0.0,
+        end_time       = t_out,
+        output_times   = [t_out],
+        dt             = 5.0,
+        setup_initial_state! = (ymirror, t) ->
+            _setup_trough_initial_state!(ymirror, b, t),
+    )
+
+    fixtures_dir = dirname(path)
+    mkpath(fixtures_dir)
+    isfile(path) && rm(path)
+
+    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+                                  overwrite = true)
+    src = paths[1]
+    if src != path
+        mv(src, path; force = true)
+        paths = [path]
+    end
+    return paths
+end
