@@ -1,0 +1,47 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+    tags: ['*']
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Cancel superseded runs (e.g. when a PR is force-pushed).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # needed to push to gh-pages
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - uses: julia-actions/cache@v2
+
+      - name: Instantiate docs project
+        run: |
+          julia --project=docs -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path=pwd()))
+            Pkg.instantiate()'
+
+      - name: Build and deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `deploydocs` reads this to decide whether to publish.
+          # On push to main / tag: deploys to gh-pages root.
+          # On PR: deploys a preview to gh-pages/previews/PR##/.
+        run: julia --project=docs docs/make.jl

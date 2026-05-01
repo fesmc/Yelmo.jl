@@ -61,10 +61,11 @@ makedocs(
     warnonly = [:missing_docs, :cross_references, :docs_block],
 )
 
-# Uncomment when ready to deploy to GitHub Pages.
-#
-# deploydocs(
-#     repo      = "github.com/fesmc/Yelmo.jl",
-#     devbranch = "main",
-#     push_preview = true,
-# )
+# Deploys to gh-pages on pushes to main and on tag releases. PR builds
+# from forks are auto-skipped by Documenter (they have no write access);
+# PRs from same-repo branches publish a preview to previews/PR##/.
+deploydocs(
+    repo         = "github.com/fesmc/Yelmo.jl",
+    devbranch    = "main",
+    push_preview = true,
+)
