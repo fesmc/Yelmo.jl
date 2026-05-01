@@ -63,6 +63,7 @@ include("neff.jl")
 include("basal_dragging.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
+include("integration.jl")
 include("velocity_sia.jl")
 include("velocity_ssa.jl")
 

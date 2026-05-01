@@ -384,7 +384,7 @@ function _slab_discretized_ubar(zeta_c::AbstractVector{<:Real};
     end
 
     # Depth-average via the same trapezoidal-with-boundary scheme
-    # `_vert_int_trapz_with_boundary!` uses.
+    # `vert_int_trapz_boundary!` uses.
     u_bed = 0.0
     acc = 0.5 * (u_bed + u_c[1]) * (zeta_c[1] - 0.0)
     for k in 2:Nz

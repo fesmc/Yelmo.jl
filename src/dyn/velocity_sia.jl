@@ -394,59 +394,6 @@ function calc_uxy_sia_3D!(ux, uy,
     return ux, uy
 end
 
-# ---------------------------------------------------------------------
-# Trapezoidal depth-integration with explicit bed / surface boundaries.
-# ---------------------------------------------------------------------
-#
-# Mirrors Fortran's `integrate_trapezoid1D_pt` (with the
-# `TOL_UNDERFLOW` clip on each segment midpoint) but with an extra
-# bed segment from zeta = 0 to zeta_c[1] and surface segment from
-# zeta_c[Nz] to 1. Used by the Option C SIA wrapper to depth-average
-# the 3D velocity field — the Center-staggered layers do NOT include
-# the boundary endpoints, so the integration scheme must consume the
-# bed and surface boundary values explicitly.
-#
-# The caller is responsible for face-staggered offset: pass slices of
-# `interior(...)` already shifted (e.g. for an XFaceField, work with
-# `var3D[i+1, j, 1:Nz]` etc.). The helper itself iterates over the
-# leading dims of `out2D` / `var3D` and writes `out2D[:, :, 1]`.
-@inline function _vert_int_trapz_with_boundary!(
-        out2D::AbstractArray, var3D::AbstractArray,
-        var_bed::AbstractArray, var_surf::AbstractArray,
-        zeta_c::AbstractVector{<:Real})
-    Nx = size(var3D, 1)
-    Ny = size(var3D, 2)
-    Nz = size(var3D, 3)
-    @assert length(zeta_c) == Nz
-    @assert size(out2D, 1) == Nx && size(out2D, 2) == Ny
-    @assert size(var_bed,  1) == Nx && size(var_bed,  2) == Ny
-    @assert size(var_surf, 1) == Nx && size(var_surf, 2) == Ny
-
-    @inbounds for j in 1:Ny, i in 1:Nx
-        # Bed segment: zeta in [0, zeta_c[1]], midpoint =
-        # 0.5 * (var_bed + var3D[k=1]).
-        v_mid = 0.5 * (var_bed[i, j, 1] + var3D[i, j, 1])
-        abs(v_mid) < TOL_UNDERFLOW && (v_mid = 0.0)
-        acc = v_mid * (Float64(zeta_c[1]) - 0.0)
-
-        # Interior segments k = 2 ... Nz between consecutive Centers.
-        for k in 2:Nz
-            v_mid = 0.5 * (var3D[i, j, k-1] + var3D[i, j, k])
-            abs(v_mid) < TOL_UNDERFLOW && (v_mid = 0.0)
-            acc += v_mid * (Float64(zeta_c[k]) - Float64(zeta_c[k-1]))
-        end
-
-        # Surface segment: zeta in [zeta_c[Nz], 1], midpoint =
-        # 0.5 * (var3D[k=Nz] + var_surf).
-        v_mid = 0.5 * (var3D[i, j, Nz] + var_surf[i, j, 1])
-        abs(v_mid) < TOL_UNDERFLOW && (v_mid = 0.0)
-        acc += v_mid * (1.0 - Float64(zeta_c[Nz]))
-
-        out2D[i, j, 1] = acc
-    end
-    return out2D
-end
-
 """
     calc_velocity_sia!(ux_i, uy_i, ux_i_bar, uy_i_bar,
                        ux_i_s, uy_i_s,
@@ -477,7 +424,7 @@ Vertical convention (Option C):
   - `ux_i_bar`, `uy_i_bar`, `ux_i_s`, `uy_i_s` are 2D fields. The
     depth-average `ux_i_bar` integrates `ux_i` over zeta ∈ [0, 1]
     using a trapezoidal scheme with explicit bed (u = 0) and surface
-    (`ux_i_s`) endpoints — see `_vert_int_trapz_with_boundary!`.
+    (`ux_i_s`) endpoints — see `vert_int_trapz_boundary!`.
 
 Boundary ATT assumed equal to nearest-Center ATT. Exact for uniform
 ATT (e.g. BUELER tests) and approximate for temperature-dependent ATT;
@@ -634,16 +581,16 @@ function calc_velocity_sia!(ux_i, uy_i, ux_i_bar, uy_i_bar,
         out_view  = @view Ux_bar[x_face_range, :, :]
         var_view  = @view Ux_i[x_face_range, :, :]
         surf_view = @view Ux_is[x_face_range, :, :]
-        _vert_int_trapz_with_boundary!(out_view, var_view,
-                                       zero_xface, surf_view, zeta_c)
+        vert_int_trapz_boundary!(out_view, var_view,
+                                 zero_xface, surf_view, zeta_c)
     end
     # Y-face depth-average.
     let
         out_view  = @view Uy_bar[:, y_face_range, :]
         var_view  = @view Uy_i[:, y_face_range, :]
         surf_view = @view Uy_is[:, y_face_range, :]
-        _vert_int_trapz_with_boundary!(out_view, var_view,
-                                       zero_yface, surf_view, zeta_c)
+        vert_int_trapz_boundary!(out_view, var_view,
+                                 zero_yface, surf_view, zeta_c)
     end
 
     # Replicate the leading face slot for the depth-average (matches
