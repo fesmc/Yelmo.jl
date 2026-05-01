@@ -53,12 +53,14 @@ using LinearAlgebra: norm
 using Krylov: bicgstab!
 using AlgebraicMultigrid: smoothed_aggregation, aspreconditioner,
                           GaussSeidel, Jacobi
+using NCDatasets: NCDataset, defDim, defVar
 
 export set_ssa_masks!, _assemble_ssa_matrix!,
        _solve_ssa_linear!, calc_velocity_ssa!,
        picard_relax_visc!, picard_relax_vel!,
        picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
-       set_inactive_margins!, calc_basal_stress!
+       set_inactive_margins!, calc_basal_stress!,
+       dump_ssa_assembly
 
 # Integer constants for `mask_frnt`. Mirror the Fortran values from
 # `solver_ssa_ac.f90:899-903`. `val_disabled = 5` is internal to
@@ -1512,4 +1514,86 @@ function _ssa_boundaries_symbol(y)
     else
         error("_ssa_boundaries_symbol: unsupported topology pair ($(Tx), $(Ty)).")
     end
+end
+
+# ----------------------------------------------------------------------
+# Diagnostic: dump assembled SSA stiffness matrix + RHS to NetCDF.
+#
+# Reads the most recently assembled COO triplets from
+# `y.dyn.scratch.ssa_I_idx`/`ssa_J_idx`/`ssa_vals`/`ssa_nnz` and the RHS
+# from `ssa_b_vec`. Also performs the same `sparse(I, J, V)` conversion
+# that `_solve_ssa_linear!`'s caller does and writes the resulting CSC
+# arrays — useful for spotting duplicate-entry summing (COO `nnz` vs
+# CSC `nnz` mismatch) or other surprises in the COO → CSC step.
+#
+# Snapshot timing: by the time `dyn_step!` returns, the COO buffers
+# reflect the LAST Picard iteration's assembly. To dump a specific
+# iteration, call this from inside the Picard loop or wire a flag.
+#
+# Diagnostic-only — not part of the production API. The NetCDF schema
+# is intentionally minimal and may change.
+# ----------------------------------------------------------------------
+"""
+    dump_ssa_assembly(y; path::AbstractString = "ssa_assembly.nc") -> path
+
+Write the most recently assembled SSA stiffness matrix `A` (in both
+COO and CSC form) plus RHS vector `b` to NetCDF for offline inspection.
+
+Reads from `y.dyn.scratch.ssa_I_idx`/`ssa_J_idx`/`ssa_vals`/`ssa_nnz`
+and `ssa_b_vec`. The `sparse(I, J, V, nrows, nrows)` conversion mirrors
+what `calc_velocity_ssa!` does immediately before calling
+`_solve_ssa_linear!`.
+
+NetCDF schema:
+  - dim `nnz_coo` — number of COO non-zeros (= `ssa_nnz[]`).
+  - dim `nrows`   — `2 * Nx * Ny` (matrix dimension).
+  - dim `csc_nz`  — number of CSC non-zeros (after de-dup + sort).
+  - dim `csc_colp`— `nrows + 1` (CSC `colptr` length).
+  - var `I` (Int64, len `nnz_coo`) — COO row indices.
+  - var `J` (Int64, len `nnz_coo`) — COO column indices.
+  - var `V` (Float64, len `nnz_coo`) — COO values.
+  - var `b` (Float64, len `nrows`) — RHS vector.
+  - var `csc_colptr`, `csc_rowval`, `csc_nzval` — CSC view of `A`.
+  - attrs: `Nx`, `Ny`, `nnz_coo`, `nnz_csc`.
+
+Diagnostic-only — not part of the production API.
+"""
+function dump_ssa_assembly(y; path::AbstractString = "ssa_assembly.nc")
+    sc  = y.dyn.scratch
+    nnz = sc.ssa_nnz[]
+    nnz > 0 || error("dump_ssa_assembly: ssa_nnz[] == 0 — call after `_assemble_ssa_matrix!`.")
+
+    I_buf = sc.ssa_I_idx[1:nnz]
+    J_buf = sc.ssa_J_idx[1:nnz]
+    V_buf = sc.ssa_vals[1:nnz]
+    b_buf = copy(sc.ssa_b_vec)
+
+    Nx = size(y.g, 1)
+    Ny = size(y.g, 2)
+    nrows = 2 * Nx * Ny
+
+    # CSC conversion — matches `calc_velocity_ssa!` exactly.
+    A = sparse(I_buf, J_buf, V_buf, nrows, nrows)
+
+    isfile(path) && rm(path)
+    NCDataset(path, "c") do ds
+        defDim(ds, "nnz_coo", nnz)
+        defDim(ds, "nrows",   nrows)
+        defDim(ds, "csc_nz",  length(A.nzval))
+        defDim(ds, "csc_colp", length(A.colptr))
+
+        defVar(ds, "I", I_buf, ("nnz_coo",))
+        defVar(ds, "J", J_buf, ("nnz_coo",))
+        defVar(ds, "V", V_buf, ("nnz_coo",))
+        defVar(ds, "b", b_buf, ("nrows",))
+        defVar(ds, "csc_colptr", A.colptr, ("csc_colp",))
+        defVar(ds, "csc_rowval", A.rowval, ("csc_nz",))
+        defVar(ds, "csc_nzval",  A.nzval,  ("csc_nz",))
+
+        ds.attrib["Nx"]      = Nx
+        ds.attrib["Ny"]      = Ny
+        ds.attrib["nnz_coo"] = nnz
+        ds.attrib["nnz_csc"] = length(A.nzval)
+    end
+    return path
 end

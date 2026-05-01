@@ -256,4 +256,12 @@ end
     write_output!(out, y)
     close(out)
     @info "Yelmo.jl post-dyn_step! state written" path=jl_out_path
+
+    # ----- Dump assembled SSA matrix (last Picard iteration) -----
+    # Snapshot the COO triplets + RHS that `_assemble_ssa_matrix!` last
+    # wrote, plus the CSC view that `calc_velocity_ssa!` actually solves.
+    # Diagnostic only — feeds the analytical-stencil comparison below.
+    asm_path = joinpath(logs_dir, "ssa_slab_assembly.nc")
+    Yelmo.YelmoModelDyn.dump_ssa_assembly(y; path = asm_path)
+    @info "SSA assembly dumped" path=asm_path
 end
