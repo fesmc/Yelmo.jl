@@ -21,6 +21,7 @@ using Yelmo.YelmoModelPar: YdynParams, ydyn_params, YelmoModelParameters
 @testset "SSASolver: default field values" begin
     s = SSASolver()
     @test s.method          === :bicgstab
+    @test s.precond         === :jacobi
     @test s.smoother        === :gauss_seidel
     @test s.rtol            == 1e-6
     @test s.itmax           == 200
@@ -30,17 +31,26 @@ using Yelmo.YelmoModelPar: YdynParams, ydyn_params, YelmoModelParameters
 end
 
 @testset "SSASolver: kwarg overrides" begin
-    s = SSASolver(method = :gmres, smoother = :jacobi,
+    s = SSASolver(method = :gmres, precond = :amg_sa, smoother = :jacobi,
                    rtol = 1e-8, itmax = 500,
                    picard_tol = 5e-3, picard_relax = 0.5,
                    picard_iter_max = 100)
     @test s.method          === :gmres
+    @test s.precond         === :amg_sa
     @test s.smoother        === :jacobi
     @test s.rtol            == 1e-8
     @test s.itmax           == 500
     @test s.picard_tol      == 5e-3
     @test s.picard_relax    == 0.5
     @test s.picard_iter_max == 100
+end
+
+@testset "SSASolver: precond field defaults and overrides" begin
+    @test SSASolver().precond === :jacobi   # locked-in default
+    @test SSASolver(precond = :none).precond   === :none
+    @test SSASolver(precond = :jacobi).precond === :jacobi
+    @test SSASolver(precond = :amg_sa).precond === :amg_sa
+    @test SSASolver(precond = :amg_rs).precond === :amg_rs
 end
 
 @testset "SSASolver: subtype of Solver" begin

@@ -3,7 +3,7 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
-# Diagnostic: SSA on the SLAB-S06 setup (yelmo_slab.f90) with
+# Regression: SSA on the SLAB-S06 setup (yelmo_slab.f90) with
 # imposed-constant viscosity and imposed-constant beta.
 #
 # Goal: isolate WHERE the trough SSA divergence vs YelmoMirror lives.
@@ -11,6 +11,18 @@ import Pkg; Pkg.activate(".")
 # `beta_method = 0` (constant `beta_const`), the matrix-assembly +
 # linear solve are the *only* dynamic components of the SSA Picard
 # iteration. The viscosity / beta recompute paths are bypassed.
+#
+# Status: with the SSA preconditioner fix (commit landing alongside
+# this test update — `precond = :jacobi` default in `SSASolver`), the
+# slab Picard iteration converges to the LU reference solution to ~5
+# decimal places. The "analytical plug-flow" value u_b = rho*g*H*alpha
+# / beta = 8.927 m/yr is the *idealised* infinite-plane solution; the
+# `boundaries = :bounded` configuration imposes Dirichlet u = 0 on all
+# four edges (consistent with how the trough fixture is loaded), which
+# produces a finite y-boundary drag — interior `ux_bar` peaks at the
+# domain mid-line at ~8.920 m/yr (verified against LU in
+# `test_yelmo_ssa_solver_bisect.jl`). The hard assertions below match
+# the LU reference to a tight tolerance.
 #
 # Setup (from `par/yelmo_SLAB-S06.nml` and `tests/yelmo_slab.f90`):
 #   - Grid: 51 x 41 cells, dx = 2 km (100 km x 80 km extent).
@@ -242,10 +254,27 @@ end
     # If this fails, the bug is in the matrix cross-coupling.
     @test uy_max_abs < 0.1 * max(ux_max, eps())
 
-    # NOTE: the analytical-match assertion is intentionally loose /
-    # informational on this first run. The deviation pattern (uniform?
-    # near-zero upstream + fast downstream?) is the diagnostic signal.
-    # Tolerance lands in a follow-up after the bug is identified.
+    # ----- Hard-assert: interior solution matches LU reference -----
+    # Reference: BiCGStab + Jacobi (default precond) reproduces the
+    # direct sparse-LU solution `A \ b` to ~5e-9 relative residual on
+    # this 4-side-Dirichlet 51 x 41 problem (see
+    # `test_yelmo_ssa_solver_bisect.jl` Tests 1 & 3). The interior
+    # `ux_bar` peaks at the domain mid-line at +8.9204 m/yr, slightly
+    # below the idealised plug-flow value of 8.927 m/yr because the
+    # y-boundaries impose lateral drag. We assert against the LU peak
+    # (`8.920414`) to 4 significant figures — tight enough to catch a
+    # solver regression but loose enough to be insensitive to
+    # rtol-level Krylov tail noise.
+    u_lu_peak = 8.920414
+    @test isapprox(ux_max, u_lu_peak; atol = 1e-3)
+    @test ux_min  > 0.0                      # no upstream reversal
+    @test ux_mean > 0.5 * u_lu_peak          # bulk +x flow direction
+
+    # NOTE: the *idealised* plug-flow analytical (`u_b_analytical =
+    # 8.927 m/yr`) is the infinite-plane solution and is NOT
+    # attainable on this all-Dirichlet 4-edge problem. The interior
+    # falls short by a few percent depending on boundary location;
+    # only the central peak approaches the analytical limit.
 
     # ----- Write Yelmo.jl post-dyn_step! state to logs/ for inspection -----
     logs_dir = abspath(joinpath(@__DIR__, "..", "logs"))

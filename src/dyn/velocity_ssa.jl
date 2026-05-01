@@ -49,9 +49,9 @@ using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using SparseArrays: SparseMatrixCSC, sparse
-using LinearAlgebra: norm
+using LinearAlgebra: norm, Diagonal, diag
 using Krylov: bicgstab!
-using AlgebraicMultigrid: smoothed_aggregation, aspreconditioner,
+using AlgebraicMultigrid: smoothed_aggregation, ruge_stuben, aspreconditioner,
                           GaussSeidel, Jacobi
 using NCDatasets: NCDataset, defDim, defVar
 
@@ -918,46 +918,90 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
 end
 
 # ----------------------------------------------------------------------
-# Linear-solve wrapper (PR-B commit 2).
+# Linear-solve wrapper (PR-B commit 2; preconditioner refactor).
 #
-# Runs Krylov.jl BiCGStab with an AlgebraicMultigrid.jl smoothed-
-# aggregation preconditioner over the assembled SSA system `A x = b`.
-# `A` is the COO-built `SparseMatrixCSC` and `b` is the assembled RHS.
+# Runs a Krylov solver (currently BiCGStab) over the assembled SSA
+# system `A x = b`. `A` is the COO-built `SparseMatrixCSC` and `b` is
+# the assembled RHS.
 #
-# AMG configuration: per the locked-in SSASolver.smoother knob:
-#   :gauss_seidel → smoothed_aggregation(A; presmoother=GaussSeidel(),
-#                                         postsmoother=GaussSeidel())
-#   :jacobi       → smoothed_aggregation(A; presmoother=Jacobi(),
-#                                         postsmoother=Jacobi())
+# Preconditioner is selected by `SSASolver.precond`:
+#   :none    → no preconditioner (pure Krylov).
+#   :jacobi  → diagonal scaling, `M = Diagonal(1 ./ diag(A))`. DEFAULT.
+#              Matches Fortran Yelmo's SLAB-S06 namelist
+#              `ssa_lis_opt = "-i bicgsafe -p jacobi …"`.
+#   :amg_sa  → AlgebraicMultigrid.smoothed_aggregation(A). Only
+#              appropriate for SPD-like systems — the standard SSA
+#              matrix is non-symmetric with negative diagonals and
+#              BiCGStab+SA diverges on it. Kept opt-in for future
+#              SPD reformulations.
+#   :amg_rs  → AlgebraicMultigrid.ruge_stuben(A). Alternative AMG.
 #
 # AlgebraicMultigrid's `aspreconditioner` returns a `Preconditioner`
 # object whose `ldiv!` overload approximates `A^{-1} y`. We pass
 # `ldiv=true` to Krylov so it dispatches to `ldiv!` rather than `mul!`.
+# For Jacobi (`Diagonal{Float64}`), `ldiv=false` (default) is correct:
+# Krylov calls `mul!(y, M, x)` which evaluates `D * x` = the inverse
+# diagonal scaling.
 #
 # Soft-warn on non-convergence: matches Fortran's Lis behavior of
 # logging non-convergence and proceeding (the outer Picard iteration
 # is the safety net).
 # ----------------------------------------------------------------------
 
-# Choose the AMG smoother per the SSASolver knob. Currently only
-# :gauss_seidel is wired — AlgebraicMultigrid.jl's `Jacobi`
-# constructor requires an explicit workspace vector matching the
-# level's matrix size at construction time, which doesn't fit the
-# closure-style API the SA driver expects. Future work: wrap a
-# closure that lazily constructs Jacobi(x; iter=1) with the level's
-# residual vector. Soft-fail with a clear error message for now —
-# matches the "no autonomous shortcuts" guidance from CLAUDE.md.
+# AMG smoother helper — only consulted when precond ∈ (:amg_sa, :amg_rs).
+# AlgebraicMultigrid.jl's `Jacobi` smoother needs a per-level workspace
+# at construction time that the SA / RS drivers do not currently provide
+# through a closure-style hook, so we soft-fail on `:jacobi` for AMG and
+# steer callers to `:gauss_seidel`.
 function _amg_smoother(sym::Symbol)
     if sym === :gauss_seidel
         return GaussSeidel()
     elseif sym === :jacobi
-        error("_amg_smoother: :jacobi smoother not yet supported. " *
+        error("_amg_smoother: :jacobi smoother not yet supported for AMG. " *
               "AlgebraicMultigrid.jl's Jacobi smoother needs a per-level " *
               "workspace at construction time which the current wrapper " *
-              "doesn't provide. Use :gauss_seidel for now.")
+              "doesn't provide. Use :gauss_seidel for AMG, or set " *
+              "SSASolver(precond = :jacobi) for diagonal-scaling " *
+              "preconditioning of the Krylov solver itself.")
     else
         error("_amg_smoother: smoother=$(sym) not supported. " *
               "Choose :gauss_seidel (default).")
+    end
+end
+
+# Build the preconditioner per `ssa.precond`. Returns `(M, ldiv_flag)`
+# where `M` is the preconditioner (or `nothing` for `:none`) and
+# `ldiv_flag` tells Krylov whether to dispatch via `ldiv!` (true, for
+# AMG) or `mul!` (false, for Jacobi). For `:none`, `M === nothing`
+# and the caller skips the `M` kwarg entirely.
+function _build_ssa_precond(scratch,
+                            A::SparseMatrixCSC{Float64,Int},
+                            ssa::SSASolver)
+    if ssa.precond === :none
+        scratch.ssa_amg_cache[] = nothing
+        return nothing, false
+    elseif ssa.precond === :jacobi
+        d_inv = 1.0 ./ diag(A)
+        any(!isfinite, d_inv) && error("_build_ssa_precond: Jacobi " *
+              "preconditioner has non-finite diagonal entries (singular " *
+              "row?). Check the SSA mask handling and matrix assembly.")
+        scratch.ssa_amg_cache[] = nothing
+        return Diagonal(d_inv), false
+    elseif ssa.precond === :amg_sa
+        smoother = _amg_smoother(ssa.smoother)
+        ml = smoothed_aggregation(A; presmoother = smoother,
+                                      postsmoother = smoother)
+        scratch.ssa_amg_cache[] = ml  # keep alive for diagnostics
+        return aspreconditioner(ml), true
+    elseif ssa.precond === :amg_rs
+        smoother = _amg_smoother(ssa.smoother)
+        ml = ruge_stuben(A; presmoother = smoother,
+                            postsmoother = smoother)
+        scratch.ssa_amg_cache[] = ml
+        return aspreconditioner(ml), true
+    else
+        error("_build_ssa_precond: precond=$(ssa.precond) not recognized. " *
+              "Expected :none, :jacobi, :amg_sa, or :amg_rs.")
     end
 end
 
@@ -966,9 +1010,10 @@ end
                        b::Vector{Float64}, ssa::SSASolver) -> Vector{Float64}
 
 Solve `A x = b` for the SSA linear system using the configured Krylov
-method + AMG preconditioner. Returns `x` (a fresh `Vector{Float64}`
-sized to match `b`). Uses the Krylov workspace stored in
-`scratch.ssa_solver_workspace` so per-call allocation is minimal.
+method + preconditioner (per `ssa.precond`). Returns `x` (a fresh
+`Vector{Float64}` sized to match `b`). Uses the Krylov workspace
+stored in `scratch.ssa_solver_workspace` so per-call allocation is
+minimal.
 
 Soft-warns (does not error) on non-convergence — Fortran-faithful;
 the outer Picard loop is the safety net for poor inner convergence.
@@ -977,28 +1022,28 @@ function _solve_ssa_linear!(scratch,
                             A::SparseMatrixCSC{Float64,Int},
                             b::Vector{Float64},
                             ssa::SSASolver)
-    # Build (or rebuild) the AMG preconditioner. The matrix coefficients
+    # Build (or rebuild) the preconditioner. The matrix coefficients
     # change every Picard iteration so we cannot cache across calls.
-    smoother = _amg_smoother(ssa.smoother)
-    ml = smoothed_aggregation(A; presmoother = smoother,
-                                  postsmoother = smoother)
-    M  = aspreconditioner(ml)
-    scratch.ssa_amg_cache[] = ml  # keep alive for diagnostics
+    M, ldiv_flag = _build_ssa_precond(scratch, A, ssa)
 
-    # Run BiCGStab. The AMG `Preconditioner` overloads `ldiv!`, so pass
-    # ldiv=true to make Krylov call `ldiv!(y, M, x)` rather than `mul!`.
-    # Currently only :bicgstab is implemented; future expansion to
-    # :gmres / :cg goes here.
+    # Run the configured Krylov method. Currently only :bicgstab is
+    # implemented; future expansion to :gmres / :cg goes here.
     if ssa.method === :bicgstab
         workspace = scratch.ssa_solver_workspace
-        bicgstab!(workspace, A, b;
-                  M = M, ldiv = true,
-                  rtol = ssa.rtol, itmax = ssa.itmax,
-                  history = false)
+        if M === nothing
+            bicgstab!(workspace, A, b;
+                      rtol = ssa.rtol, itmax = ssa.itmax,
+                      history = false)
+        else
+            bicgstab!(workspace, A, b;
+                      M = M, ldiv = ldiv_flag,
+                      rtol = ssa.rtol, itmax = ssa.itmax,
+                      history = false)
+        end
         x = copy(workspace.x)
         if !workspace.stats.solved
             res = norm(A * x .- b)
-            @warn "SSA BiCGStab did not converge" niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
+            @warn "SSA BiCGStab did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
         end
         return x
     else

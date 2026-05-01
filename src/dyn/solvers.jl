@@ -52,14 +52,15 @@ corresponding solver branch in `dyn_step!`.
 abstract type Solver end
 
 """
-    SSASolver(; method = :bicgstab, smoother = :gauss_seidel,
+    SSASolver(; method = :bicgstab, precond = :jacobi,
+                smoother = :gauss_seidel,
                 rtol = 1e-6, itmax = 200,
                 picard_tol = 1e-2, picard_relax = 0.7,
                 picard_iter_max = 50)
 
 Configuration object for the Shallow-Shelf Approximation (SSA) solver.
 Carries both the inner linear solve parameters (Krylov method,
-preconditioner smoother, linear tolerances) and the outer Picard
+preconditioner choice, linear tolerances) and the outer Picard
 iteration parameters (relaxation, convergence tolerance, max
 iterations).
 
@@ -70,9 +71,27 @@ Fields:
   - `method::Symbol` — Krylov solver method. Currently supports
     `:bicgstab` (default — robust on non-symmetric matrices like the
     SSA stiffness matrix). Forward placeholders: `:gmres`, `:cg`.
-  - `smoother::Symbol` — AMG smoother. Currently supports
-    `:gauss_seidel` (default — robust on non-symmetric systems) and
-    `:jacobi` (cheaper but less effective).
+  - `precond::Symbol` — preconditioner for the Krylov solve. Default
+    `:jacobi` (matches Fortran Yelmo's SLAB-S06 `ssa_lis_opt = "-i
+    bicgsafe -p jacobi …"`). Supported values:
+      * `:none` — no preconditioner. Useful for debug / verification.
+      * `:jacobi` — diagonal scaling, `M = Diagonal(1 ./ diag(A))`.
+        DEFAULT. Cheap and works well on the standard SSA matrix
+        (non-symmetric, negative diagonals, moderate viscosity
+        contrasts).
+      * `:amg_sa` — `smoothed_aggregation` algebraic multigrid. Only
+        appropriate for SPD-like systems (NOT the standard SSA — it
+        causes BiCGStab to diverge on the SLAB-S06 problem). Kept
+        opt-in for future SPD reformulations.
+      * `:amg_rs` — `ruge_stuben` algebraic multigrid. Alternative
+        AMG variant; less robust than smoothed-aggregation on SPD
+        problems but sometimes works on weakly non-symmetric ones.
+  - `smoother::Symbol` — AMG smoother (only consulted when `precond
+    ∈ (:amg_sa, :amg_rs)`; ignored for `:none` / `:jacobi`).
+    Currently supports `:gauss_seidel` (default — robust on
+    non-symmetric systems). `:jacobi` would require a per-level
+    workspace closure that the current AMG wrapper does not provide
+    and is not yet wired through.
   - `rtol::Float64` — relative tolerance for the linear solve. The
     Krylov iteration stops when `‖r‖ ≤ rtol · ‖b‖`. Default `1e-6`.
   - `itmax::Int` — maximum Krylov iterations per linear solve before
@@ -93,6 +112,7 @@ explicit Julia-native fields above.
 """
 Base.@kwdef struct SSASolver <: Solver
     method::Symbol         = :bicgstab
+    precond::Symbol        = :jacobi
     smoother::Symbol       = :gauss_seidel
     rtol::Float64          = 1e-6
     itmax::Int             = 200

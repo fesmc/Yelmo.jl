@@ -52,23 +52,52 @@ function _build_solver_scratch(N_rows)
     )
 end
 
-@testset "_solve_ssa_linear!: SPD tridiagonal converges" begin
+@testset "_solve_ssa_linear!: SPD tridiagonal converges (default :jacobi precond)" begin
     n = 50
     A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
     b = ones(n)
 
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-10, itmax = 100)
+    ssa = SSASolver(rtol = 1e-10, itmax = 100)   # default precond = :jacobi
     x = _solve_ssa_linear!(scratch, A, b, ssa)
 
     @test scratch.ssa_solver_workspace.stats.solved == true
     @test norm(A * x .- b) / norm(b) < 1e-8
+    # :jacobi precond does NOT populate the AMG cache (cache stays nothing).
+    @test scratch.ssa_amg_cache[] === nothing
+end
+
+@testset "_solve_ssa_linear!: SPD tridiagonal converges (:amg_sa opt-in)" begin
+    n = 50
+    A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
+    b = ones(n)
+
+    scratch = _build_solver_scratch(n)
+    ssa = SSASolver(rtol = 1e-10, itmax = 100, precond = :amg_sa)
+    x = _solve_ssa_linear!(scratch, A, b, ssa)
+
+    @test scratch.ssa_solver_workspace.stats.solved == true
+    @test norm(A * x .- b) / norm(b) < 1e-8
+    # :amg_sa precond populates the AMG cache.
     @test scratch.ssa_amg_cache[] !== nothing
+end
+
+@testset "_solve_ssa_linear!: SPD tridiagonal converges (:none)" begin
+    n = 50
+    A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
+    b = ones(n)
+
+    scratch = _build_solver_scratch(n)
+    ssa = SSASolver(rtol = 1e-10, itmax = 200, precond = :none)
+    x = _solve_ssa_linear!(scratch, A, b, ssa)
+
+    @test scratch.ssa_solver_workspace.stats.solved == true
+    @test norm(A * x .- b) / norm(b) < 1e-8
 end
 
 @testset "_solve_ssa_linear!: non-symmetric tridiagonal converges" begin
     # Asymmetric off-diagonals: -1 below, -2 above. Still diagonally
-    # dominant (4 > 1+2 = 3), so BiCGStab + SA should converge.
+    # dominant (4 > 1+2 = 3), so BiCGStab + Jacobi should converge.
     n = 50
     I = Int[]; J = Int[]; V = Float64[]
     for i in 1:n
@@ -92,15 +121,26 @@ end
     @test norm(A * x .- b) / norm(b) < 1e-8
 end
 
-@testset "_solve_ssa_linear!: unsupported smoother errors clearly" begin
-    # `:jacobi` smoother is documented-but-not-yet-wired (see
+@testset "_solve_ssa_linear!: unsupported AMG smoother errors clearly" begin
+    # `:jacobi` smoother is documented-but-not-yet-wired for AMG (see
     # `_amg_smoother` docstring). Verify the error path surfaces a
-    # clear message rather than a cryptic upstream MethodError.
+    # clear message rather than a cryptic upstream MethodError. Note
+    # the smoother field is only consulted when precond ∈ (:amg_sa,
+    # :amg_rs); use :amg_sa here so the smoother check actually fires.
     n = 10
     A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
     b = ones(n)
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-6, itmax = 50, smoother = :jacobi)
+    ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :amg_sa, smoother = :jacobi)
+    @test_throws ErrorException _solve_ssa_linear!(scratch, A, b, ssa)
+end
+
+@testset "_solve_ssa_linear!: unrecognized precond errors clearly" begin
+    n = 10
+    A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
+    b = ones(n)
+    scratch = _build_solver_scratch(n)
+    ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :ilu0)
     @test_throws ErrorException _solve_ssa_linear!(scratch, A, b, ssa)
 end
 # ======================================================================
