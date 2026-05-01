@@ -68,10 +68,20 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded
+using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
+
+# Topology-aware neighbour-index helpers for the local `fact_ab`
+# Matrix (which has no halo). Bounded clamps; Periodic wraps. Y-axis
+# variants because periodic-y is the only supported periodic axis in
+# milestone 3d (periodic-x lands in 3e together with full periodic
+# halo plumbing for the SSA solver).
+@inline _neighbor_jm1(j::Int, Ny::Int, ::Type{Bounded})  = max(j - 1, 1)
+@inline _neighbor_jm1(j::Int, Ny::Int, ::Type{Periodic}) = j == 1  ? Ny : j - 1
+@inline _neighbor_im1(i::Int, Nx::Int, ::Type{Bounded})  = max(i - 1, 1)
+@inline _neighbor_im1(i::Int, Nx::Int, ::Type{Periodic}) = i == 1  ? Nx : i - 1
 
 """
     calc_shear_stress_3D!(tau_xz, tau_yz,
@@ -213,10 +223,13 @@ function calc_uxy_sia_3D!(ux, uy,
     grid = ux.grid
     Tx_top = topology(grid, 1)
     Ty_top = topology(grid, 2)
-    if !(Tx_top === Bounded && Ty_top === Bounded)
-        error("calc_uxy_sia_3D!: requires (Bounded, Bounded, *) horizontal topology; " *
-              "got ($(Tx_top), $(Ty_top), …). Periodic-y support is deferred to milestone 3d.")
-    end
+    # Milestone 3d: relax to allow (Bounded, Periodic) in addition to
+    # (Bounded, Bounded). Periodic-x is deferred to milestone 3e.
+    Tx_top === Bounded || error(
+        "calc_uxy_sia_3D!: requires Bounded x-topology; got $(Tx_top). " *
+        "Periodic-x support is deferred to milestone 3e.")
+    (Ty_top === Bounded || Ty_top === Periodic) || error(
+        "calc_uxy_sia_3D!: y-topology must be Bounded or Periodic; got $(Ty_top).")
 
     Ux  = interior(ux)
     Uy  = interior(uy)
@@ -281,8 +294,10 @@ function calc_uxy_sia_3D!(ux, uy,
         end
 
         for j in 1:Ny, i in 1:Nx
-            jm1 = max(j - 1, 1)
-            im1 = max(i - 1, 1)
+            # `fact_ab` is a plain Matrix (no halo). The wrap depends on
+            # axis topology: Bounded → clamp to 1; Periodic → wrap.
+            jm1 = _neighbor_jm1(j, Ny, Ty_top)
+            im1 = _neighbor_im1(i, Nx, Tx_top)
 
             # x-face: bed segment contribution. ux_bed = 0, so
             # ux[k=1] = 0 + 0.5 * fact_ac_x * (tau_xz[k=1] + tau_xz_bed).
@@ -341,8 +356,8 @@ function calc_uxy_sia_3D!(ux, uy,
         # Second inner loop: stagger fact_ab to acx / acy faces, then
         # apply the depth recurrence.
         for j in 1:Ny, i in 1:Nx
-            jm1 = max(j - 1, 1)
-            im1 = max(i - 1, 1)
+            jm1 = _neighbor_jm1(j, Ny, Ty_top)
+            im1 = _neighbor_im1(i, Nx, Tx_top)
 
             # x-face: Fortran ux(i, j, k) ↔ Ux[i+1, j, k].
             fact_ac_x = 0.5 * (fact_ab[i, j] + fact_ab[i, jm1])
@@ -538,9 +553,12 @@ function calc_velocity_sia!(ux_i, uy_i, ux_i_bar, uy_i_bar,
         end
     end
 
+    Tx_top = topology(ux_i.grid, 1)
+    Ty_top = topology(ux_i.grid, 2)
+
     @inbounds for j in 1:Ny, i in 1:Nx
-        jm1 = max(j - 1, 1)
-        im1 = max(i - 1, 1)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        im1 = _neighbor_im1(i, Nx, Tx_top)
 
         fact_ac_x = 0.5 * (fact_ab_surf[i, j] + fact_ab_surf[i, jm1])
         # tau_xz_surf = 0, so the segment increment uses (0 + tau_xz[Nz]).
