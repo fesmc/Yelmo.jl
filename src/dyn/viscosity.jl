@@ -536,8 +536,8 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
     Ty_top = topology(visc_ab.grid, 2)
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
 
