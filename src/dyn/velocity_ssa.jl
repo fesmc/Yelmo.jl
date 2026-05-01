@@ -55,7 +55,10 @@ using AlgebraicMultigrid: smoothed_aggregation, aspreconditioner,
                           GaussSeidel, Jacobi
 
 export set_ssa_masks!, _assemble_ssa_matrix!,
-       _solve_ssa_linear!
+       _solve_ssa_linear!,
+       picard_relax_visc!, picard_relax_vel!,
+       picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
+       set_inactive_margins!, calc_basal_stress!
 
 # Integer constants for `mask_frnt`. Mirror the Fortran values from
 # `solver_ssa_ac.f90:899-903`. `val_disabled = 5` is internal to
@@ -1002,3 +1005,245 @@ function _solve_ssa_linear!(scratch,
     end
 end
 
+# ----------------------------------------------------------------------
+# Picard helpers (PR-B commit 3).
+#
+# Faithful ports of the helpers from
+# /Users/alrobi001/models/yelmo/src/physics/velocity_general.f90:
+#
+#   - picard_relax_visc      (line 2107)
+#   - picard_relax_vel       (line 2088)
+#   - picard_calc_convergence_l2 (line 1917, norm_method=1)
+#   - picard_calc_convergence_l1rel_matrix (line 1883)
+#   - set_inactive_margins   (line 1675)
+#
+# These are small standalone functions used by the SSA driver
+# (`calc_velocity_ssa!`) — they do not touch any Yelmo-specific state.
+# ----------------------------------------------------------------------
+
+const _SSA_PICARD_DU_REG  = 1e-10        # divide-by-zero floor (Fortran 1957)
+const _SSA_PICARD_VEL_TOL = 1e-5         # m/yr, vel mask threshold (Fortran 1958)
+const _SSA_PICARD_TOL_UF  = 1e-15        # underflow drop (Fortran TOL_UNDERFLOW)
+
+"""
+    picard_relax_visc!(visc_eff, visc_eff_nm1, rel) -> visc_eff
+
+Apply Picard relaxation to the 3D viscosity field in **log space**
+(matches Fortran `picard_relax_visc`, line 2117 — `visc =
+exp((1-rel)·log(visc_prev) + rel·log(visc))`). Operates in-place on
+`visc_eff`. The log-space mixing keeps positivity strictly: a
+linearly-relaxed viscosity could underflow to 0 or below if the
+adjacent step rejected wildly, which destabilizes the next iteration.
+
+Both fields must be `Field`-like with `interior` views of identical
+shape. Mirrors `velocity_general.f90:2107 picard_relax_visc`.
+"""
+function picard_relax_visc!(visc_eff, visc_eff_nm1, rel::Real)
+    V    = interior(visc_eff)
+    Vnm1 = interior(visc_eff_nm1)
+    size(V) == size(Vnm1) || error(
+        "picard_relax_visc!: shape mismatch ($(size(V)) vs $(size(Vnm1))).")
+    r  = Float64(rel)
+    rm = 1.0 - r
+    @inbounds @simd for k in eachindex(V)
+        v_prev = Vnm1[k]
+        v_now  = V[k]
+        # Guard against log(0): if either is zero, fall back to linear
+        # mixing (preserves the Fortran behavior where visc_min floor
+        # ensures positive values, but be defensive in case the caller
+        # passed an unfilled array on the first iteration).
+        if v_prev > 0.0 && v_now > 0.0
+            V[k] = exp(rm * log(v_prev) + r * log(v_now))
+        else
+            V[k] = rm * v_prev + r * v_now
+        end
+    end
+    return visc_eff
+end
+
+"""
+    picard_relax_vel!(ux_n, uy_n, ux_nm1, uy_nm1, rel) -> (ux_n, uy_n)
+
+Apply linear Picard relaxation to the face-staggered velocity fields:
+
+    ux_n .= ux_nm1 + rel · (ux_n - ux_nm1)
+    uy_n .= uy_nm1 + rel · (uy_n - uy_nm1)
+
+In-place on `ux_n` and `uy_n`. Mirrors `velocity_general.f90:2088
+picard_relax_vel` (elemental subroutine).
+"""
+function picard_relax_vel!(ux_n, uy_n, ux_nm1, uy_nm1, rel::Real)
+    Ux    = interior(ux_n)
+    Uy    = interior(uy_n)
+    Uxnm1 = interior(ux_nm1)
+    Uynm1 = interior(uy_nm1)
+    r = Float64(rel)
+    @inbounds @simd for k in eachindex(Ux)
+        Ux[k] = Uxnm1[k] + r * (Ux[k] - Uxnm1[k])
+    end
+    @inbounds @simd for k in eachindex(Uy)
+        Uy[k] = Uynm1[k] + r * (Uy[k] - Uynm1[k])
+    end
+    return ux_n, uy_n
+end
+
+"""
+    picard_calc_convergence_l2(ux, ux_nm1, uy, uy_nm1) -> Float64
+
+Relative L2 residual norm of the velocity change between successive
+Picard iterations. Mirrors `velocity_general.f90:1917
+picard_calc_convergence_l2` with `norm_method = 1` (the only branch
+actually used by the Fortran driver):
+
+    res1 = sum((u - u_prev)²) over points where |u| > vel_tol
+    res2 = sum((u_prev)²)     over the same points
+    resid = res1 / (res2 + du_reg)
+
+If no points pass the velocity-tolerance mask, returns 0.0 (matches
+Fortran).
+
+Inputs are interior arrays (Yelmo.jl `interior(field)` slabs) of
+shape `(Nx_face, Ny, 1)` — sums over all entries. The Fortran
+`mask_acx > 0` predicate is enforced by passing only the active-SSA
+indices; for our wrapper we instead include all face cells (the
+inactive-mask cells have `u = 0` from the Dirichlet rows so they
+fail the `vel_tol` threshold automatically).
+"""
+function picard_calc_convergence_l2(ux::AbstractArray, ux_nm1::AbstractArray,
+                                    uy::AbstractArray, uy_nm1::AbstractArray)
+    res1 = 0.0
+    res2 = 0.0
+    @inbounds @simd for k in eachindex(ux)
+        if abs(ux[k]) > _SSA_PICARD_VEL_TOL
+            tx = ux[k] - ux_nm1[k]
+            abs(tx) < _SSA_PICARD_TOL_UF && (tx = 0.0)
+            res1 += tx * tx
+            tp = ux_nm1[k]
+            abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
+            res2 += tp * tp
+        end
+    end
+    @inbounds @simd for k in eachindex(uy)
+        if abs(uy[k]) > _SSA_PICARD_VEL_TOL
+            ty = uy[k] - uy_nm1[k]
+            abs(ty) < _SSA_PICARD_TOL_UF && (ty = 0.0)
+            res1 += ty * ty
+            tp = uy_nm1[k]
+            abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
+            res2 += tp * tp
+        end
+    end
+    return res1 / (res2 + _SSA_PICARD_DU_REG)
+end
+
+"""
+    picard_calc_convergence_l1rel_matrix!(err_x, err_y,
+                                          ux, uy, ux_nm1, uy_nm1)
+        -> (err_x, err_y)
+
+Per-cell L1 relative error matrix (Fortran
+`picard_calc_convergence_l1rel_matrix`, line 1883):
+
+    err_x = 2·|ux - ux_prev| / |ux + ux_prev + tol|   (where |ux| > vel_tol)
+          = 0                                          (otherwise)
+    err_y = analogous
+
+Used as a diagnostic per-face residual field. In-place on `err_x` /
+`err_y` (interior arrays).
+"""
+function picard_calc_convergence_l1rel_matrix!(err_x::AbstractArray,
+                                               err_y::AbstractArray,
+                                               ux::AbstractArray,
+                                               uy::AbstractArray,
+                                               ux_nm1::AbstractArray,
+                                               uy_nm1::AbstractArray)
+    tol = 1e-5
+    vel_tol = 1e-2   # Fortran ssa_vel_tolerance (line 1896)
+    @inbounds @simd for k in eachindex(err_x)
+        if abs(ux[k]) > vel_tol
+            err_x[k] = 2.0 * abs(ux[k] - ux_nm1[k]) /
+                       abs(ux[k] + ux_nm1[k] + tol)
+        else
+            err_x[k] = 0.0
+        end
+    end
+    @inbounds @simd for k in eachindex(err_y)
+        if abs(uy[k]) > vel_tol
+            err_y[k] = 2.0 * abs(uy[k] - uy_nm1[k]) /
+                       abs(uy[k] + uy_nm1[k] + tol)
+        else
+            err_y[k] = 0.0
+        end
+    end
+    return err_x, err_y
+end
+
+"""
+    set_inactive_margins!(ux_b, uy_b, f_ice) -> (ux_b, uy_b)
+
+Zero out velocity at faces touching ice-free cells (matches Fortran
+`set_inactive_margins`, velocity_general.f90:1675). Specifically:
+
+  - For face-x at `(i, j)` (between cells `(i, j)` and `(i+1, j)`):
+    if `f_ice(i, j) < 1` AND `f_ice(i+1, j) == 0`, set `ux(i, j) = 0`.
+    The other direction is symmetric.
+  - For face-y at `(i, j)`: analogous with `(i, j+1)`.
+
+Operates on `interior` views. `ux_b` is XFace, `uy_b` is YFace, `f_ice`
+is Center; standard Yelmo.jl staggering convention.
+"""
+function set_inactive_margins!(ux_b, uy_b, f_ice)
+    Ux = interior(ux_b)
+    Uy = interior(uy_b)
+    Fi = interior(f_ice)
+
+    Nx = size(Fi, 1)
+    Ny = size(Fi, 2)
+    Tx_top = topology(ux_b.grid, 1)
+    Ty_top = topology(uy_b.grid, 2)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ip1 = i == Nx ? (Tx_top === Periodic ? 1 : Nx) : i + 1
+        jp1 = j == Ny ? (Ty_top === Periodic ? 1 : Ny) : j + 1
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
+
+        # x-face between (i, j) and (ip1, j): at slot [ip1f, j].
+        if (Fi[i, j, 1] < 1.0 && Fi[ip1, j, 1] == 0.0) ||
+           (Fi[i, j, 1] == 0.0 && Fi[ip1, j, 1] < 1.0)
+            Ux[ip1f, j, 1] = 0.0
+        end
+        # y-face between (i, j) and (i, jp1): at slot [i, jp1f].
+        if (Fi[i, j, 1] < 1.0 && Fi[i, jp1, 1] == 0.0) ||
+           (Fi[i, j, 1] == 0.0 && Fi[i, jp1, 1] < 1.0)
+            Uy[i, jp1f, 1] = 0.0
+        end
+    end
+    return ux_b, uy_b
+end
+
+"""
+    calc_basal_stress!(taub_acx, taub_acy, beta_acx, beta_acy, ux_b, uy_b)
+        -> (taub_acx, taub_acy)
+
+Diagnose basal stress as `tau_b = beta · u_b` on each face. Underflow
+clip below `1e-5` Pa (matches Fortran `calc_basal_stress`, velocity_ssa.f90:679).
+"""
+function calc_basal_stress!(taub_acx, taub_acy, beta_acx, beta_acy, ux_b, uy_b)
+    Tx = interior(taub_acx)
+    Ty = interior(taub_acy)
+    Bx = interior(beta_acx)
+    By = interior(beta_acy)
+    Ux = interior(ux_b)
+    Uy = interior(uy_b)
+    tol = 1e-5
+    @inbounds @simd for k in eachindex(Tx)
+        v = Bx[k] * Ux[k]
+        Tx[k] = abs(v) < tol ? 0.0 : v
+    end
+    @inbounds @simd for k in eachindex(Ty)
+        v = By[k] * Uy[k]
+        Ty[k] = abs(v) < tol ? 0.0 : v
+    end
+    return taub_acx, taub_acy
+end
