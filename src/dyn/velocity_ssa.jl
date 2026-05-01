@@ -393,8 +393,17 @@ Block-row layout: row `2k - 1` is the ux equation at cell
 Returns the kernel arguments unchanged (in-place mutation of the
 COO buffers, RHS, and `nnz_ref`).
 
-Topology: only `(Bounded, Bounded, Flat)` and `(Bounded, Periodic, Flat)`
-are supported in PR-A.2. Other combinations error.
+Topology: `(Bounded, Bounded, Flat)`, `(Bounded, Periodic, Flat)`,
+`(Periodic, Bounded, Flat)`, and `(Periodic, Periodic, Flat)` are
+supported. Other combinations (e.g. anything other than `Flat` for the
+third axis) error. The matrix-assembly kernel itself is topology-clean
+under both axes — face-slot reads go through `_ip1_modular` /
+`_jp1_modular` and all boundary-row branches guard with
+`bcs[k] !== :periodic`, so under fully-periodic boundaries the kernel
+falls through to the inner-SSA stencil at i==1 / i==Nx / j==1 / j==Ny
+and the wrapped-int neighbour math (`im1=Nx`, `ip1=1`) gives the
+periodic-wrap intent. Periodic-x support enables the ISMIP-HOM-C
+benchmark.
 """
 function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                J_idx::Vector{Int},
@@ -412,14 +421,29 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                boundaries::Symbol=:bounded,
                                lateral_bc::AbstractString="floating")
 
-    # ---- Topology checks (PR-A.2 scope). ----
+    # ---- Topology checks. ----
+    # Only Bounded / Periodic supported on each horizontal axis. The
+    # kernel handles all four combinations correctly because:
+    #   - Face-slot reads (ux, uy, beta, mask, taud, taul on faces; Nab
+    #     on FaceFaceCenter) use `_ip1_modular` / `_jp1_modular` which
+    #     dispatch to `mod1(i+1, Nx)` under Periodic-x and `i+1` under
+    #     Bounded-x.
+    #   - Cell-centre reads (Naa, Hi, Fi) use wrapped integer indices
+    #     `ip1`, `im1` that always wrap (Periodic-correct; Bounded
+    #     branches gate on `i == 1` / `i == Nx` to bypass the wrapped
+    #     reads when boundary rows fire instead of inner-SSA).
+    #   - Boundary-row branches at i == 1 / Nx / j == 1 / Ny guard with
+    #     `bcs[k] !== :periodic`, so under fully-periodic boundaries
+    #     they fall through to the inner-SSA stencil with the
+    #     wrapped-int neighbours.
     Tx_top = topology(visc_eff_int.grid, 1)
     Ty_top = topology(visc_eff_int.grid, 2)
-    Tx_top === Bounded || error(
-        "_assemble_ssa_matrix!: x-topology must be Bounded for PR-A.2 (got $(Tx_top)).")
+    (Tx_top === Bounded || Tx_top === Periodic) || error(
+        "_assemble_ssa_matrix!: x-topology must be Bounded or Periodic " *
+        "(got $(Tx_top)).")
     (Ty_top === Bounded || Ty_top === Periodic) || error(
         "_assemble_ssa_matrix!: y-topology must be Bounded or Periodic " *
-        "for PR-A.2 (got $(Ty_top)).")
+        "(got $(Ty_top)).")
 
     # Fill halos on every input the kernel reads with i±1 / j±1 stencils.
     # Note: the kernel does NOT use halo reads for the column-index
