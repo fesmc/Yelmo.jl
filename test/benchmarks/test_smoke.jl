@@ -127,8 +127,12 @@ const _NX   = length(_SPEC.xc)   # 31
         end
     end
 
-    # 8. analytical_velocity is intentionally a stub for BUELER until
-    #    Commit 4. The error message is the contract — make sure it
-    #    fires.
-    @test_throws ErrorException analytical_velocity(_SPEC, 1000.0)
+    # 8. analytical_velocity returns finite face-staggered Halfar
+    #    velocities (Commit 4). Spot-check shape and finiteness; the
+    #    closed-form math is verified in `test_sia.jl`.
+    ux_ref, uy_ref = analytical_velocity(_SPEC, 1000.0)
+    @test size(ux_ref) == (_NX + 1, _NX)
+    @test size(uy_ref) == (_NX, _NX + 1)
+    @test all(isfinite, ux_ref)
+    @test all(isfinite, uy_ref)
 end

@@ -300,17 +300,151 @@ function write_fixture!(b::BuelerBenchmark, path::AbstractString;
     return [path]
 end
 
-"""
-    analytical_velocity(b::BuelerBenchmark, t::Real)
+# ----------------------------------------------------------------------
+# Private helpers for the closed-form Halfar depth-averaged velocity.
+#
+# Derivation: for the BUELER-B (lambda = 0) Halfar dome (Bueler et al.
+# 2005, J. Glaciol. 51 (173), Eqs. 9-11; original similarity solution
+# Halfar 1981, JGR 86 (C11), pp. 11065-11072):
+#
+#   alpha = (2 - (n+1) lambda) / (5 n + 3),
+#   beta  = (1 + (2 n + 1) lambda) / (5 n + 3),
+#   gamma = 2 A (rho_i g)^n / (n + 2),
+#   t0    = (beta / gamma) * ((2 n + 1)/(n + 1))^n * R0^(n+1) / H0^(2 n + 1).
+#
+# Following the Yelmo Fortran convention in `bueler_test_BC` (and
+# matching Bueler 2005 Eq. 11 with the time variable shifted to
+# `t -> t + t0`), the Halfar profile is parameterised by
+#
+#   u(r, t) = (t1/t0)^(-beta) * r / R0,    with t1 = t + t0,
+#
+# and for u < 1
+#
+#   H(r, t) = H0 * (t1/t0)^(-alpha) * [1 - u^((n+1)/n)]^(n/(2 n + 1)),
+#
+# giving (by direct r-differentiation, q = n/(2n+1), p = (n+1)/n,
+# u_r = (t1/t0)^(-beta)/R0)
+#
+#   dH/dr(r, t) = -H0 * (t1/t0)^(-alpha) * (t1/t0)^(-beta) / R0 *
+#                  (n+1)/(2 n + 1) * u^(1/n) *
+#                  [1 - u^((n+1)/n)]^(n/(2 n + 1) - 1).
+#
+# At u >= 1 the dome margin has been crossed: H = dH/dr = 0.
+#
+# The depth-averaged SIA velocity for a flat-bed Halfar dome is
+#
+#   bar(u_r) = -gamma * H^(n+1) * |dH/dr|^(n-1) * dH/dr   (radial),
+#
+# converted to Cartesian as bar(u_x) = (x/r) * bar(u_r), bar(u_y) =
+# (y/r) * bar(u_r). At r = 0 the symmetry forces bar(u) = 0.
+# ----------------------------------------------------------------------
 
-Stub: the analytical depth-averaged ice-velocity field for the Halfar
-dome lands in Commit 4 of milestone 3c (the SIA convergence test). It
-is intentionally not implemented here so the BUELER-B smoke test for
-Commit 3 stays focused on the geometry / mass-balance round-trip.
+@inline function _halfar_exponents(n::Real, lambda::Real)
+    α = (2.0 - (Float64(n) + 1.0) * Float64(lambda)) / (5.0 * Float64(n) + 3.0)
+    β = (1.0 + (2.0 * Float64(n) + 1.0) * Float64(lambda)) / (5.0 * Float64(n) + 3.0)
+    return α, β
+end
+
+@inline function _halfar_t0(b::BuelerBenchmark)
+    R0_m = b.R0_km * 1e3
+    α, β = _halfar_exponents(b.n, b.lambda)
+    γ = bueler_gamma(b.A, b.n, b.rho_ice, b.g)
+    t0 = (β / γ) * ((2.0 * b.n + 1.0) / (b.n + 1.0))^b.n *
+         (R0_m^(b.n + 1) / b.H0^(2.0 * b.n + 1.0))
+    return α, β, γ, t0, R0_m
+end
+
+# Closed-form (H, dH/dr) at radius `r` (m) and time `t` (yr) for the
+# Halfar dome described by `b`. Returns `(0.0, 0.0)` outside the moving
+# margin (u >= 1).
+function _halfar_HR_dHdr(b::BuelerBenchmark, r::Real, t::Real)
+    α, β, γ, t0, R0_m = _halfar_t0(b)
+    t1 = Float64(t) + t0
+    # Yelmo Fortran convention (matches `bueler_test_BC!` above):
+    # `u = (t1/t0)^(-β) * r / R0`. As t increases, (t1/t0)^(-β)
+    # decreases (β > 0), so the margin radius r_margin = R0 (t1/t0)^β
+    # increases — the Halfar dome spreads with time.
+    u  = (t1 / t0)^(-β) * Float64(r) / R0_m
+    if u >= 1.0
+        return (0.0, 0.0)
+    end
+    H = b.H0 * (t1 / t0)^(-α) * (1.0 - u^((b.n + 1.0) / b.n))^(b.n / (2.0 * b.n + 1.0))
+    prefac = -b.H0 * (t1 / t0)^(-α) * (t1 / t0)^(-β) / R0_m *
+             (b.n + 1.0) / (2.0 * b.n + 1.0)
+    dHdr = prefac * u^(1.0 / b.n) *
+           (1.0 - u^((b.n + 1.0) / b.n))^(b.n / (2.0 * b.n + 1.0) - 1.0)
+    return (H, dHdr)
+end
+
+# Convenience: closed-form dH/dr only (used by the unit test that
+# cross-checks against numerical centred-differences of H).
+_halfar_dHdr_closed(b::BuelerBenchmark, r::Real, t::Real) =
+    _halfar_HR_dHdr(b, r, t)[2]
+
 """
-analytical_velocity(b::BuelerBenchmark, t::Real) = error(
-    "analytical_velocity for BuelerBenchmark not yet implemented; " *
-    "lands in Commit 4 of milestone 3c (SIA convergence test).")
+    analytical_velocity(b::BuelerBenchmark, t::Real) -> (ux_bar, uy_bar)
+
+Closed-form depth-averaged Halfar velocity at time `t` (years) for the
+Halfar dome described by `b`. Returns face-staggered 2D arrays:
+
+  - `ux_bar` of shape `(Nx + 1, Ny)` — values at x-faces, layout
+    matching `interior(y.dyn.ux_bar)[:, :, 1]` for an `XFaceField` on a
+    `(Nx, Ny)`-Center grid.
+  - `uy_bar` of shape `(Nx, Ny + 1)` — values at y-faces, matching
+    `interior(y.dyn.uy_bar)[:, :, 1]` for a `YFaceField`.
+
+The first/last x-face row (`ux_bar[1, :]`, `ux_bar[Nx+1, :]`) and the
+first/last y-face row (`uy_bar[:, 1]`, `uy_bar[:, Ny+1]`) are left at
+zero — these face cells lie outside the dome margin at all benchmark
+resolutions and are not part of any margin-masked error metric.
+
+Derivation: see the comment block above this method. References:
+
+  - Halfar, P. 1981. On the dynamics of the ice sheets. JGR 86 (C11),
+    pp. 11065-11072.
+  - Bueler, E. et al. 2005. Exact solutions and verification of
+    numerical models for isothermal ice sheets. J. Glaciol. 51 (173),
+    pp. 291-306. Eqs. 9-11 and Section 4.
+"""
+function analytical_velocity(b::BuelerBenchmark, t::Real)
+    Nx, Ny = length(b.xc), length(b.yc)
+    ux_bar = zeros(Nx + 1, Ny)
+    uy_bar = zeros(Nx, Ny + 1)
+
+    α, β, γ, t0, R0_m = _halfar_t0(b)
+
+    # ux_bar at face position (xc[i] + xc[i+1])/2, yc[j].
+    for j in 1:Ny, i in 1:Nx-1
+        x_f = 0.5 * (b.xc[i] + b.xc[i+1])
+        y_f = b.yc[j]
+        r   = sqrt(x_f^2 + y_f^2)
+        H, dHdr = _halfar_HR_dHdr(b, r, t)
+        if r < 1e-9 || H == 0.0
+            ux_bar[i+1, j] = 0.0
+        else
+            grad_mag = abs(dHdr)
+            ux_bar[i+1, j] = -γ * H^(b.n + 1.0) * grad_mag^(b.n - 1.0) *
+                             (x_f / r) * dHdr
+        end
+    end
+
+    # uy_bar at face position xc[i], (yc[j] + yc[j+1])/2.
+    for j in 1:Ny-1, i in 1:Nx
+        x_f = b.xc[i]
+        y_f = 0.5 * (b.yc[j] + b.yc[j+1])
+        r   = sqrt(x_f^2 + y_f^2)
+        H, dHdr = _halfar_HR_dHdr(b, r, t)
+        if r < 1e-9 || H == 0.0
+            uy_bar[i, j+1] = 0.0
+        else
+            grad_mag = abs(dHdr)
+            uy_bar[i, j+1] = -γ * H^(b.n + 1.0) * grad_mag^(b.n - 1.0) *
+                             (y_f / r) * dHdr
+        end
+    end
+
+    return (ux_bar, uy_bar)
+end
 
 # Resolve the per-spec name used for fixture filenames. Mirrors
 # `_spec_name` for `BenchmarkSpec` (the YelmoMirror path) so
