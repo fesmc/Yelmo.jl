@@ -10,14 +10,16 @@ Public surface: `dyn_step!(y::YelmoModel, dt)`, dispatched from
 `YelmoCore.step!(::YelmoModel, dt)` after `topo_step!` in the fixed
 phase order.
 
-Milestone 3c (current): scaffolding + pre-solver kinematics +
+Milestone 3d (current): scaffolding + pre-solver kinematics +
 post-solver diagnostics (3a) + bed-roughness chain (3b) + SIA
-solver dispatch with the Option C vertical-stagger convention.
-Solver dispatch handles `solver = "fixed"` (no velocity update) and
-`solver = "sia"` (Option C SIA wrapper, `calc_velocity_sia!`); SSA /
-hybrid / DIVA arrive in subsequent milestones (3d–3f). Velocity
-Jacobian, vertical velocity `uz`, and strain-rate tensor land in
-milestone 3h.
+solver dispatch with the Option C vertical-stagger convention +
+SSA Picard solver (Krylov+AMG inner linear solve) + hybrid SIA+SSA.
+Solver dispatch handles `solver = "fixed"` (no velocity update),
+`solver = "sia"` (Option C SIA wrapper, `calc_velocity_sia!`),
+`solver = "ssa"` (Picard iteration via `calc_velocity_ssa!`), and
+`solver = "hybrid"` (SIA shear + SSA basal sliding); DIVA / L1L2
+arrive in subsequent milestones (3e–3f). Velocity Jacobian, vertical
+velocity `uz`, and strain-rate tensor land in milestone 3h.
 
 Vertical convention: 3D fields (`ux`, `ux_i`, `ATT`, `tau_xz`, …)
 are at Oceananigans `Center()` vertical staggering — interior layer
@@ -31,6 +33,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
+using ..YelmoSolvers: Solver, SSASolver
 
 import ..YelmoCore: dyn_step!
 
@@ -44,7 +47,12 @@ export dyn_step!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
-       set_ssa_masks!, _assemble_ssa_matrix!
+       set_ssa_masks!, _assemble_ssa_matrix!,
+       Solver, SSASolver,
+       _solve_ssa_linear!,
+       picard_relax_visc!, picard_relax_vel!,
+       picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
+       set_inactive_margins!, calc_basal_stress!
 
 include("topology_helpers.jl")
 include("quadrature.jl")
@@ -167,8 +175,9 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                 y.p.ytill.is_angle, y.p.ytill.cf_ref,
                 y.p.ydyn.T_frz, y.p.ydyn.scale_T)
 
-    # 6. Solver dispatch. 3c handles "fixed" and "sia".
+    # 6. Solver dispatch. 3d handles "fixed", "sia", "ssa", "hybrid".
     solver = y.p.ydyn.solver
+    Nz_dyn = size(interior(y.dyn.ux), 3)
     if solver == "fixed"
         # No velocity update — Q5 locked-in: leave ux_i / uy_i /
         # ux_i_bar / uy_i_bar at their loaded / previous values.
@@ -203,10 +212,69 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         interior(y.dyn.uy)     .= interior(y.dyn.uy_i)
         interior(y.dyn.ux_bar) .= interior(y.dyn.ux_i_bar)
         interior(y.dyn.uy_bar) .= interior(y.dyn.uy_i_bar)
+    elseif solver == "ssa"
+        # SSA-only: no shear contribution. Zero ux_i / uy_i and
+        # ux_i_bar / uy_i_bar so the SIA-derived diagnostics are
+        # consistent with "no SIA". Picard iteration writes
+        # ux_b / uy_b / taub directly.
+        fill!(interior(y.dyn.ux_i),     0.0)
+        fill!(interior(y.dyn.uy_i),     0.0)
+        fill!(interior(y.dyn.ux_i_bar), 0.0)
+        fill!(interior(y.dyn.uy_i_bar), 0.0)
+        fill!(interior(y.dyn.scratch.ux_i_s), 0.0)
+        fill!(interior(y.dyn.scratch.uy_i_s), 0.0)
+
+        calc_velocity_ssa!(y)
+
+        # Total velocity is layer-uniform: ux(:, :, k) = ux_b for all k.
+        # Mirrors yelmo_dynamics.f90:436-443.
+        Ux  = interior(y.dyn.ux)
+        Uy  = interior(y.dyn.uy)
+        Uxb = interior(y.dyn.ux_b)
+        Uyb = interior(y.dyn.uy_b)
+        # Note: under Bounded-x, ux is XFace 3D and ux_b is XFace 2D
+        # so the 1st & 2nd dims match (Nx+1, Ny). Under Periodic-x both
+        # are Nx-wide. The k loop is Nz_aa (for the 3D-Center stagger).
+        for k in 1:Nz_dyn
+            @views Ux[:, :, k] .= Uxb[:, :, 1]
+            @views Uy[:, :, k] .= Uyb[:, :, 1]
+        end
+        interior(y.dyn.ux_bar) .= Uxb
+        interior(y.dyn.uy_bar) .= Uyb
+    elseif solver == "hybrid"
+        # SIA shear + SSA basal sliding.
+        zeta_c = znodes(y.gt, Center())
+        calc_velocity_sia!(y.dyn.ux_i, y.dyn.uy_i,
+                           y.dyn.ux_i_bar, y.dyn.uy_i_bar,
+                           y.dyn.scratch.ux_i_s, y.dyn.scratch.uy_i_s,
+                           y.dyn.scratch.sia_tau_xz,
+                           y.dyn.scratch.sia_tau_yz,
+                           y.tpo.H_ice, y.tpo.f_ice,
+                           y.dyn.taud_acx, y.dyn.taud_acy,
+                           y.mat.ATT,
+                           zeta_c,
+                           y.p.ymat.n_glen)
+
+        calc_velocity_ssa!(y)
+
+        # Total velocity = SIA shear (3D, layer-varying) + SSA basal
+        # sliding (2D, layer-uniform). Mirrors yelmo_dynamics.f90:436-443.
+        Ux  = interior(y.dyn.ux)
+        Uy  = interior(y.dyn.uy)
+        Uxi = interior(y.dyn.ux_i)
+        Uyi = interior(y.dyn.uy_i)
+        Uxb = interior(y.dyn.ux_b)
+        Uyb = interior(y.dyn.uy_b)
+        for k in 1:Nz_dyn
+            @views Ux[:, :, k] .= Uxi[:, :, k] .+ Uxb[:, :, 1]
+            @views Uy[:, :, k] .= Uyi[:, :, k] .+ Uyb[:, :, 1]
+        end
+        interior(y.dyn.ux_bar) .= interior(y.dyn.ux_i_bar) .+ Uxb
+        interior(y.dyn.uy_bar) .= interior(y.dyn.uy_i_bar) .+ Uyb
     else
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
-              "Milestone 3c supports \"fixed\" and \"sia\". " *
-              "SSA / hybrid / DIVA land in milestones 3d–3f.")
+              "Milestone 3d supports \"fixed\", \"sia\", \"ssa\", \"hybrid\". " *
+              "DIVA / L1L2 land in milestones 3e–3f.")
     end
 
     # 7. Underflow clip on the velocity fields (matches Fortran's
@@ -259,12 +327,15 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     @views interior(y.dyn.uz_s)[:, :, 1]  .= interior(y.dyn.uz)[:, :, end]
     @views interior(y.dyn.uxy_s)[:, :, 1] .= interior(y.dyn.uxy)[:, :, end]
 
-    # SIA branch correction: assemble ux_s = ux_i_s + ux_b (here ux_b
-    # is zero since SIA-only path zeros basal sliding above). The
-    # wrapper-produced ux_i_s is the actual surface value; the
-    # generic `interior(ux)[:, :, end]` line above wrote the topmost
-    # Center value, which differs under Option C.
-    if solver == "sia"
+    # SIA / SSA / hybrid branch correction: assemble ux_s = ux_i_s + ux_b.
+    # Under Option C the topmost Center node ≠ surface, so the generic
+    # `interior(ux)[:, :, end]` line above wrote the topmost-Center
+    # value rather than the surface value. The wrapper-produced
+    # `scratch.ux_i_s` is the actual surface segment value (zero under
+    # solver=="ssa" since the SSA branch zeros it explicitly); add
+    # `ux_b` for the hybrid / sliding contribution. For solver=="fixed"
+    # we keep the topmost-Center fallback (pre-existing limitation).
+    if solver in ("sia", "ssa", "hybrid")
         @views interior(y.dyn.ux_s)[:, :, 1] .=
             interior(y.dyn.scratch.ux_i_s)[:, :, 1] .+
             interior(y.dyn.ux_b)[:, :, 1]

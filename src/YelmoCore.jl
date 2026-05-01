@@ -7,6 +7,7 @@ using Oceananigans.BoundaryConditions: FieldBoundaryConditions,
                                        GradientBoundaryCondition,
                                        fill_halo_regions!
 using NCDatasets
+using Krylov: BicgstabWorkspace
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoConst: YelmoConstants,
@@ -213,12 +214,21 @@ demands a specific *face value* outside the domain (e.g. `H_ice = 0`
 for advection mass conservation).
 """
 function neumann_2d_field(grid::RectilinearGrid; value::Real = 0.0)
-    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
-        east  = GradientBoundaryCondition(value),
-        west  = GradientBoundaryCondition(value),
-        south = GradientBoundaryCondition(value),
-        north = GradientBoundaryCondition(value),
-    )
+    # Oceananigans rejects per-side BCs on Periodic axes — the wrap
+    # already determines halo values. Only attach the Gradient BC on
+    # axes that are Bounded.
+    Tx = topology(grid, 1)
+    Ty = topology(grid, 2)
+    east_bc  = Tx === Bounded ? GradientBoundaryCondition(value) : nothing
+    west_bc  = Tx === Bounded ? GradientBoundaryCondition(value) : nothing
+    south_bc = Ty === Bounded ? GradientBoundaryCondition(value) : nothing
+    north_bc = Ty === Bounded ? GradientBoundaryCondition(value) : nothing
+    kwargs = Dict{Symbol,Any}()
+    east_bc  !== nothing && (kwargs[:east]  = east_bc)
+    west_bc  !== nothing && (kwargs[:west]  = west_bc)
+    south_bc !== nothing && (kwargs[:south] = south_bc)
+    north_bc !== nothing && (kwargs[:north] = north_bc)
+    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center()); kwargs...)
     return CenterField(grid; boundary_conditions=bcs)
 end
 
@@ -294,12 +304,16 @@ operator reads the face values directly via Oceananigans' standard
 halo machinery without per-cell branching.
 """
 function dirichlet_2d_field(grid::RectilinearGrid, value::Real)
-    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center());
-        east  = ValueBoundaryCondition(value),
-        west  = ValueBoundaryCondition(value),
-        south = ValueBoundaryCondition(value),
-        north = ValueBoundaryCondition(value),
-    )
+    # Oceananigans rejects per-side BCs on Periodic axes; only attach
+    # the Value BC on Bounded axes.
+    Tx = topology(grid, 1)
+    Ty = topology(grid, 2)
+    kwargs = Dict{Symbol,Any}()
+    Tx === Bounded && (kwargs[:east]  = ValueBoundaryCondition(value);
+                       kwargs[:west]  = ValueBoundaryCondition(value))
+    Ty === Bounded && (kwargs[:south] = ValueBoundaryCondition(value);
+                       kwargs[:north] = ValueBoundaryCondition(value))
+    bcs = FieldBoundaryConditions(grid, (Center(), Center(), Center()); kwargs...)
     return CenterField(grid; boundary_conditions=bcs)
 end
 
@@ -602,14 +616,26 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     sia_scratch = (sia_tau_xz  = XFaceField(gt), sia_tau_yz  = YFaceField(gt),
                    ux_i_s      = XFaceField(g),  uy_i_s      = YFaceField(g),
                    ssa_n_aa_ab = Field((Face(), Face(), Center()), g))
+    # PR-B additions: Krylov workspace + AMG-cache + Picard "n minus 1"
+    # snapshots + per-iteration L2 residual history. The Krylov workspace
+    # is allocated once at this size (2*Nx*Ny rows). The AMG cache is
+    # rebuilt every Picard iteration since the matrix coefficients
+    # change with viscosity / beta — store a `Ref{Any}` that the driver
+    # populates lazily.
     ssa_scratch = (
-        ssa_I_idx    = Vector{Int}(undef, N_nz_max),
-        ssa_J_idx    = Vector{Int}(undef, N_nz_max),
-        ssa_vals     = Vector{Float64}(undef, N_nz_max),
-        ssa_nnz      = Ref{Int}(0),
-        ssa_b_vec    = Vector{Float64}(undef, N_rows),
-        ssa_x_vec    = Vector{Float64}(undef, N_rows),
-        ssa_iter_now = Ref{Int}(0),
+        ssa_I_idx                  = Vector{Int}(undef, N_nz_max),
+        ssa_J_idx                  = Vector{Int}(undef, N_nz_max),
+        ssa_vals                   = Vector{Float64}(undef, N_nz_max),
+        ssa_nnz                    = Ref{Int}(0),
+        ssa_b_vec                  = Vector{Float64}(undef, N_rows),
+        ssa_x_vec                  = Vector{Float64}(undef, N_rows),
+        ssa_iter_now               = Ref{Int}(0),
+        ssa_solver_workspace       = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
+        ssa_amg_cache              = Ref{Any}(nothing),
+        ssa_picard_visc_eff_nm1    = CenterField(gt),
+        ssa_picard_ux_b_nm1        = XFaceField(g),
+        ssa_picard_uy_b_nm1        = YFaceField(g),
+        ssa_residuals              = Vector{Float64}(undef, 100),
     )
     dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch),))
 

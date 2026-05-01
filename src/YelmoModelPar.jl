@@ -21,6 +21,7 @@ module YelmoModelPar
 using Printf
 
 import ..YelmoPar: write_nml, compare
+using ..YelmoSolvers: Solver, SSASolver
 
 # Note on read_nml: YelmoPar.read_nml and YelmoModelPar.read_nml share the
 # same signature `read_nml(::AbstractString)` but return different types,
@@ -154,7 +155,7 @@ Base.@kwdef struct YdynParams
     eps_0           ::Float64 = 1e-6
     scale_T         ::Int     = 1
     T_frz           ::Float64 = -3.0
-    ssa_lis_opt     ::String  = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
+    ssa_solver      ::SSASolver = SSASolver()
     ssa_lat_bc      ::String  = "floating"
     ssa_beta_max    ::Float64 = 1e20
     ssa_vel_max     ::Float64 = 5000.0
@@ -407,16 +408,31 @@ end
     write_group(io, group_name, s)
 Write one namelist group to `io` from struct `s`.
 The field named `const_` is written as `const` (Julia keyword workaround).
+Fields whose type is not a Fortran-namelist primitive (e.g. nested
+struct configs like `SSASolver`) are skipped — those are Julia-native
+configuration objects that have no namelist representation.
 """
 function write_group(io::IO, group_name::AbstractString, s)
     println(io, "&$(group_name)")
     for fname in fieldnames(typeof(s))
         nml_name = fname == :const_ ? "const" : string(fname)
         val = getfield(s, fname)
+        # Skip nested-struct fields (no Fortran namelist analogue).
+        _is_nml_primitive(val) || continue
         println(io, "    $(rpad(nml_name, 20)) = $(format_value(val))")
     end
     println(io, "/\n")
 end
+
+# Predicate: is `v` a Fortran namelist primitive (or vector of primitives)?
+# Used by `write_group` to skip nested-struct fields like `SSASolver`.
+_is_nml_primitive(v::Bool)              = true
+_is_nml_primitive(v::AbstractString)    = true
+_is_nml_primitive(v::Integer)           = true
+_is_nml_primitive(v::AbstractFloat)     = true
+_is_nml_primitive(v::AbstractVector{<:AbstractString}) = true
+_is_nml_primitive(v::AbstractVector{<:Real})           = true
+_is_nml_primitive(v)                    = false
 """
     write_nml(filename, p::YelmoModelParameters)
 Write a complete Yelmo namelist file from `p`.
@@ -587,10 +603,13 @@ function struct_from_dict(::Type{S}, d::Dict{String,String}) where {S}
     defaults = S()   # zero-arg @kwdef constructor gives us all defaults
     for fname in fieldnames(S)
         nml_name = fname == :const_ ? "const" : string(fname)
-        if haskey(d, nml_name)
-            FT = fieldtype(S, fname)
+        FT = fieldtype(S, fname)
+        if haskey(d, nml_name) && _is_nml_primitive(getfield(defaults, fname))
             kwargs[fname] = parse_nml_value(FT, d[nml_name])
         else
+            # Either field absent from namelist, or field type is a
+            # nested Julia-native config struct (no namelist analogue).
+            # Fall back to the default value either way.
             kwargs[fname] = getfield(defaults, fname)
         end
     end
@@ -691,7 +710,13 @@ function compare(io::IO, p1::YelmoModelParameters, p2::YelmoModelParameters; inc
                 v1, v2 = getfield(g1, sfield), getfield(g2, sfield)
                 v1 == v2 && continue
                 label = sfield == :const_ ? "const" : string(sfield)
-                println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
+                if _is_nml_primitive(v1) && _is_nml_primitive(v2)
+                    println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
+                else
+                    # Nested-struct field (e.g. SSASolver) — fall back to
+                    # repr() since format_value isn't defined for them.
+                    println(io, "  $(rpad(label, 24))  $(repr(v1))  =>  $(repr(v2))")
+                end
             end
         end
         println(io, "/\n")

@@ -4,6 +4,7 @@ module Yelmo
 include("YelmoMeta.jl")
 include("YelmoConst.jl")
 include("YelmoPar.jl")
+include("dyn/solvers.jl")
 include("YelmoModelPar.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
@@ -15,6 +16,7 @@ include("YelmoIO.jl")
 using .YelmoMeta
 using .YelmoConst
 using .YelmoPar
+using .YelmoSolvers
 using .YelmoModelPar
 using .YelmoCore
 using .YelmoMirrorCore
@@ -41,6 +43,9 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
 export write_nml
 export read_nml
 export compare
+
+# YelmoSolvers
+export Solver, SSASolver
 
 # YelmoModelPar
 export YelmoModelParameters
@@ -95,6 +100,10 @@ export calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
 export gq2d_nodes
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!
 export stagger_visc_aa_ab!
+export set_ssa_masks!
+export picard_relax_visc!, picard_relax_vel!
+export picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!
+export set_inactive_margins!, calc_basal_stress!
 
 # YelmoIO
 export init_output
