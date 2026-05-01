@@ -499,6 +499,83 @@ end
     @test val2 ≈ -3.0 * 1e10
 end
 
+@testset "_assemble_ssa_matrix!: periodic-x wraps i-1 column index" begin
+    # 4x3 grid with periodic-x. For ux at cell (1, 2), the inner-SSA
+    # stencil reads `ux(im1, j)` and `Nab(im1, ...)` cross-coupled
+    # `uy(im1, j)` columns. Under periodic-x at i == 1, im1 wraps to
+    # Nx == 4. Mirrors the 4x3 periodic-y test above.
+    Nx, Ny = 4, 3
+    dx = 1.0
+    g  = _periodic_x_2d(Nx, Ny; dx=dx)
+    s  = _build_matrix_inputs(g)
+
+    _assemble_ssa_matrix!(
+        s.I_idx, s.J_idx, s.vals, s.b_vec, s.nnz_ref,
+        s.ux_b, s.uy_b,
+        s.beta_acx, s.beta_acy,
+        s.visc_eff_int, s.visc_ab,
+        s.ssa_mask_acx, s.ssa_mask_acy, s.mask_frnt,
+        s.H_ice, s.f_ice,
+        s.taud_acx, s.taud_acy,
+        s.taul_int_acx, s.taul_int_acy,
+        dx, dx, 0.0;
+        boundaries=:periodic_x,
+    )
+
+    ij2n(i, j) = (j - 1) * Nx + i
+    row_ux(i, j) = 2 * ij2n(i, j) - 1
+    row_uy(i, j) = 2 * ij2n(i, j)
+
+    # ux at (1, 2) — interior in y (j == 2), i == 1 → under :periodic_x,
+    # bcs(3) is :periodic, so this is NOT a boundary row. The stencil
+    # hits column row_ux(im1, j) where im1 wraps to Nx = 4.
+    nr = row_ux(1, 2)
+    col_wrap = row_ux(4, 2)   # ux(im1, j) with im1 = Nx = 4
+    found, val = _coo_get(s.I_idx, s.J_idx, s.vals, s.nnz_ref[], nr, col_wrap)
+    @test found
+    # Value: 4 * visc / h² with our defaults.
+    @test val ≈ 4.0 * 1e10
+
+    # Same wrap behaviour on the uy row at cell (1, 2): the inner-SSA
+    # uy-eqn cross-couples to ux(im1, j) and ux(im1, jp1) (Fortran 905-908).
+    # Under :periodic_x at i = 1, im1 = 4 (wraps).
+    nr_uy = row_uy(1, 2)
+    col_uy_to_ux_im1 = row_ux(4, 2)   # ux(im1, j) with im1 = Nx = 4
+    found2, val2 = _coo_get(s.I_idx, s.J_idx, s.vals, s.nnz_ref[], nr_uy, col_uy_to_ux_im1)
+    @test found2
+    # Value: 2 * visc / h² (Fortran lines 907-910 — coefficient
+    # `2 inv_dxdy Naa(i, j) + inv_dxdy Nab_im1j` = (2 + 1) visc / h² = 3 visc / h²).
+    @test val2 ≈ 3.0 * 1e10
+end
+
+@testset "_assemble_ssa_matrix!: fully-periodic accepted (no error)" begin
+    # Smoke test that fully-periodic (Periodic, Periodic, Flat) is now
+    # accepted. Construct a small all-ice all-active grid and assemble.
+    Nx, Ny = 4, 4
+    dx = 1.0
+    g  = RectilinearGrid(size=(Nx, Ny),
+                         x=(0.0, Nx*dx), y=(0.0, Ny*dx),
+                         topology=(Periodic, Periodic, Flat))
+    s  = _build_matrix_inputs(g)
+
+    _assemble_ssa_matrix!(
+        s.I_idx, s.J_idx, s.vals, s.b_vec, s.nnz_ref,
+        s.ux_b, s.uy_b,
+        s.beta_acx, s.beta_acy,
+        s.visc_eff_int, s.visc_ab,
+        s.ssa_mask_acx, s.ssa_mask_acy, s.mask_frnt,
+        s.H_ice, s.f_ice,
+        s.taud_acx, s.taud_acy,
+        s.taul_int_acx, s.taul_int_acy,
+        dx, dx, 0.0;
+        boundaries=:periodic,
+    )
+
+    # Every row should be a 9-point inner-SSA row (no boundary rows
+    # fire under fully-periodic). NNZ = 2 * 9 * Nx * Ny = 288.
+    @test s.nnz_ref[] == 2 * 9 * Nx * Ny
+end
+
 @testset "_assemble_ssa_matrix!: NNZ buffer size adequacy" begin
     # Even for the largest expected case (all interior cells, all
     # 9-point + lots of cross-coupling), our 2 * 9 * Nx * Ny estimate

@@ -35,12 +35,14 @@ using Oceananigans: interior
 include("benchmarks.jl")
 include("bueler.jl")
 include("trough.jl")
+include("hom_c.jl")
 
 export BenchmarkSpec
-export AbstractBenchmark, BuelerBenchmark, TroughBenchmark
+export AbstractBenchmark, BuelerBenchmark, TroughBenchmark, HOMCBenchmark
 export run_mirror_benchmark!, load_fixture
 export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma
+export _setup_hom_c_beta!
 
 # Registry callback signature: `(ymirror, time)` → mutate `ymirror`
 # fields and push back to Fortran. The spec author is responsible for
