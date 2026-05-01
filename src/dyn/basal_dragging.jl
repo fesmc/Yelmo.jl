@@ -24,7 +24,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded, Periodic
+using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!
 
@@ -302,13 +302,18 @@ const _UB_SQ_MIN  = _UB_MIN^2
 # (i, j); uyn = mean of acy neighbours. Used by `beta_method=4`
 # (Schoof slab test).
 #
-# Boundary indices use `max(·, 1)` / `min(·, Nx)` clamps — matches
-# Fortran's `boundary_code("infinite")` semantics.
+# Boundary handling: topology-dispatched neighbour helpers
+# `_neighbor_im1` / `_ip1_modular` etc. — under Bounded these clamp /
+# resolve to k+1 (Fortran `infinite`-BC behaviour); under Periodic
+# they wrap modularly. Mirrors Fortran `get_neighbor_indices_bc_codes`
+# (`yelmo_tools.f90:162`) which dispatches on BC.
 function _calc_beta_aa_power_plastic!(beta_int::AbstractArray,
                                       ux_int::AbstractArray, uy_int::AbstractArray,
                                       c_int::AbstractArray, fi_int::AbstractArray,
                                       q::Float64, u_0::Float64,
-                                      simple_stagger::Bool)
+                                      simple_stagger::Bool,
+                                      Tx_top::Type{<:AbstractTopology},
+                                      Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
 
     # Initialize friction to zero everywhere (Fortran line 949).
@@ -319,26 +324,31 @@ function _calc_beta_aa_power_plastic!(beta_int::AbstractArray,
     xr, yr, wt, wt_tot = gq2d_nodes(2)
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        # Fortran neighbour clamps (line 1066, "infinite" BC).
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        # Topology-aware neighbour indices (Fortran line 955).
+        im1 = _neighbor_im1(i, Nx, Tx_top)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
+
+        # Yelmo face-array indices for Fortran "ux_b(k, j)" / "uy_b(i, k)".
+        # `_ip1_modular(k, Nx, Tx)` → `k+1` under Bounded, wrap under Periodic.
+        ux_im1 = _ip1_modular(im1, Nx, Tx_top)
+        ux_i   = _ip1_modular(i,   Nx, Tx_top)
+        uy_jm1 = _jp1_modular(jm1, Ny, Ty_top)
+        uy_j   = _jp1_modular(j,   Ny, Ty_top)
 
         if fi_int[i, j, 1] == 1.0
             # Fully ice-covered point.
 
             # Convert Fortran "ux_b(i, j)" reads to Yelmo.jl indices.
-            # Yelmo.jl: XFaceField value for cell (i, j) at [i+1, j, 1];
-            # YFaceField value for cell (i, j) at [i, j+1, 1].
             # ---- 4-corner staggering: c_bed (aa-grid) ----
             cb_ij = c_int[i, j, 1]
             if simple_stagger
                 # Use central c_bed for all nodes.
                 cbn = (cb_ij, cb_ij, cb_ij, cb_ij)
                 # Velocity components: simple central avg.
-                ux_aa = 0.5 * (ux_int[i+1, j, 1] + ux_int[im1+1, j, 1])
-                uy_aa = 0.5 * (uy_int[i, j+1, 1] + uy_int[i, jm1+1, 1])
+                ux_aa = 0.5 * (ux_int[ux_i, j, 1] + ux_int[ux_im1, j, 1])
+                uy_aa = 0.5 * (uy_int[i, uy_j, 1] + uy_int[i, uy_jm1, 1])
                 uxn = (ux_aa, ux_aa, ux_aa, ux_aa)
                 uyn = (uy_aa, uy_aa, uy_aa, uy_aa)
             else
@@ -350,19 +360,20 @@ function _calc_beta_aa_power_plastic!(beta_int::AbstractArray,
                     0.25 * (c_int[im1, j, 1] + c_int[i, j, 1] + c_int[im1, jp1, 1] + c_int[i, jp1, 1]),  # NW
                 )
                 # acx-stagger for ux_b (Fortran line 406-409). Yelmo
-                # ux array index = Fortran (i, j) + 1 in x.
+                # ux array slot for Fortran `ux(k, j)` is
+                # `_ip1_modular(k, Nx, Tx)`.
                 v_ab_ux = (
-                    0.5 * (ux_int[im1+1, jm1, 1] + ux_int[im1+1, j,   1]),  # SW: ux(im1, jm1) avg ux(im1, j)
-                    0.5 * (ux_int[i+1,   jm1, 1] + ux_int[i+1,   j,   1]),  # SE: ux(i,   jm1) avg ux(i,   j)
-                    0.5 * (ux_int[i+1,   j,   1] + ux_int[i+1,   jp1, 1]),  # NE: ux(i,   j  ) avg ux(i,   jp1)
-                    0.5 * (ux_int[im1+1, j,   1] + ux_int[im1+1, jp1, 1]),  # NW: ux(im1, j  ) avg ux(im1, jp1)
+                    0.5 * (ux_int[ux_im1, jm1, 1] + ux_int[ux_im1, j,   1]),  # SW: ux(im1, jm1) avg ux(im1, j)
+                    0.5 * (ux_int[ux_i,   jm1, 1] + ux_int[ux_i,   j,   1]),  # SE: ux(i,   jm1) avg ux(i,   j)
+                    0.5 * (ux_int[ux_i,   j,   1] + ux_int[ux_i,   jp1, 1]),  # NE: ux(i,   j  ) avg ux(i,   jp1)
+                    0.5 * (ux_int[ux_im1, j,   1] + ux_int[ux_im1, jp1, 1]),  # NW: ux(im1, j  ) avg ux(im1, jp1)
                 )
                 # acy-stagger for uy_b (Fortran line 434-437).
                 v_ab_uy = (
-                    0.5 * (uy_int[im1, jm1+1, 1] + uy_int[i,   jm1+1, 1]),  # SW
-                    0.5 * (uy_int[i,   jm1+1, 1] + uy_int[ip1, jm1+1, 1]),  # SE
-                    0.5 * (uy_int[i,   j+1,   1] + uy_int[ip1, j+1,   1]),  # NE
-                    0.5 * (uy_int[im1, j+1,   1] + uy_int[i,   j+1,   1]),  # NW
+                    0.5 * (uy_int[im1, uy_jm1, 1] + uy_int[i,   uy_jm1, 1]),  # SW
+                    0.5 * (uy_int[i,   uy_jm1, 1] + uy_int[ip1, uy_jm1, 1]),  # SE
+                    0.5 * (uy_int[i,   uy_j,   1] + uy_int[ip1, uy_j,   1]),  # NE
+                    0.5 * (uy_int[im1, uy_j,   1] + uy_int[i,   uy_j,   1]),  # NW
                 )
 
                 # Map corner values to the 4 quadrature nodes via the
@@ -408,23 +419,34 @@ function _calc_beta_aa_reg_coulomb!(beta_int::AbstractArray,
                                     ux_int::AbstractArray, uy_int::AbstractArray,
                                     c_int::AbstractArray, fi_int::AbstractArray,
                                     q::Float64, u_0::Float64,
-                                    simple_stagger::Bool)
+                                    simple_stagger::Bool,
+                                    Tx_top::Type{<:AbstractTopology},
+                                    Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     fill!(beta_int, 0.0)
     xr, yr, wt, wt_tot = gq2d_nodes(2)
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        # Topology-aware neighbour indices (Fortran line 1066, "infinite" BC
+        # under Bounded; periodic wrap under Periodic).
+        im1 = _neighbor_im1(i, Nx, Tx_top)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
+
+        # Yelmo face-array indices for Fortran "ux_b(k, j)" / "uy_b(i, k)".
+        ux_im1 = _ip1_modular(im1, Nx, Tx_top)
+        ux_i   = _ip1_modular(i,   Nx, Tx_top)
+        uy_jm1 = _jp1_modular(jm1, Ny, Ty_top)
+        uy_j   = _jp1_modular(j,   Ny, Ty_top)
+
         cb_ij = c_int[i, j, 1]
 
         if fi_int[i, j, 1] == 1.0
             if simple_stagger
                 cbn = (cb_ij, cb_ij, cb_ij, cb_ij)
-                ux_aa = 0.5 * (ux_int[i+1, j, 1] + ux_int[im1+1, j, 1])
-                uy_aa = 0.5 * (uy_int[i, j+1, 1] + uy_int[i, jm1+1, 1])
+                ux_aa = 0.5 * (ux_int[ux_i, j, 1] + ux_int[ux_im1, j, 1])
+                uy_aa = 0.5 * (uy_int[i, uy_j, 1] + uy_int[i, uy_jm1, 1])
                 uxn = (ux_aa, ux_aa, ux_aa, ux_aa)
                 uyn = (uy_aa, uy_aa, uy_aa, uy_aa)
             else
@@ -435,16 +457,16 @@ function _calc_beta_aa_reg_coulomb!(beta_int::AbstractArray,
                     0.25 * (c_int[im1, j, 1] + c_int[i, j, 1] + c_int[im1, jp1, 1] + c_int[i, jp1, 1]),
                 )
                 v_ab_ux = (
-                    0.5 * (ux_int[im1+1, jm1, 1] + ux_int[im1+1, j,   1]),
-                    0.5 * (ux_int[i+1,   jm1, 1] + ux_int[i+1,   j,   1]),
-                    0.5 * (ux_int[i+1,   j,   1] + ux_int[i+1,   jp1, 1]),
-                    0.5 * (ux_int[im1+1, j,   1] + ux_int[im1+1, jp1, 1]),
+                    0.5 * (ux_int[ux_im1, jm1, 1] + ux_int[ux_im1, j,   1]),
+                    0.5 * (ux_int[ux_i,   jm1, 1] + ux_int[ux_i,   j,   1]),
+                    0.5 * (ux_int[ux_i,   j,   1] + ux_int[ux_i,   jp1, 1]),
+                    0.5 * (ux_int[ux_im1, j,   1] + ux_int[ux_im1, jp1, 1]),
                 )
                 v_ab_uy = (
-                    0.5 * (uy_int[im1, jm1+1, 1] + uy_int[i,   jm1+1, 1]),
-                    0.5 * (uy_int[i,   jm1+1, 1] + uy_int[ip1, jm1+1, 1]),
-                    0.5 * (uy_int[i,   j+1,   1] + uy_int[ip1, j+1,   1]),
-                    0.5 * (uy_int[im1, j+1,   1] + uy_int[i,   j+1,   1]),
+                    0.5 * (uy_int[im1, uy_jm1, 1] + uy_int[i,   uy_jm1, 1]),
+                    0.5 * (uy_int[i,   uy_jm1, 1] + uy_int[ip1, uy_jm1, 1]),
+                    0.5 * (uy_int[i,   uy_j,   1] + uy_int[ip1, uy_j,   1]),
+                    0.5 * (uy_int[im1, uy_j,   1] + uy_int[i,   uy_j,   1]),
                 )
                 cbn = ntuple(p -> gq2d_interp_to_node(v_ab_c,  xr[p], yr[p]), 4)
                 uxn = ntuple(p -> gq2d_interp_to_node(v_ab_ux, xr[p], yr[p]), 4)
@@ -475,14 +497,18 @@ end
 # (not `nx`); we mirror that.
 function _scale_beta_gl_fraction!(beta_int::AbstractArray,
                                   fg_int::AbstractArray,
-                                  f_gl::Float64)
+                                  f_gl::Float64,
+                                  Tx_top::Type{<:AbstractTopology},
+                                  Ty_top::Type{<:AbstractTopology})
     (0.0 ≤ f_gl ≤ 1.0) || error("scale_beta_gl_fraction: f_gl must be in [0, 1]; got $f_gl")
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:(Nx - 1)
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        # Topology-aware neighbour indices: clamp under Bounded
+        # (Fortran "infinite" BC), wrap under Periodic.
+        im1 = _neighbor_im1(i, Nx, Tx_top)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         if fg_int[i, j, 1] > 0.0 &&
            (fg_int[im1, j, 1] == 0.0 || fg_int[ip1, j, 1] == 0.0 ||
             fg_int[i, jm1, 1] == 0.0 || fg_int[i, jp1, 1] == 0.0)
@@ -597,6 +623,9 @@ function calc_beta!(beta, c_bed, ux_b, uy_b,
     zb_int   = interior(z_bed)
     zsl_int  = interior(z_sl)
 
+    Tx_top = topology(beta.grid, 1)
+    Ty_top = topology(beta.grid, 2)
+
     # === Step 1 (Fortran line 393-437): beta_method dispatch ===
     if beta_method == -1
         # External — no-op.
@@ -605,26 +634,32 @@ function calc_beta!(beta, c_bed, ux_b, uy_b,
     elseif beta_method == 1
         # Linear law via power-plastic (q=1).
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     1.0, Float64(beta_u0), false)
+                                     1.0, Float64(beta_u0), false,
+                                     Tx_top, Ty_top)
     elseif beta_method == 2
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     Float64(beta_q), Float64(beta_u0), false)
+                                     Float64(beta_q), Float64(beta_u0), false,
+                                     Tx_top, Ty_top)
     elseif beta_method == 3
         _calc_beta_aa_reg_coulomb!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                   Float64(beta_q), Float64(beta_u0), false)
+                                   Float64(beta_q), Float64(beta_u0), false,
+                                   Tx_top, Ty_top)
     elseif beta_method == 4
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     Float64(beta_q), Float64(beta_u0), true)
+                                     Float64(beta_q), Float64(beta_u0), true,
+                                     Tx_top, Ty_top)
     elseif beta_method == 5
         _calc_beta_aa_reg_coulomb!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                   Float64(beta_q), Float64(beta_u0), true)
+                                   Float64(beta_q), Float64(beta_u0), true,
+                                   Tx_top, Ty_top)
     else
         error("calc_beta!: beta_method = $beta_method not recognised; expected -1..5.")
     end
 
     # === Step 2 (Fortran line 444-476): beta_gl_scale post-scaling ===
     if beta_gl_scale == 0
-        _scale_beta_gl_fraction!(beta_int, fg_int, Float64(beta_gl_f))
+        _scale_beta_gl_fraction!(beta_int, fg_int, Float64(beta_gl_f),
+                                 Tx_top, Ty_top)
     elseif beta_gl_scale == 1
         _scale_beta_gl_Hgrnd!(beta_int, Hg_int, Float64(H_grnd_lim))
     elseif beta_gl_scale == 2
@@ -705,8 +740,8 @@ function _stagger_beta_aa_mean!(beta_acx_int::AbstractArray, beta_acy_int::Abstr
     # Periodic.
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
 
@@ -759,8 +794,8 @@ function _stagger_beta_aa_gl_upstream!(beta_acx_int::AbstractArray,
                                        Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
         # acx-face (Fortran line 1385-1394).
@@ -793,8 +828,8 @@ function _stagger_beta_aa_gl_downstream!(beta_acx_int::AbstractArray,
                                          Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
@@ -827,8 +862,8 @@ function _stagger_beta_aa_gl_subgrid!(beta_acx_int::AbstractArray,
                                       Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
@@ -871,21 +906,27 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                                            Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        im1 = _neighbor_im1(i, Nx, Tx_top)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
+
+        # Yelmo face-array indices for Fortran "ux(k, j)" / "uy(i, k)".
+        ux_im1 = _ip1_modular(im1, Nx, Tx_top)
+        ux_i   = _ip1_modular(i,   Nx, Tx_top)
+        ux_ip1 = _ip1_modular(ip1, Nx, Tx_top)
+        uy_jm1 = _jp1_modular(jm1, Ny, Ty_top)
+        uy_j   = _jp1_modular(j,   Ny, Ty_top)
+        uy_jp1 = _jp1_modular(jp1, Ny, Ty_top)
 
         # acx (Fortran line 1597-1620).
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[ip1, j, 1] == 0.0
                 # Floating to the right (Fortran line 1600-1607).
-                # ux(im1, j) -> Yelmo idx [im1+1, j, 1]; ux(i, j) -> [i+1, j, 1];
-                # ux(ip1, j) -> [ip1+1, j, 1].
-                ux_aa_a = 0.5 * (ux_int[im1+1, j, 1] + ux_int[i+1, j, 1])
-                ux_aa_b = 0.5 * (ux_int[ip1+1, j, 1] + ux_int[i+1, j, 1])
+                ux_aa_a = 0.5 * (ux_int[ux_im1, j, 1] + ux_int[ux_i, j, 1])
+                ux_aa_b = 0.5 * (ux_int[ux_ip1, j, 1] + ux_int[ux_i, j, 1])
                 beta_acx_int[ip1f, j, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, j, 1], beta_int[ip1, j, 1],
                     ux_aa_a, ux_aa_b,
@@ -893,8 +934,8 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                     fg_acx_int[ip1f, j, 1])
             elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
                 # Floating to the left (Fortran line 1609-1617).
-                ux_aa_a = 0.5 * (ux_int[ip1+1, j, 1] + ux_int[i+1, j, 1])
-                ux_aa_b = 0.5 * (ux_int[im1+1, j, 1] + ux_int[i+1, j, 1])
+                ux_aa_a = 0.5 * (ux_int[ux_ip1, j, 1] + ux_int[ux_i, j, 1])
+                ux_aa_b = 0.5 * (ux_int[ux_im1, j, 1] + ux_int[ux_i, j, 1])
                 beta_acx_int[ip1f, j, 1] = _calc_beta_gl_flux_weight(
                     beta_int[ip1, j, 1], beta_int[i, j, 1],
                     ux_aa_a, ux_aa_b,
@@ -913,8 +954,8 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
         # corrected, follow it.
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[i, jp1, 1] == 0.0
-                uy_aa_a = 0.5 * (uy_int[i, jm1+1, 1] + uy_int[i, j+1, 1])
-                uy_aa_b = 0.5 * (uy_int[i, jp1+1, 1] + uy_int[i, j+1, 1])
+                uy_aa_a = 0.5 * (uy_int[i, uy_jm1, 1] + uy_int[i, uy_j, 1])
+                uy_aa_b = 0.5 * (uy_int[i, uy_jp1, 1] + uy_int[i, uy_j, 1])
                 beta_acy_int[i, jp1f, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, j, 1], beta_int[i, jp1, 1],
                     uy_aa_a, uy_aa_b,
@@ -923,8 +964,8 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
             elseif fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] > 0.0
                 # Follows fixed upstream Fortran (basal_dragging.f90:1635)
                 # — gating condition is `fg(i, jp1)`, not `fg(ip1, j)`.
-                uy_aa_a = 0.5 * (uy_int[i, jp1+1, 1] + uy_int[i, j+1, 1])
-                uy_aa_b = 0.5 * (uy_int[i, jm1+1, 1] + uy_int[i, j+1, 1])
+                uy_aa_a = 0.5 * (uy_int[i, uy_jp1, 1] + uy_int[i, uy_j, 1])
+                uy_aa_b = 0.5 * (uy_int[i, uy_jm1, 1] + uy_int[i, uy_j, 1])
                 beta_acy_int[i, jp1f, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, jp1, 1], beta_int[i, j, 1],
                     uy_aa_a, uy_aa_b,
