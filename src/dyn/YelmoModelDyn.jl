@@ -38,7 +38,7 @@ export dyn_step!,
        calc_driving_stress!, calc_driving_stress_gl!,
        calc_lateral_bc_stress_2D!,
        calc_ydyn_neff!,
-       calc_cb_ref!, calc_c_bed!,
+       calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
        calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
        gq2d_nodes
