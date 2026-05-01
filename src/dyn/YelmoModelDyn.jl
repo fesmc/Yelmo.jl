@@ -43,7 +43,8 @@ export dyn_step!,
        calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
-       stagger_visc_aa_ab!
+       stagger_visc_aa_ab!,
+       set_ssa_masks!, _assemble_ssa_matrix!
 
 include("topology_helpers.jl")
 include("quadrature.jl")
@@ -54,6 +55,7 @@ include("basal_dragging.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
 include("velocity_sia.jl")
+include("velocity_ssa.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
