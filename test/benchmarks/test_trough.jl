@@ -183,4 +183,18 @@ end
           "max(|uy|)=$(maximum(abs.(ref_uy_bar)))"
     # No hard assertion on the lockstep error — first observation.
     # Tolerance characterisation lands in a follow-up if needed.
+
+    # Write the post-dyn_step! YelmoModel state to a NetCDF for
+    # side-by-side inspection against the YelmoMirror reference fixture.
+    # Output goes to <worktree>/logs/ (gitignored) — not committed.
+    logs_dir = abspath(joinpath(@__DIR__, "..", "..", "logs"))
+    mkpath(logs_dir)
+    jl_out_path = joinpath(logs_dir, "trough_f17_jl_t1000.nc")
+    isfile(jl_out_path) && rm(jl_out_path)
+    out = init_output(y_file, jl_out_path;
+                      selection = OutputSelection(groups=[:tpo, :dyn, :thrm, :mat, :bnd]))
+    write_output!(out, y_file)
+    close(out)
+    @info "Trough YelmoModel post-dyn_step state written to $jl_out_path " *
+          "(compare against fixture at $fixture_path)"
 end
