@@ -10,13 +10,20 @@ Public surface: `dyn_step!(y::YelmoModel, dt)`, dispatched from
 `YelmoCore.step!(::YelmoModel, dt)` after `topo_step!` in the fixed
 phase order.
 
-Milestone 3a (current): scaffolding + pre-solver kinematics
-(driving stress, lateral BC stress) + post-solver underflow / flux
-/ magnitude / surface-slice / `duxydt` diagnostics. Solver dispatch
-only handles `solver = "fixed"` (no velocity update); SIA / SSA /
-hybrid / DIVA arrive in subsequent milestones (3c–3f). Velocity
+Milestone 3c (current): scaffolding + pre-solver kinematics +
+post-solver diagnostics (3a) + bed-roughness chain (3b) + SIA
+solver dispatch with the Option C vertical-stagger convention.
+Solver dispatch handles `solver = "fixed"` (no velocity update) and
+`solver = "sia"` (Option C SIA wrapper, `calc_velocity_sia!`); SSA /
+hybrid / DIVA arrive in subsequent milestones (3d–3f). Velocity
 Jacobian, vertical velocity `uz`, and strain-rate tensor land in
 milestone 3h.
+
+Vertical convention: 3D fields (`ux`, `ux_i`, `ATT`, `tau_xz`, …)
+are at Oceananigans `Center()` vertical staggering — interior layer
+midpoints, length `Nz_aa`. Bed (zeta = 0) and surface (zeta = 1)
+boundary values live in 2D fields (`ux_b`, `ux_s`,
+`scratch.ux_i_s`) per Option C.
 """
 module YelmoModelDyn
 
@@ -32,13 +39,15 @@ export dyn_step!,
        calc_lateral_bc_stress_2D!,
        calc_ydyn_neff!,
        calc_cb_ref!, calc_c_bed!,
-       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
+       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
+       calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
 
 include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")
 include("basal_dragging.jl")
 include("diagnostics.jl")
+include("velocity_sia.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
@@ -150,14 +159,46 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                 y.p.ytill.is_angle, y.p.ytill.cf_ref,
                 y.p.ydyn.T_frz, y.p.ydyn.scale_T)
 
-    # 6. Solver dispatch. 3a only handles "fixed".
+    # 6. Solver dispatch. 3c handles "fixed" and "sia".
     solver = y.p.ydyn.solver
     if solver == "fixed"
-        # No velocity update.
+        # No velocity update — Q5 locked-in: leave ux_i / uy_i /
+        # ux_i_bar / uy_i_bar at their loaded / previous values.
+    elseif solver == "sia"
+        # Option C SIA path. `znodes(y.gt, Center())` returns the
+        # Oceananigans Center z-positions (interior layer midpoints,
+        # length Nz_aa); bed (zeta = 0) and surface (zeta = 1) are
+        # NOT in this vector and are handled explicitly inside the
+        # wrapper / kernel.
+        zeta_c = znodes(y.gt, Center())
+        calc_velocity_sia!(y.dyn.ux_i, y.dyn.uy_i,
+                           y.dyn.ux_i_bar, y.dyn.uy_i_bar,
+                           y.dyn.scratch.ux_i_s, y.dyn.scratch.uy_i_s,
+                           y.dyn.scratch.sia_tau_xz,
+                           y.dyn.scratch.sia_tau_yz,
+                           y.tpo.H_ice, y.tpo.f_ice,
+                           y.dyn.taud_acx, y.dyn.taud_acy,
+                           y.mat.ATT,
+                           zeta_c,
+                           y.p.ymat.n_glen)
+
+        # Mirrors yelmo_dynamics.f90:413-421: with no SSA path, set
+        # basal sliding and basal stress to zero.
+        fill!(interior(y.dyn.ux_b),     0.0)
+        fill!(interior(y.dyn.uy_b),     0.0)
+        fill!(interior(y.dyn.taub_acx), 0.0)
+        fill!(interior(y.dyn.taub_acy), 0.0)
+
+        # Total velocity = SIA shear + basal sliding (= 0 here).
+        # Mirrors yelmo_dynamics.f90:436-443.
+        interior(y.dyn.ux)     .= interior(y.dyn.ux_i)
+        interior(y.dyn.uy)     .= interior(y.dyn.uy_i)
+        interior(y.dyn.ux_bar) .= interior(y.dyn.ux_i_bar)
+        interior(y.dyn.uy_bar) .= interior(y.dyn.uy_i_bar)
     else
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
-              "Milestone 3a only supports \"fixed\". " *
-              "SIA / SSA / hybrid / DIVA land in milestones 3c–3f.")
+              "Milestone 3c supports \"fixed\" and \"sia\". " *
+              "SSA / hybrid / DIVA land in milestones 3d–3f.")
     end
 
     # 7. Underflow clip on the velocity fields (matches Fortran's
@@ -192,11 +233,43 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #   uz_b  = uz(:, :, 1)
     #   ux_s  = ux(:, :, nz_aa);  uy_s  = uy(:, :, nz_aa)
     #   uz_s  = uz(:, :, nz_ac);  uxy_s = uxy(:, :, nz_aa)
+    #
+    # Under Option C, `interior(y.dyn.ux)[:, :, end]` is the topmost
+    # Center node at zeta_c[end], NOT the surface (zeta = 1). For
+    # `solver == "sia"` the wrapper computed the actual surface value
+    # into `y.dyn.scratch.ux_i_s`; the SIA branch below overwrites
+    # `ux_s` / `uy_s` with `ux_i_s + ux_b`. For `solver == "fixed"`
+    # the diagnostic here is incorrect (pre-existing limitation under
+    # Option C) — it reports the topmost Center value rather than the
+    # surface value.
+    # TODO: fix solver=="fixed" surface diagnostic when restart-loaded
+    # ux_s gets first-class storage (e.g. milestone 3g when therm
+    # wires temperature-dependent ATT).
     @views interior(y.dyn.uz_b)[:, :, 1]  .= interior(y.dyn.uz)[:, :, 1]
     @views interior(y.dyn.ux_s)[:, :, 1]  .= interior(y.dyn.ux)[:, :, end]
     @views interior(y.dyn.uy_s)[:, :, 1]  .= interior(y.dyn.uy)[:, :, end]
     @views interior(y.dyn.uz_s)[:, :, 1]  .= interior(y.dyn.uz)[:, :, end]
     @views interior(y.dyn.uxy_s)[:, :, 1] .= interior(y.dyn.uxy)[:, :, end]
+
+    # SIA branch correction: assemble ux_s = ux_i_s + ux_b (here ux_b
+    # is zero since SIA-only path zeros basal sliding above). The
+    # wrapper-produced ux_i_s is the actual surface value; the
+    # generic `interior(ux)[:, :, end]` line above wrote the topmost
+    # Center value, which differs under Option C.
+    if solver == "sia"
+        @views interior(y.dyn.ux_s)[:, :, 1] .=
+            interior(y.dyn.scratch.ux_i_s)[:, :, 1] .+
+            interior(y.dyn.ux_b)[:, :, 1]
+        @views interior(y.dyn.uy_s)[:, :, 1] .=
+            interior(y.dyn.scratch.uy_i_s)[:, :, 1] .+
+            interior(y.dyn.uy_b)[:, :, 1]
+        # Re-derive `uxy_s` from the corrected ux_s / uy_s (the
+        # generic `interior(uxy)[:, :, end]` written above used the
+        # topmost-Center magnitude, not the surface magnitude).
+        calc_magnitude_from_staggered!(y.dyn.uxy_s,
+                                       y.dyn.ux_s, y.dyn.uy_s,
+                                       y.tpo.f_ice)
+    end
 
     # Basal-to-surface velocity ratio.
     calc_vel_ratio!(y.dyn.f_vbvs, y.dyn.uxy_b, y.dyn.uxy_s)

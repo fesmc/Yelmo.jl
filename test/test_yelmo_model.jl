@@ -97,6 +97,66 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
         # Non-colliding names stay plain (regression guard).
         @test haskey(ds, "z_bed")        # bnd-only
         @test haskey(ds, "ux_bar")       # dyn-only
+
+        # Default behavior: scratch fields (e.g. dyn.scratch.sia_tau_xz)
+        # are NOT serialized. The variable must not exist in the file.
+        @test !haskey(ds, "dyn_scratch_sia_tau_xz")
+        @test !haskey(ds, "dyn_scratch_sia_tau_yz")
+    finally
+        close(ds)
+    end
+end
+
+# ----------------------------------------------------------------------
+# Regression test for `init_output(...; include_scratch=true)`.
+#
+# Build a YelmoModel from the same restart, fill the SIA scratch buffer
+# with a recognisable pattern, write a single time slice with
+# `include_scratch=true`, and verify the NetCDF carries the
+# `dyn_scratch_sia_tau_xz` variable with the expected values.
+# ----------------------------------------------------------------------
+@testset "init_output: include_scratch=true serializes dyn.scratch" begin
+    @assert isfile(RESTART_PATH)
+
+    rundir   = mktempdir(; prefix="yelmo_model_scratch_")
+    out_path = joinpath(rundir, "yelmo_scratch.nc")
+
+    p = YelmoModelParameters("ymodel-scratch";
+                             ydyn = ydyn_params(solver="fixed"))
+
+    y = YelmoModel(
+        RESTART_PATH, 0.0;
+        rundir = rundir,
+        alias  = "ymodel-scratch",
+        p      = p,
+        groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+        strict = false,
+    )
+
+    init_state!(y, 0.0)
+
+    # Pattern fill the scratch buffer with a constant we can read back
+    # through the NetCDF. (Only sia_tau_xz; sia_tau_yz left as zeros.)
+    txz = interior(y.dyn.scratch.sia_tau_xz)
+    fill!(txz, -42.0)
+
+    out = init_output(y, out_path;
+                      selection = OutputSelection(groups=[:dyn]),
+                      include_scratch = true)
+    write_output!(out, y)
+    close(out)
+
+    ds = NCDataset(out_path)
+    try
+        @test haskey(ds, "dyn_scratch_sia_tau_xz")
+        @test haskey(ds, "dyn_scratch_sia_tau_yz")
+
+        # Pattern survives the round-trip (within Float32 cast).
+        slab = ds["dyn_scratch_sia_tau_xz"][:, :, :, 1]
+        @test all(==(Float32(-42.0)), slab)
+
+        # Sanity: regular dyn fields still get written.
+        @test haskey(ds, "ux_bar")
     finally
         close(ds)
     end

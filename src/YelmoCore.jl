@@ -529,6 +529,69 @@ end
 
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
 
+# Load the per-group `VariableMeta` tables from `src/variables/model/`.
+# Shared by every `YelmoModel` constructor so the schema lookup is in one
+# place; returns a NamedTuple with one entry per component group.
+function _load_yelmo_variable_meta()
+    vdir = joinpath(@__DIR__, "variables", "model")
+    return (
+        bnd  = parse_variable_table(joinpath(vdir, "yelmo-variables-ybound.md"), "bnd"),
+        dta  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydata.md"),  "dta"),
+        dyn  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydyn.md"),   "dyn"),
+        mat  = parse_variable_table(joinpath(vdir, "yelmo-variables-ymat.md"),   "mat"),
+        thrm = parse_variable_table(joinpath(vdir, "yelmo-variables-ytherm.md"), "thrm"),
+        tpo  = parse_variable_table(joinpath(vdir, "yelmo-variables-ytopo.md"),  "tpo"),
+    )
+end
+
+# Build the six component-group NamedTuples (`bnd`, `dta`, `dyn`, `mat`,
+# `thrm`, `tpo`) for a `YelmoModel`, including:
+#
+#   - per-field allocation via `_alloc_group`,
+#   - `dyn.scratch` substruct holding SIA-only scratch buffers (see
+#     `src/dyn/velocity_sia.jl`), and
+#   - replacement of `tpo.H_ice` with a Dirichlet-zero `CenterField`
+#     so the upwind advection kernels see `H_ice = 0` on the domain
+#     edges via Oceananigans' standard halo machinery.
+#
+# Both the file-based `YelmoModel(restart_file, time; …)` constructor and
+# the in-memory `YelmoModel(::AbstractBenchmark, t; …)` constructor in
+# `test/benchmarks/benchmarks.jl` go through this helper, so the
+# allocation is identical regardless of whether the field values come
+# from a NetCDF file or from a benchmark's analytical state.
+function _alloc_yelmo_groups(g, gt, gr, v_meta)
+    bnd  = _alloc_group(v_meta.bnd,  g, gt, gr)
+    dta  = _alloc_group(v_meta.dta,  g, gt, gr)
+    dyn  = _alloc_group(v_meta.dyn,  g, gt, gr)
+    mat  = _alloc_group(v_meta.mat,  g, gt, gr)
+    thrm = _alloc_group(v_meta.thrm, g, gt, gr)
+    tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
+
+    # SIA-only solver scratch buffers; not in the dyn schema because
+    # they are recomputed every `dyn_step!` and not part of the model
+    # state. Exposed as `y.dyn.scratch.<name>`. See
+    # `src/dyn/velocity_sia.jl`.
+    #
+    #   - `sia_tau_xz` / `sia_tau_yz` (3D, on `gt`): per-layer SIA
+    #     vertical shear stresses at Center positions.
+    #   - `ux_i_s` / `uy_i_s` (2D, on `g`): SIA shear velocity at the
+    #     ice surface (zeta = 1), computed by the wrapper since the
+    #     3D `ux_i` / `uy_i` Center stagger does NOT include the
+    #     surface endpoint under Option C. Read by `dyn_step!` to
+    #     assemble `ux_s = ux_i_s + ux_b` (and analogously for uy_s).
+    sia_scratch = (sia_tau_xz = XFaceField(gt), sia_tau_yz = YFaceField(gt),
+                   ux_i_s     = XFaceField(g),  uy_i_s     = YFaceField(g))
+    dyn = merge(dyn, (scratch = sia_scratch,))
+
+    # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
+    # boundary conditions on the domain edge. The upwind advection
+    # operator reads these via Oceananigans' standard halo machinery
+    # without per-cell branching in the kernel.
+    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = dirichlet_2d_field(g, 0.0),)))
+
+    return bnd, dta, dyn, mat, thrm, tpo
+end
+
 """
     YelmoModel(restart_file, time; alias, rundir, p, c, groups, strict)
 
@@ -564,28 +627,8 @@ function YelmoModel(restart_file::String, time::Float64;
     gt === nothing && error("Restart file $(restart_file) has no ice vertical axis; cannot build ice grid.")
     gr === nothing && error("Restart file $(restart_file) has no rock vertical axis; cannot build rock grid.")
 
-    vdir = joinpath(@__DIR__, "variables", "model")
-    v_meta = (
-        bnd  = parse_variable_table(joinpath(vdir, "yelmo-variables-ybound.md"), "bnd"),
-        dta  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydata.md"),  "dta"),
-        dyn  = parse_variable_table(joinpath(vdir, "yelmo-variables-ydyn.md"),   "dyn"),
-        mat  = parse_variable_table(joinpath(vdir, "yelmo-variables-ymat.md"),   "mat"),
-        thrm = parse_variable_table(joinpath(vdir, "yelmo-variables-ytherm.md"), "thrm"),
-        tpo  = parse_variable_table(joinpath(vdir, "yelmo-variables-ytopo.md"),  "tpo"),
-    )
-
-    bnd  = _alloc_group(v_meta.bnd,  g, gt, gr)
-    dta  = _alloc_group(v_meta.dta,  g, gt, gr)
-    dyn  = _alloc_group(v_meta.dyn,  g, gt, gr)
-    mat  = _alloc_group(v_meta.mat,  g, gt, gr)
-    thrm = _alloc_group(v_meta.thrm, g, gt, gr)
-    tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
-
-    # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
-    # boundary conditions on the domain edge. The upwind advection
-    # operator reads these via Oceananigans' standard halo machinery
-    # without per-cell branching in the kernel.
-    haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = dirichlet_2d_field(g, 0.0),)))
+    v_meta = _load_yelmo_variable_meta()
+    bnd, dta, dyn, mat, thrm, tpo = _alloc_yelmo_groups(g, gt, gr, v_meta)
 
     y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
 
@@ -830,6 +873,15 @@ function compare_state(a::AbstractYelmoModel, b::AbstractYelmoModel;
                 n_skipped += 1
                 continue
             end
+            # Skip the scratch substruct explicitly, plus any other
+            # non-Field entries defensively. The scratch sub-NamedTuple
+            # under `dyn.scratch` holds SIA solver buffers (recomputed
+            # every step, not part of model state) — exclude by name
+            # first, then fall back to a type check that catches any
+            # future non-Field entry under another name.
+            k === :scratch && continue
+            a_grp[k] isa AbstractField || (n_skipped += 1; continue)
+            b_grp[k] isa AbstractField || (n_skipped += 1; continue)
             af = interior(a_grp[k])
             bf = interior(b_grp[k])
             if size(af) != size(bf)

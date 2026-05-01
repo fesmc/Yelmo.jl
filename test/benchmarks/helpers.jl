@@ -21,7 +21,10 @@
 # refreshes them locally and requires `libyelmo_c_api.so` to be present.
 #
 # Halfar / Bueler analytical solutions live in `bueler.jl` (included
-# below), ported from `yelmo/tests/ice_benchmarks.f90`.
+# below), ported from `yelmo/tests/ice_benchmarks.f90`. The
+# `AbstractBenchmark` interface contract (and the in-memory
+# `YelmoModel(::AbstractBenchmark, t)` constructor) lives in
+# `benchmarks.jl`.
 # ----------------------------------------------------------------------
 
 module YelmoBenchmarks
@@ -29,12 +32,13 @@ module YelmoBenchmarks
 using Yelmo
 using Oceananigans: interior
 
+include("benchmarks.jl")
 include("bueler.jl")
-include("analytical.jl")
 
-export BenchmarkSpec, AnalyticalSpec
+export BenchmarkSpec
+export AbstractBenchmark, BuelerBenchmark
 export run_mirror_benchmark!, load_fixture
-export write_analytical_fixture!, load_analytical_fixture
+export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma
 
 # Registry callback signature: `(ymirror, time)` → mutate `ymirror`
