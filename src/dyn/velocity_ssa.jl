@@ -55,7 +55,7 @@ using AlgebraicMultigrid: smoothed_aggregation, aspreconditioner,
                           GaussSeidel, Jacobi
 
 export set_ssa_masks!, _assemble_ssa_matrix!,
-       _solve_ssa_linear!,
+       _solve_ssa_linear!, calc_velocity_ssa!,
        picard_relax_visc!, picard_relax_vel!,
        picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
        set_inactive_margins!, calc_basal_stress!
@@ -1246,4 +1246,270 @@ function calc_basal_stress!(taub_acx, taub_acy, beta_acx, beta_acy, ux_b, uy_b)
         Ty[k] = abs(v) < tol ? 0.0 : v
     end
     return taub_acx, taub_acy
+end
+
+# ----------------------------------------------------------------------
+# calc_velocity_ssa! — SSA Picard driver (PR-B commit 4)
+#
+# Faithful port of /Users/alrobi001/models/yelmo/src/physics/
+# velocity_ssa.f90:60-335 calc_velocity_ssa.
+#
+# Outer Picard iteration:
+#
+#   1. Snapshot previous (visc_eff, ux_b, uy_b) for relaxation +
+#      convergence check.
+#   2. Update 3D effective viscosity from current ux_b/uy_b. Two
+#      paths per `visc_method`:
+#        - visc_method == 0: constant viscosity (uses ydyn.visc_const).
+#        - visc_method == 1: gauss-quadrature node-stencil (calc_visc_eff_3D_nodes).
+#        - visc_method == 2: aa-only stencil (calc_visc_eff_3D_aa).
+#   3. Apply log-space Picard relaxation to viscosity.
+#   4. Update depth-integrated viscosity visc_eff_int.
+#   5. Update beta (basal drag) from current ux_b/uy_b + c_bed.
+#   6. Stagger beta to face-staggered beta_acx/beta_acy.
+#   7. Stagger viscosity to ab-corner (visc_ab cache).
+#   8. Assemble SSA matrix → COO triplets + RHS in dyn.scratch.
+#   9. Build SparseMatrixCSC and run BiCGStab+AMG.
+#  10. Unpack solution back into ux_b, uy_b face slots.
+#  11. Apply linear Picard velocity relaxation.
+#  12. Set inactive margins (zero velocity at fully-empty faces).
+#  13. Compute L2 residual; record in scratch; check convergence.
+#
+# After loop: compute basal stress tau_b = beta · u_b.
+#
+# The Fortran driver also has an adaptive corr_theta block that's
+# disabled (`if (.FALSE.)`); we mirror that omission and use a
+# constant relaxation parameter `ssa.picard_relax`.
+# ----------------------------------------------------------------------
+
+"""
+    calc_velocity_ssa!(y::YelmoModel) -> y
+
+Run the SSA Picard iteration on `y`. Updates `y.dyn.ux_b`, `y.dyn.uy_b`,
+`y.dyn.taub_acx`, `y.dyn.taub_acy`, `y.dyn.visc_eff`,
+`y.dyn.visc_eff_int`, `y.dyn.beta`, `y.dyn.beta_acx`, `y.dyn.beta_acy`,
+plus diagnostic scratch fields (`scratch.ssa_residuals`,
+`scratch.ssa_iter_now`, `scratch.ssa_picard_*_nm1`).
+
+Reads from `y.p.ydyn.ssa_solver` (the `SSASolver` object) for all
+solver knobs. Other inputs come from the prior pre-solver kinematic
+calls in `dyn_step!` (driving stress, lateral BC stress, masks, c_bed).
+
+Mirrors `velocity_ssa.f90:60 calc_velocity_ssa`. Uses the
+`(Bounded, Bounded, Flat)` and `(Bounded, Periodic, Flat)` topologies
+supported by `_assemble_ssa_matrix!` (PR-A.2).
+"""
+function calc_velocity_ssa!(y)
+    p_ydyn = y.p.ydyn
+    p_ymat = y.p.ymat
+    ssa    = p_ydyn.ssa_solver
+
+    Nx = size(y.g, 1)
+    Ny = size(y.g, 2)
+    Nz = size(interior(y.dyn.visc_eff), 3)
+
+    dx_g = y.g.Δxᶜᵃᵃ
+    dy_g = y.g.Δyᵃᶜᵃ
+    dx = abs(Float64(dx_g isa Number ? dx_g : error("calc_velocity_ssa!: stretched x-grid not supported.")))
+    dy = abs(Float64(dy_g isa Number ? dy_g : error("calc_velocity_ssa!: stretched y-grid not supported.")))
+
+    sc = y.dyn.scratch
+
+    # 1. Compute SSA masks for this dyn step.
+    set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
+                   y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
+                   y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
+                   use_ssa = true,
+                   lateral_bc = p_ydyn.ssa_lat_bc)
+
+    # 2. Snapshot initial state for the post-iter convergence check.
+    interior(sc.ssa_picard_ux_b_nm1) .= interior(y.dyn.ux_b)
+    interior(sc.ssa_picard_uy_b_nm1) .= interior(y.dyn.uy_b)
+    interior(sc.ssa_picard_visc_eff_nm1) .= interior(y.dyn.visc_eff)
+
+    # Reset error-diagnostic scratches (Fortran lines 152-153).
+    fill!(interior(y.dyn.ssa_err_acx), 1.0)
+    fill!(interior(y.dyn.ssa_err_acy), 1.0)
+
+    # Vertical zeta_aa for visc_eff (Center-staggered). Used by
+    # calc_visc_eff_3D_*.
+    zeta_c = znodes(y.gt, Center())
+
+    # Pre-step margin setting (Fortran line 160).
+    set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice)
+
+    converged = false
+    iter_now = 0
+    n_resid_max = length(sc.ssa_residuals)
+
+    for iter in 1:ssa.picard_iter_max
+        iter_now = iter
+
+        # Snapshot n minus 1 state before computing new viscosity / vel.
+        interior(sc.ssa_picard_visc_eff_nm1) .= interior(y.dyn.visc_eff)
+        interior(sc.ssa_picard_ux_b_nm1)     .= interior(y.dyn.ux_b)
+        interior(sc.ssa_picard_uy_b_nm1)     .= interior(y.dyn.uy_b)
+
+        # ---- Step 1: viscosity update (Fortran lines 182-209). ----
+        if p_ydyn.visc_method == 0
+            fill!(interior(y.dyn.visc_eff), Float64(p_ydyn.visc_const))
+        elseif p_ydyn.visc_method == 1
+            calc_visc_eff_3D_nodes!(y.dyn.visc_eff, y.dyn.ux_b, y.dyn.uy_b,
+                                    y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                    zeta_c, dx, dy,
+                                    p_ymat.n_glen, p_ydyn.eps_0)
+        elseif p_ydyn.visc_method == 2
+            calc_visc_eff_3D_aa!(y.dyn.visc_eff, y.dyn.ux_b, y.dyn.uy_b,
+                                 y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                 zeta_c, dx, dy,
+                                 p_ymat.n_glen, p_ydyn.eps_0)
+        else
+            error("calc_velocity_ssa!: visc_method=$(p_ydyn.visc_method) not supported.")
+        end
+
+        # ---- Step 2: log-space Picard relaxation on viscosity. ----
+        # Fortran line 212. Skip on the very first iteration since the
+        # nm1 snapshot equals the n value (pre-iteration state).
+        if iter > 1
+            picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1,
+                               ssa.picard_relax)
+        end
+
+        # ---- Step 3: depth-integrated viscosity. ----
+        calc_visc_eff_int!(y.dyn.visc_eff_int, y.dyn.visc_eff,
+                           y.tpo.H_ice, y.tpo.f_ice, zeta_c)
+
+        # ---- Step 4: beta on aa-cells (uses current ux_b/uy_b/c_bed). ----
+        calc_beta!(y.dyn.beta, y.dyn.c_bed, y.dyn.ux_b, y.dyn.uy_b,
+                   y.tpo.H_ice, y.tpo.f_ice, y.tpo.H_grnd, y.tpo.f_grnd,
+                   y.bnd.z_bed, y.bnd.z_sl;
+                   beta_method  = p_ydyn.beta_method,
+                   beta_const   = p_ydyn.beta_const,
+                   beta_q       = p_ydyn.beta_q,
+                   beta_u0      = p_ydyn.beta_u0,
+                   beta_gl_scale = p_ydyn.beta_gl_scale,
+                   beta_gl_f    = p_ydyn.beta_gl_f,
+                   H_grnd_lim   = p_ydyn.H_grnd_lim,
+                   beta_min     = p_ydyn.beta_min,
+                   rho_ice      = y.c.rho_ice, rho_sw = y.c.rho_sw)
+
+        # ---- Step 5: stagger beta to faces. ----
+        stagger_beta!(y.dyn.beta_acx, y.dyn.beta_acy, y.dyn.beta,
+                      y.tpo.H_ice, y.tpo.f_ice, y.dyn.ux_b, y.dyn.uy_b,
+                      y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy;
+                      beta_gl_stag = p_ydyn.beta_gl_stag,
+                      beta_min     = p_ydyn.beta_min)
+
+        # ---- Step 6: stagger viscosity to ab-corner cache. ----
+        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
+                            y.tpo.H_ice, y.tpo.f_ice)
+
+        # ---- Step 7: assemble SSA matrix into COO buffers + RHS. ----
+        _assemble_ssa_matrix!(
+            sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+            sc.ssa_b_vec, sc.ssa_nnz,
+            y.dyn.ux_b, y.dyn.uy_b,
+            y.dyn.beta_acx, y.dyn.beta_acy,
+            y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
+            y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
+            y.tpo.H_ice, y.tpo.f_ice,
+            y.dyn.taud_acx, y.dyn.taud_acy,
+            y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+            dx, dy, p_ydyn.beta_min;
+            boundaries = _ssa_boundaries_symbol(y),
+            lateral_bc = p_ydyn.ssa_lat_bc,
+        )
+
+        # ---- Step 8: build sparse matrix, solve. ----
+        nnz = sc.ssa_nnz[]
+        I_view = view(sc.ssa_I_idx, 1:nnz)
+        J_view = view(sc.ssa_J_idx, 1:nnz)
+        V_view = view(sc.ssa_vals,  1:nnz)
+        N_rows = 2 * Nx * Ny
+        A = sparse(I_view, J_view, V_view, N_rows, N_rows)
+        x = _solve_ssa_linear!(sc, A, sc.ssa_b_vec, ssa)
+
+        # ---- Step 9: unpack x → ux_b, uy_b face slots. ----
+        Tx_top = topology(y.dyn.ux_b.grid, 1)
+        Ty_top = topology(y.dyn.uy_b.grid, 2)
+        Ux = interior(y.dyn.ux_b)
+        Uy = interior(y.dyn.uy_b)
+        @inbounds for j in 1:Ny, i in 1:Nx
+            row_ux = _row_ux(i, j, Nx)
+            row_uy = _row_uy(i, j, Nx)
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
+            Ux[ip1f, j, 1] = x[row_ux]
+            Uy[i, jp1f, 1] = x[row_uy]
+        end
+        # Replicate the leading face slot under Bounded for readers that
+        # use slot-1 (matches calc_velocity_sia! convention).
+        if Tx_top === Bounded
+            @views Ux[1, :, :] .= Ux[2, :, :]
+        end
+        if Ty_top === Bounded
+            @views Uy[:, 1, :] .= Uy[:, 2, :]
+        end
+
+        # ---- Step 10: linear Picard velocity relaxation. ----
+        if iter > 1
+            picard_relax_vel!(y.dyn.ux_b, y.dyn.uy_b,
+                              sc.ssa_picard_ux_b_nm1, sc.ssa_picard_uy_b_nm1,
+                              ssa.picard_relax)
+        end
+
+        # ---- Step 11: zero out fully-empty-margin face velocities. ----
+        set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice)
+
+        # ---- Step 12: convergence check (L2 relative residual). ----
+        l2_resid = picard_calc_convergence_l2(
+            interior(y.dyn.ux_b), interior(sc.ssa_picard_ux_b_nm1),
+            interior(y.dyn.uy_b), interior(sc.ssa_picard_uy_b_nm1))
+        if iter ≤ n_resid_max
+            sc.ssa_residuals[iter] = l2_resid
+        end
+
+        # ---- L1-rel diagnostic matrix (Fortran line 297). ----
+        picard_calc_convergence_l1rel_matrix!(
+            interior(y.dyn.ssa_err_acx), interior(y.dyn.ssa_err_acy),
+            interior(y.dyn.ux_b), interior(y.dyn.uy_b),
+            interior(sc.ssa_picard_ux_b_nm1), interior(sc.ssa_picard_uy_b_nm1))
+
+        if l2_resid < ssa.picard_tol
+            converged = true
+            break
+        end
+    end
+
+    sc.ssa_iter_now[] = iter_now
+
+    if !converged
+        @warn "SSA Picard did not converge" iter = iter_now resid = (iter_now > 0 && iter_now <= n_resid_max ? sc.ssa_residuals[iter_now] : NaN) tol = ssa.picard_tol
+    end
+
+    # Post-loop: basal stress (Fortran line 325).
+    calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
+                       y.dyn.beta_acx, y.dyn.beta_acy,
+                       y.dyn.ux_b, y.dyn.uy_b)
+
+    return y
+end
+
+# Resolve the boundaries Symbol used by `_assemble_ssa_matrix!` from
+# the model's grid topology. We don't have direct access to the
+# `boundaries` namelist value; map from grid topology pair instead.
+function _ssa_boundaries_symbol(y)
+    Tx = topology(y.g, 1)
+    Ty = topology(y.g, 2)
+    if Tx === Bounded && Ty === Bounded
+        return :bounded
+    elseif Tx === Bounded && Ty === Periodic
+        return :periodic_y
+    elseif Tx === Periodic && Ty === Bounded
+        return :periodic_x
+    elseif Tx === Periodic && Ty === Periodic
+        return :periodic
+    else
+        error("_ssa_boundaries_symbol: unsupported topology pair ($(Tx), $(Ty)).")
+    end
 end

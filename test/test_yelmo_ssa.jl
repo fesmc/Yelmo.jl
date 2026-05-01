@@ -33,6 +33,7 @@ using Oceananigans: interior
 using SparseArrays
 using LinearAlgebra
 using Krylov: BicgstabWorkspace
+using NCDatasets
 
 _bounded_2d(Nx, Ny; dx=1.0) = RectilinearGrid(size=(Nx, Ny),
                                                 x=(0.0, Nx*dx), y=(0.0, Ny*dx),
@@ -248,4 +249,186 @@ end
     fill!(interior(ux), 1e-9)
     calc_basal_stress!(tx, ty, bx, by, ux, uy)
     @test maximum(abs.(interior(tx))) == 0.0
+end
+
+# ======================================================================
+# Test set 3 — Plug-flow analytical SSA via `dyn_step!`
+# ======================================================================
+#
+# Plug-flow regime: uniform slab on a uniform slope, all grounded,
+# all ice-covered, β = constant, taud = constant body force, periodic-y
+# boundaries (so no y-direction gradient). The SSA momentum equation
+# collapses (no spatial variation in u) to:
+#
+#     β · u = τ_d   →   u = τ_d / β
+#
+# Numerically we expect this on every interior face within the linear
+# solve tolerance, and Picard converges in 1 iteration (constant
+# viscosity, linear β).
+
+using Yelmo: YelmoConstants
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+                            yneff_params, ytill_params
+
+# Write a minimal SSA-friendly restart fixture: uniform slab,
+# all-grounded, taud_acx prescribed.
+function _write_ssa_slab_fixture!(path::AbstractString;
+                                  Nx::Int, Ny::Int, dx::Float64,
+                                  H_const::Float64, slope_x::Float64,
+                                  Nz::Int)
+    xc_m = collect(range(0.5*dx, (Nx - 0.5)*dx; length=Nx))
+    yc_m = collect(range(0.5*dx, (Ny - 0.5)*dx; length=Ny))
+    zeta_ac = collect(range(0.0, 1.0; length=Nz + 1))
+    zeta_rock_ac = collect(range(0.0, 1.0; length=5))
+
+    NCDataset(path, "c") do ds
+        defDim(ds, "xc",           Nx)
+        defDim(ds, "yc",           Ny)
+        defDim(ds, "zeta",         Nz)
+        defDim(ds, "zeta_ac",      Nz + 1)
+        defDim(ds, "zeta_rock",    length(zeta_rock_ac) - 1)
+        defDim(ds, "zeta_rock_ac", length(zeta_rock_ac))
+
+        xv = defVar(ds, "xc", Float64, ("xc",))
+        xv[:] = xc_m ./ 1e3
+        xv.attrib["units"] = "km"
+        yv = defVar(ds, "yc", Float64, ("yc",))
+        yv[:] = yc_m ./ 1e3
+        yv.attrib["units"] = "km"
+
+        zc = defVar(ds, "zeta", Float64, ("zeta",))
+        zc[:] = 0.5 .* (zeta_ac[1:end-1] .+ zeta_ac[2:end])
+        zc.attrib["units"] = "1"
+        zac = defVar(ds, "zeta_ac", Float64, ("zeta_ac",))
+        zac[:] = zeta_ac
+        zac.attrib["units"] = "1"
+        zrc = defVar(ds, "zeta_rock", Float64, ("zeta_rock",))
+        zrc[:] = 0.5 .* (zeta_rock_ac[1:end-1] .+ zeta_rock_ac[2:end])
+        zrc.attrib["units"] = "1"
+        zrac = defVar(ds, "zeta_rock_ac", Float64, ("zeta_rock_ac",))
+        zrac[:] = zeta_rock_ac
+        zrac.attrib["units"] = "1"
+
+        H     = fill(H_const, Nx, Ny)
+        z_bed = zeros(Nx, Ny)
+        f_ice = ones(Nx, Ny)
+        z_sl  = fill(-1e6, Nx, Ny)
+        for j in 1:Ny, i in 1:Nx
+            z_bed[i, j] = -slope_x * xc_m[i]
+        end
+
+        for (name, arr) in (("H_ice", H), ("z_bed", z_bed),
+                            ("f_ice", f_ice), ("z_sl", z_sl))
+            v = defVar(ds, name, Float64, ("xc", "yc"))
+            v[:, :] = arr
+        end
+    end
+    return path
+end
+
+# Build a YelmoModel for the SSA plug-flow setup, run one dyn_step!,
+# return the populated model. `boundaries` controls the topology.
+function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
+                            H::Float64, slope_x::Float64, Nz::Int,
+                            beta_const::Float64,
+                            boundaries::Symbol = :periodic_y,
+                            ssa_tol::Float64 = 1e-2,
+                            picard_iter_max::Int = 50)
+    tdir = mktempdir(; prefix="ssa_plug_")
+    path = joinpath(tdir, "ssa_restart.nc")
+    _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
+                             H_const=H, slope_x=slope_x, Nz=Nz)
+
+    p = YelmoModelParameters("slab-ssa";
+        ydyn = ydyn_params(
+            solver         = "ssa",
+            visc_method    = 0,                # constant viscosity
+            visc_const     = 1e7,              # arbitrary; cancels in plug flow
+            beta_method    = 0,                # imposed constant beta_const
+            beta_const     = beta_const,
+            beta_gl_scale  = 0,                # no GL scaling
+            beta_min       = 0.0,
+            ssa_lat_bc     = "none",           # no calving fronts
+            ssa_solver     = SSASolver(rtol = 1e-10, itmax = 200,
+                                        picard_tol = ssa_tol,
+                                        picard_iter_max = picard_iter_max),
+        ),
+        yneff = yneff_params(method = -1, const_ = 1e7),  # external N_eff
+        ytill = ytill_params(method = -1),               # external cb_ref
+        ymat  = ymat_params(n_glen = 3.0),
+    )
+    y = YelmoModel(path, 0.0;
+                   rundir = tdir,
+                   alias  = "slab-ssa",
+                   p      = p,
+                   boundaries = boundaries,
+                   strict = false)
+
+    # Uniform ATT (used only if visc_method ≠ 0, but harmless).
+    fill!(interior(y.mat.ATT), 1e-16)
+    fill!(interior(y.dyn.cb_ref), 1.0)
+    fill!(interior(y.dyn.N_eff), 1e7)
+
+    # Refresh tpo diagnostics.
+    Yelmo.update_diagnostics!(y)
+
+    Yelmo.YelmoModelDyn.dyn_step!(y, 1.0)
+
+    return y
+end
+
+@testset "dyn_step! solver=\"ssa\" — plug flow on uniform slab" begin
+    # Geometry: 7×3 cells, dx = 1 km, H = 1000 m, slope = 0.001.
+    # Periodic-y removes y-direction gradients; free-slip x boundary
+    # allows interior plug flow.
+    Nx, Ny  = 7, 3
+    dx      = 1000.0
+    H       = 1000.0
+    slope_x = 0.001
+    rho_ice = 910.0
+    g_acc   = 9.81
+    # taud_acx = ρ g H · ∂z_s/∂x in Fortran convention. With z_bed =
+    # -slope_x · x and H constant, ∂z_s/∂x = -slope_x, so taud < 0.
+    # The Fortran SSA matrix has `-beta · u + lapl(u) = taud` on the
+    # diagonal: with lapl(u) = 0 in plug flow, `u = -taud/beta`.
+    expected_taud = rho_ice * g_acc * H * (-slope_x)   # [Pa]  (≈ -8927)
+    beta = 1e9                                          # [Pa·yr/m]
+    expected_ux = -expected_taud / beta                 # [m/yr] (positive: ice flows downhill)
+
+    y = _run_ssa_plugflow(; Nx=Nx, Ny=Ny, dx=dx, H=H,
+                           slope_x=slope_x, Nz=4,
+                           beta_const = beta,
+                           boundaries = :periodic_y,
+                           ssa_tol = 1e-8,
+                           picard_iter_max = 100)
+
+    Ux = interior(y.dyn.ux_b)
+    Uy = interior(y.dyn.uy_b)
+
+    # Check interior x-faces at the centre of the domain (away from
+    # the free-slip x boundaries). Slot [i+1, j, 1] for face east of
+    # cell (i, j). Skip i=1 and i=Nx (boundary-touching) and the
+    # leading-replicated slot [1, :, :].
+    # `inner_i_face` ranges over slots [4:6, :, 1] = Fortran ux(3..5, :)
+    # — well inside the domain.
+    inner_xfaces = Ux[4:6, :, 1]
+    @test all(isfinite, inner_xfaces)
+    @test all(abs.(inner_xfaces .- expected_ux) ./ abs(expected_ux) .< 1e-6)
+
+    # uy_b should be ≈ 0 (no y-direction forcing).
+    # Loose tol because the Picard relaxation can leave ~1e-8 residual
+    # in y at the linear-solve tolerance.
+    @test maximum(abs.(Uy)) < 1e-7
+
+    # Picard converged within picard_iter_max iterations. With constant
+    # viscosity (visc_method=0) and constant beta, the system is linear
+    # and converges in 1 iteration.
+    @test y.dyn.scratch.ssa_iter_now[] >= 1
+    @test y.dyn.scratch.ssa_iter_now[] <= 100
+
+    # Basal stress = beta · u_b. In plug flow this equals -taud.
+    Tx = interior(y.dyn.taub_acx)
+    inner_taub = Tx[4:6, :, 1]
+    expected_taub = -expected_taud
+    @test all(abs.(inner_taub .- expected_taub) ./ abs(expected_taub) .< 1e-6)
 end
