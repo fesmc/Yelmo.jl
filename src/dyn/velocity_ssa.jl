@@ -169,15 +169,12 @@ function set_ssa_masks!(ssa_mask_acx, ssa_mask_acy,
 
     # ---- Step 2: define ssa solver masks (Fortran lines 983-1098). ----
     @inbounds for j in 1:Ny, i in 1:Nx
-        # Fortran neighbour indices clamp at domain edges (Fortran lines
-        # 987-990) — independent of grid topology in the Fortran source.
-        # We mirror the Fortran clamp convention here. Periodic wrap is
-        # only used in the matrix-assembly kernel; for set_ssa_masks
-        # the mask choice at the boundary follows the Fortran clamp.
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        # Topology-dispatched neighbour indices: clamp under Bounded
+        # (Fortran "infinite" BC, lines 987-990), wrap under Periodic.
+        im1 = _neighbor_im1(i, Nx, Tx_top)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jm1 = _neighbor_jm1(j, Ny, Ty_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
 
         # ===== x-direction (acx face, between cell (i, j) and (ip1, j)) =====
         # Fortran lines 995-1025.
