@@ -24,6 +24,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.Grids: topology, Bounded, Periodic
 
 export calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!
 
@@ -695,44 +696,55 @@ end
 # ice-free).
 function _stagger_beta_aa_mean!(beta_acx_int::AbstractArray, beta_acy_int::AbstractArray,
                                 beta_int::AbstractArray, fi_int::AbstractArray,
-                                fg_int::AbstractArray)
-    # beta_acx_int has interior shape (Nx+1, Ny, 1) — the face-east of
-    # cell (i, j) lives at [i+1, j, 1]. For Fortran index (i, j) we
-    # write to [i+1, j, 1].
+                                fg_int::AbstractArray,
+                                Tx_top::Type{<:AbstractTopology},
+                                Ty_top::Type{<:AbstractTopology})
+    # beta_acx_int has interior shape (Nx+1, Ny, 1) under Bounded and
+    # (Nx, Ny, 1) under Periodic. The face-east of cell (i, j) lives at
+    # `_ip1_modular(i, Nx, Tx_top)`: `i+1` under Bounded, wrapped under
+    # Periodic.
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = min(i + 1, Nx)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
 
         # acx-face (Fortran line 1305-1322).
         if fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] == 0.0
-            beta_acx_int[i+1, j, 1] = 0.0
+            beta_acx_int[ip1f, j, 1] = 0.0
         else
             if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] < 1.0
-                beta_acx_int[i+1, j, 1] = beta_int[i, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[i, j, 1]
             elseif fi_int[i, j, 1] < 1.0 && fi_int[ip1, j, 1] == 1.0
-                beta_acx_int[i+1, j, 1] = beta_int[ip1, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[ip1, j, 1]
             else
-                beta_acx_int[i+1, j, 1] = 0.5 * (beta_int[i, j, 1] + beta_int[ip1, j, 1])
+                beta_acx_int[ip1f, j, 1] = 0.5 * (beta_int[i, j, 1] + beta_int[ip1, j, 1])
             end
         end
 
         # acy-face (Fortran line 1324-1341).
         if fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] == 0.0
-            beta_acy_int[i, j+1, 1] = 0.0
+            beta_acy_int[i, jp1f, 1] = 0.0
         else
             if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] < 1.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, j, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, j, 1]
             elseif fi_int[i, j, 1] < 1.0 && fi_int[i, jp1, 1] == 1.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, jp1, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, jp1, 1]
             else
-                beta_acy_int[i, j+1, 1] = 0.5 * (beta_int[i, j, 1] + beta_int[i, jp1, 1])
+                beta_acy_int[i, jp1f, 1] = 0.5 * (beta_int[i, j, 1] + beta_int[i, jp1, 1])
             end
         end
     end
     # Replicate the leading face slot (matches `calc_driving_stress!`).
-    @views beta_acx_int[1, :, :] .= beta_acx_int[2, :, :]
-    @views beta_acy_int[:, 1, :] .= beta_acy_int[:, 2, :]
+    # Bounded only — under Periodic the leading slot is the wrapped
+    # eastern/northern face that was just populated by the loop.
+    if Tx_top === Bounded
+        @views beta_acx_int[1, :, :] .= beta_acx_int[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views beta_acy_int[:, 1, :] .= beta_acy_int[:, 2, :]
+    end
     return nothing
 end
 
@@ -742,25 +754,29 @@ function _stagger_beta_aa_gl_upstream!(beta_acx_int::AbstractArray,
                                        beta_acy_int::AbstractArray,
                                        beta_int::AbstractArray,
                                        fi_int::AbstractArray,
-                                       fg_int::AbstractArray)
+                                       fg_int::AbstractArray,
+                                       Tx_top::Type{<:AbstractTopology},
+                                       Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = min(i + 1, Nx)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         # acx-face (Fortran line 1385-1394).
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[ip1, j, 1] == 0.0
-                beta_acx_int[i+1, j, 1] = beta_int[i, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[i, j, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
-                beta_acx_int[i+1, j, 1] = beta_int[ip1, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[ip1, j, 1]
             end
         end
         # acy-face (Fortran line 1397-1406).
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[i, jp1, 1] == 0.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, j, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, j, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] > 0.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, jp1, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, jp1, 1]
             end
         end
     end
@@ -772,23 +788,27 @@ function _stagger_beta_aa_gl_downstream!(beta_acx_int::AbstractArray,
                                          beta_acy_int::AbstractArray,
                                          beta_int::AbstractArray,
                                          fi_int::AbstractArray,
-                                         fg_int::AbstractArray)
+                                         fg_int::AbstractArray,
+                                         Tx_top::Type{<:AbstractTopology},
+                                         Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = min(i + 1, Nx)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[ip1, j, 1] == 0.0
-                beta_acx_int[i+1, j, 1] = beta_int[ip1, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[ip1, j, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
-                beta_acx_int[i+1, j, 1] = beta_int[i, j, 1]
+                beta_acx_int[ip1f, j, 1] = beta_int[i, j, 1]
             end
         end
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[i, jp1, 1] == 0.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, jp1, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, jp1, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] > 0.0
-                beta_acy_int[i, j+1, 1] = beta_int[i, j, 1]
+                beta_acy_int[i, jp1f, 1] = beta_int[i, j, 1]
             end
         end
     end
@@ -802,29 +822,33 @@ function _stagger_beta_aa_gl_subgrid!(beta_acx_int::AbstractArray,
                                       fi_int::AbstractArray,
                                       fg_int::AbstractArray,
                                       fg_acx_int::AbstractArray,
-                                      fg_acy_int::AbstractArray)
+                                      fg_acy_int::AbstractArray,
+                                      Tx_top::Type{<:AbstractTopology},
+                                      Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = min(i + 1, Nx)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
-            wt = fg_acx_int[i+1, j, 1]^2
+            wt = fg_acx_int[ip1f, j, 1]^2
             if fg_int[i, j, 1] > 0.0 && fg_int[ip1, j, 1] == 0.0
-                beta_acx_int[i+1, j, 1] = wt * beta_int[i, j, 1] +
-                                          (1 - wt) * beta_int[ip1, j, 1]
+                beta_acx_int[ip1f, j, 1] = wt * beta_int[i, j, 1] +
+                                           (1 - wt) * beta_int[ip1, j, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
-                beta_acx_int[i+1, j, 1] = (1 - wt) * beta_int[i, j, 1] +
-                                          wt * beta_int[ip1, j, 1]
+                beta_acx_int[ip1f, j, 1] = (1 - wt) * beta_int[i, j, 1] +
+                                           wt * beta_int[ip1, j, 1]
             end
         end
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] == 1.0
-            wt = fg_acy_int[i, j+1, 1]^2
+            wt = fg_acy_int[i, jp1f, 1]^2
             if fg_int[i, j, 1] > 0.0 && fg_int[i, jp1, 1] == 0.0
-                beta_acy_int[i, j+1, 1] = wt * beta_int[i, j, 1] +
-                                          (1 - wt) * beta_int[i, jp1, 1]
+                beta_acy_int[i, jp1f, 1] = wt * beta_int[i, j, 1] +
+                                           (1 - wt) * beta_int[i, jp1, 1]
             elseif fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] > 0.0
-                beta_acy_int[i, j+1, 1] = (1 - wt) * beta_int[i, j, 1] +
-                                          wt * beta_int[i, jp1, 1]
+                beta_acy_int[i, jp1f, 1] = (1 - wt) * beta_int[i, j, 1] +
+                                           wt * beta_int[i, jp1, 1]
             end
         end
     end
@@ -842,13 +866,17 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                                            uy_int::AbstractArray,
                                            fg_int::AbstractArray,
                                            fg_acx_int::AbstractArray,
-                                           fg_acy_int::AbstractArray)
+                                           fg_acy_int::AbstractArray,
+                                           Tx_top::Type{<:AbstractTopology},
+                                           Ty_top::Type{<:AbstractTopology})
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         im1 = max(i - 1, 1)
         ip1 = min(i + 1, Nx)
         jm1 = max(j - 1, 1)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
 
         # acx (Fortran line 1597-1620).
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] == 1.0
@@ -858,47 +886,52 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                 # ux(ip1, j) -> [ip1+1, j, 1].
                 ux_aa_a = 0.5 * (ux_int[im1+1, j, 1] + ux_int[i+1, j, 1])
                 ux_aa_b = 0.5 * (ux_int[ip1+1, j, 1] + ux_int[i+1, j, 1])
-                beta_acx_int[i+1, j, 1] = _calc_beta_gl_flux_weight(
+                beta_acx_int[ip1f, j, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, j, 1], beta_int[ip1, j, 1],
                     ux_aa_a, ux_aa_b,
                     H_int[i, j, 1], H_int[ip1, j, 1],
-                    fg_acx_int[i+1, j, 1])
+                    fg_acx_int[ip1f, j, 1])
             elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
                 # Floating to the left (Fortran line 1609-1617).
                 ux_aa_a = 0.5 * (ux_int[ip1+1, j, 1] + ux_int[i+1, j, 1])
                 ux_aa_b = 0.5 * (ux_int[im1+1, j, 1] + ux_int[i+1, j, 1])
-                beta_acx_int[i+1, j, 1] = _calc_beta_gl_flux_weight(
+                beta_acx_int[ip1f, j, 1] = _calc_beta_gl_flux_weight(
                     beta_int[ip1, j, 1], beta_int[i, j, 1],
                     ux_aa_a, ux_aa_b,
                     H_int[ip1, j, 1], H_int[i, j, 1],
-                    fg_acx_int[i+1, j, 1])
+                    fg_acx_int[ip1f, j, 1])
             end
         end
 
-        # acy (Fortran line 1623-1646). Note: Fortran line 1635 has a
-        # known typo `fg(ip1, j)` instead of `fg(i, jp1)` in the second
-        # branch's gating condition — we mirror Fortran verbatim per
-        # the "no autonomous shortcuts" constraint.
+        # acy (Fortran line 1623-1646). PR-A.1 polish: applies the
+        # Fortran-side typo corrections that the user has fixed upstream
+        # in `basal_dragging.f90`:
+        #   - Line 1635: `fg(ip1, j)` → `fg(i, jp1)` (gating condition).
+        #   - Line 1642: `fg_acx(i, j)` → `fg_acy(i, j)` (downstream call).
+        # Previously the Julia port mirrored the typos verbatim per the
+        # "no autonomous shortcuts" constraint; with the Fortran source
+        # corrected, follow it.
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] == 1.0
             if fg_int[i, j, 1] > 0.0 && fg_int[i, jp1, 1] == 0.0
                 uy_aa_a = 0.5 * (uy_int[i, jm1+1, 1] + uy_int[i, j+1, 1])
                 uy_aa_b = 0.5 * (uy_int[i, jp1+1, 1] + uy_int[i, j+1, 1])
-                beta_acy_int[i, j+1, 1] = _calc_beta_gl_flux_weight(
+                beta_acy_int[i, jp1f, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, j, 1], beta_int[i, jp1, 1],
                     uy_aa_a, uy_aa_b,
                     H_int[i, j, 1], H_int[i, jp1, 1],
-                    fg_acy_int[i, j+1, 1])
-            elseif fg_int[i, j, 1] == 0.0 && fg_int[ip1, j, 1] > 0.0
-                # Fortran typo preserved: condition uses `fg(ip1, j)` not `fg(i, jp1)`.
+                    fg_acy_int[i, jp1f, 1])
+            elseif fg_int[i, j, 1] == 0.0 && fg_int[i, jp1, 1] > 0.0
+                # Follows fixed upstream Fortran (basal_dragging.f90:1635)
+                # — gating condition is `fg(i, jp1)`, not `fg(ip1, j)`.
                 uy_aa_a = 0.5 * (uy_int[i, jp1+1, 1] + uy_int[i, j+1, 1])
                 uy_aa_b = 0.5 * (uy_int[i, jm1+1, 1] + uy_int[i, j+1, 1])
-                beta_acy_int[i, j+1, 1] = _calc_beta_gl_flux_weight(
+                beta_acy_int[i, jp1f, 1] = _calc_beta_gl_flux_weight(
                     beta_int[i, jp1, 1], beta_int[i, j, 1],
                     uy_aa_a, uy_aa_b,
                     H_int[i, jp1, 1], H_int[i, j, 1],
-                    fg_acx_int[i+1, j, 1])
-                # NOTE: Fortran line 1642 also passes `fg_acx` instead of
-                # `fg_acy` — preserved verbatim.
+                    # Follows fixed upstream Fortran (basal_dragging.f90:1642)
+                    # — downstream call uses `fg_acy`, not `fg_acx`.
+                    fg_acy_int[i, jp1f, 1])
             end
         end
     end
@@ -948,27 +981,34 @@ function stagger_beta!(beta_acx, beta_acy, beta,
     fgx_int = interior(f_grnd_acx)
     fgy_int = interior(f_grnd_acy)
 
+    Tx_top = topology(beta_acx.grid, 1)
+    Ty_top = topology(beta_acy.grid, 2)
+
     if beta_gl_stag == -1
         # External — no-op (Fortran line 552-554).
         # Skip the standard mean staggering AND the GL block entirely.
     else
         # Fortran line 560 always calls mean staggering first, then
         # (line 563-600) optionally overlays the GL modifier.
-        _stagger_beta_aa_mean!(bx_int, by_int, b_int, fi_int, fg_int)
+        _stagger_beta_aa_mean!(bx_int, by_int, b_int, fi_int, fg_int,
+                               Tx_top, Ty_top)
 
         if beta_gl_stag == 0
             # Already done.
         elseif beta_gl_stag == 1
-            _stagger_beta_aa_gl_upstream!(bx_int, by_int, b_int, fi_int, fg_int)
+            _stagger_beta_aa_gl_upstream!(bx_int, by_int, b_int, fi_int, fg_int,
+                                          Tx_top, Ty_top)
         elseif beta_gl_stag == 2
-            _stagger_beta_aa_gl_downstream!(bx_int, by_int, b_int, fi_int, fg_int)
+            _stagger_beta_aa_gl_downstream!(bx_int, by_int, b_int, fi_int, fg_int,
+                                            Tx_top, Ty_top)
         elseif beta_gl_stag == 3
             _stagger_beta_aa_gl_subgrid!(bx_int, by_int, b_int, fi_int, fg_int,
-                                         fgx_int, fgy_int)
+                                         fgx_int, fgy_int, Tx_top, Ty_top)
         elseif beta_gl_stag == 4
             _stagger_beta_aa_gl_subgrid_flux!(bx_int, by_int, b_int,
                                               H_int, fi_int, ux_int, uy_int,
-                                              fg_int, fgx_int, fgy_int)
+                                              fg_int, fgx_int, fgy_int,
+                                              Tx_top, Ty_top)
         else
             error("stagger_beta!: beta_gl_stag = $beta_gl_stag not recognised; expected -1..4.")
         end
@@ -978,11 +1018,13 @@ function stagger_beta!(beta_acx, beta_acy, beta,
     bm = Float64(beta_min)
     Nx, Ny = size(b_int, 1), size(b_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
-        if bx_int[i+1, j, 1] > 0.0 && bx_int[i+1, j, 1] < bm
-            bx_int[i+1, j, 1] = bm
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
+        if bx_int[ip1f, j, 1] > 0.0 && bx_int[ip1f, j, 1] < bm
+            bx_int[ip1f, j, 1] = bm
         end
-        if by_int[i, j+1, 1] > 0.0 && by_int[i, j+1, 1] < bm
-            by_int[i, j+1, 1] = bm
+        if by_int[i, jp1f, 1] > 0.0 && by_int[i, jp1f, 1] < bm
+            by_int[i, jp1f, 1] = bm
         end
     end
 

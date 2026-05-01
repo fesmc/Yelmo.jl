@@ -52,6 +52,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.Grids: topology, Bounded, Periodic
 
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!
@@ -481,9 +482,14 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
     Nx, Ny = size(V, 1), size(V, 2)
     fill!(Vab, 0.0)
 
+    Tx_top = topology(visc_ab.grid, 1)
+    Ty_top = topology(visc_ab.grid, 2)
+
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = min(i + 1, Nx)
         jp1 = min(j + 1, Ny)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
 
         acc = 0.0
         k_count = 0
@@ -501,7 +507,7 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
         end
 
         if k_count > 0
-            Vab[i+1, j+1, 1] = acc / k_count
+            Vab[ip1f, jp1f, 1] = acc / k_count
         end
     end
     return visc_ab

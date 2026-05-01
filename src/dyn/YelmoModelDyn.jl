@@ -45,6 +45,7 @@ export dyn_step!,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!
 
+include("topology_helpers.jl")
 include("quadrature.jl")
 include("driving_stress.jl")
 include("lateral_stress.jl")

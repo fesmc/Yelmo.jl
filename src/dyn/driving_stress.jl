@@ -29,6 +29,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_driving_stress!, calc_driving_stress_gl!
@@ -93,25 +94,40 @@ function calc_driving_stress!(taud_acx, taud_acy,
     Nx = size(interior(H_ice_dyn), 1)
     Ny = size(interior(H_ice_dyn), 2)
 
+    # Topology-dispatched eastern/northern face index (`_ip1_modular` /
+    # `_jp1_modular` from `topology_helpers.jl`): under Bounded it is
+    # `i+1` (writes the eastern slot, range 2..Nx+1). Under Periodic it
+    # wraps via `mod1(i+1, Nx)` (the eastern slot at i=Nx is slot 1).
+    Tx_top = topology(taud_acx.grid, 1)
+    Ty_top = topology(taud_acy.grid, 2)
+
     # x-direction: Fortran taud_acx[i, j] = east face of cell i.
     # Julia XFaceField stores it at interior(taud_acx)[i+1, j, 1].
     @inbounds for j in 1:Ny, i in 1:Nx
+        ip1f = _ip1_modular(i, Nx, Tx_top)
         H_mid = _H_mid_margin(H_ice_dyn[i, j, 1], H_ice_dyn[i+1, j, 1],
                               f_ice_dyn[i, j, 1], f_ice_dyn[i+1, j, 1])
         taud  = rhog * H_mid * dzsdx[i, j, 1]
-        Tx[i+1, j, 1] = clamp(taud, -lim, lim)
+        Tx[ip1f, j, 1] = clamp(taud, -lim, lim)
     end
-    # Replicate first-face slot per the YelmoMirror loader convention.
-    @views Tx[1, :, :] .= Tx[2, :, :]
+    # Replicate first-face slot per the YelmoMirror loader convention
+    # (Bounded only — under Periodic the leading slot is the wrapped
+    # eastern face that was just written).
+    if Tx_top === Bounded
+        @views Tx[1, :, :] .= Tx[2, :, :]
+    end
 
     # y-direction: same pattern.
     @inbounds for j in 1:Ny, i in 1:Nx
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         H_mid = _H_mid_margin(H_ice_dyn[i, j, 1], H_ice_dyn[i, j+1, 1],
                               f_ice_dyn[i, j, 1], f_ice_dyn[i, j+1, 1])
         taud  = rhog * H_mid * dzsdy[i, j, 1]
-        Ty[i, j+1, 1] = clamp(taud, -lim, lim)
+        Ty[i, jp1f, 1] = clamp(taud, -lim, lim)
     end
-    @views Ty[:, 1, :] .= Ty[:, 2, :]
+    if Ty_top === Bounded
+        @views Ty[:, 1, :] .= Ty[:, 2, :]
+    end
 
     return taud_acx, taud_acy
 end
@@ -207,6 +223,9 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
     Nx = size(interior(H_ice_dyn), 1)
     Ny = size(interior(H_ice_dyn), 2)
 
+    Tx_top = topology(taud_acx.grid, 1)
+    Ty_top = topology(taud_acy.grid, 2)
+
     if method == -1
         if beta_gl_stag == 1
             # Fortran wraps this branch in `if (.FALSE.)` — dead code.
@@ -214,18 +233,27 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
         elseif beta_gl_stag == 2
             # Downstream beta at GL ⇒ float-side face takes grounded
             # neighbour's stress, grounded-side face takes floating's.
+            # Loops still skip the boundary rows (i=1, i=Nx) under
+            # Bounded; under Periodic the wrap makes those neighbours
+            # well-defined, but for parity we mirror the Fortran range.
             @inbounds for j in 1:Ny, i in 2:Nx-1
+                ip1f = _ip1_modular(i, Nx, Tx_top)
+                im1f = _ip1_modular(i - 1, Nx, Tx_top)   # = i under Bounded
+                ip2f = _ip1_modular(i + 1, Nx, Tx_top)
                 if f_grnd[i, j, 1] == 0.0 && f_grnd[i+1, j, 1] > 0.0
-                    Tx[i+1, j, 1] = Tx[(i-1)+1, j, 1]    # taud_acx[i] = taud_acx[i-1]
+                    Tx[ip1f, j, 1] = Tx[im1f, j, 1]   # taud_acx[i] = taud_acx[i-1]
                 elseif f_grnd[i, j, 1] > 0.0 && f_grnd[i+1, j, 1] == 0.0
-                    Tx[i+1, j, 1] = Tx[(i+1)+1, j, 1]    # taud_acx[i] = taud_acx[i+1]
+                    Tx[ip1f, j, 1] = Tx[ip2f, j, 1]   # taud_acx[i] = taud_acx[i+1]
                 end
             end
             @inbounds for j in 2:Ny-1, i in 1:Nx
+                jp1f = _jp1_modular(j, Ny, Ty_top)
+                jm1f = _jp1_modular(j - 1, Ny, Ty_top)
+                jp2f = _jp1_modular(j + 1, Ny, Ty_top)
                 if f_grnd[i, j, 1] == 0.0 && f_grnd[i, j+1, 1] > 0.0
-                    Ty[i, j+1, 1] = Ty[i, (j-1)+1, 1]
+                    Ty[i, jp1f, 1] = Ty[i, jm1f, 1]
                 elseif f_grnd[i, j, 1] > 0.0 && f_grnd[i, j+1, 1] == 0.0
-                    Ty[i, j+1, 1] = Ty[i, (j+1)+1, 1]
+                    Ty[i, jp1f, 1] = Ty[i, jp2f, 1]
                 end
             end
         else
@@ -234,28 +262,31 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
 
     elseif method == 1
         @inbounds for j in 1:Ny, i in 1:Nx-1
+            ip1f = _ip1_modular(i, Nx, Tx_top)
             fgx_now = f_grnd_acx[i, j, 1]
             if 0.0 < fgx_now < 1.0
                 H_gl    = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i+1, j, 1])
                 dzsdx_1 = (z_srf[i+1, j, 1] - z_srf[i, j, 1]) / dx_f
                 dzsdx   = fgx_now * dzsdx_1   # `dzsdx_2 = 0` per Fortran
                 dzsdx   = clamp(dzsdx, -slope_max, slope_max)
-                Tx[i+1, j, 1] = rhog * H_gl * dzsdx
+                Tx[ip1f, j, 1] = rhog * H_gl * dzsdx
             end
         end
         @inbounds for j in 1:Ny-1, i in 1:Nx
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             fgy_now = f_grnd_acy[i, j, 1]
             if 0.0 < fgy_now < 1.0
                 H_gl    = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i, j+1, 1])
                 dzsdy_1 = (z_srf[i, j+1, 1] - z_srf[i, j, 1]) / dx_f
                 dzsdy   = fgy_now * dzsdy_1
                 dzsdy   = clamp(dzsdy, -slope_max, slope_max)
-                Ty[i, j+1, 1] = rhog * H_gl * dzsdy
+                Ty[i, jp1f, 1] = rhog * H_gl * dzsdy
             end
         end
 
     elseif method == 2
         @inbounds for j in 1:Ny, i in 1:Nx-1
+            ip1f = _ip1_modular(i, Nx, Tx_top)
             fgx_now = f_grnd_acx[i, j, 1]
             if 0.0 < fgx_now < 1.0
                 H_grnd_mid = 0.5 * (H_grnd[i, j, 1] + H_grnd[i+1, j, 1])
@@ -266,10 +297,11 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
                 end
                 dzsdx = clamp(dzsdx, -slope_max, slope_max)
                 H_gl  = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i+1, j, 1])
-                Tx[i+1, j, 1] = rhog * H_gl * dzsdx
+                Tx[ip1f, j, 1] = rhog * H_gl * dzsdx
             end
         end
         @inbounds for j in 1:Ny-1, i in 1:Nx
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             fgy_now = f_grnd_acy[i, j, 1]
             if 0.0 < fgy_now < 1.0
                 H_grnd_mid = 0.5 * (H_grnd[i, j, 1] + H_grnd[i, j+1, 1])
@@ -280,7 +312,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
                 end
                 dzsdy = clamp(dzsdy, -slope_max, slope_max)
                 H_gl  = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i, j+1, 1])
-                Ty[i, j+1, 1] = rhog * H_gl * dzsdy
+                Ty[i, jp1f, 1] = rhog * H_gl * dzsdy
             end
         end
 
@@ -289,6 +321,8 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
         rho_sw_f  = Float64(rho_sw)
         g_f       = Float64(g)
         @inbounds for j in 1:Ny, i in 1:Nx
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
             # x-direction: Fortran does max(1, i-1) / min(nx, i+1) for
             # neighbour clamps; we use cells (i, i+1) directly. The
             # `i+1` read at i = Nx pulls through halo — for `infinite`-
@@ -298,7 +332,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
             jp1 = min(Ny, j + 1)
 
             if H_grnd[i, j, 1] > 0.0 && H_grnd[ip1, j, 1] <= 0.0
-                Tx[i+1, j, 1] = _integrate_gl_driving_stress_linear(
+                Tx[ip1f, j, 1] = _integrate_gl_driving_stress_linear(
                     H_ice_dyn[i, j, 1], H_ice_dyn[ip1, j, 1],
                     z_bed[i, j, 1],     z_bed[ip1, j, 1],
                     z_sl[i, j, 1],      z_sl[ip1, j, 1],
@@ -309,11 +343,11 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
                     z_bed[ip1, j, 1],     z_bed[i, j, 1],
                     z_sl[ip1, j, 1],      z_sl[i, j, 1],
                     dx_f, rho_ice_f, rho_sw_f, g_f)
-                Tx[i+1, j, 1] = -t
+                Tx[ip1f, j, 1] = -t
             end
 
             if H_grnd[i, j, 1] > 0.0 && H_grnd[i, jp1, 1] <= 0.0
-                Ty[i, j+1, 1] = _integrate_gl_driving_stress_linear(
+                Ty[i, jp1f, 1] = _integrate_gl_driving_stress_linear(
                     H_ice_dyn[i, j, 1], H_ice_dyn[i, jp1, 1],
                     z_bed[i, j, 1],     z_bed[i, jp1, 1],
                     z_sl[i, j, 1],      z_sl[i, jp1, 1],
@@ -324,7 +358,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
                     z_bed[i, jp1, 1],     z_bed[i, j, 1],
                     z_sl[i, jp1, 1],      z_sl[i, j, 1],
                     dx_f, rho_ice_f, rho_sw_f, g_f)
-                Ty[i, j+1, 1] = -t
+                Ty[i, jp1f, 1] = -t
             end
         end
 

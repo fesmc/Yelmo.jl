@@ -25,6 +25,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
@@ -75,17 +76,31 @@ function calc_ice_flux!(qq_acx, qq_acy, ux_bar, uy_bar, H_ice,
     dx_f = Float64(dx)
     dy_f = Float64(dy)
 
+    Tx_top = topology(qq_acx.grid, 1)
+    Ty_top = topology(qq_acy.grid, 2)
+
+    # Loop ranges 1..Nx-1 / 1..Ny-1 mirror the Fortran convention of
+    # leaving the rightmost / northernmost face row at zero. The
+    # `_ip1_modular` / `_jp1_modular` wraps don't trigger inside that
+    # range (since i < Nx), so the index expression is identical to the
+    # original `i+1` under both Bounded and Periodic.
     @inbounds for j in 1:Ny, i in 1:Nx-1
+        ip1f = _ip1_modular(i, Nx, Tx_top)
         H_face = 0.5 * (H_ice[i, j, 1] + H_ice[i+1, j, 1]) * dx_f
-        Qx[i+1, j, 1] = H_face * ux_bar[i+1, j, 1]
+        Qx[ip1f, j, 1] = H_face * ux_bar[ip1f, j, 1]
     end
-    @views Qx[1, :, :] .= Qx[2, :, :]
+    if Tx_top === Bounded
+        @views Qx[1, :, :] .= Qx[2, :, :]
+    end
 
     @inbounds for j in 1:Ny-1, i in 1:Nx
+        jp1f = _jp1_modular(j, Ny, Ty_top)
         H_face = 0.5 * (H_ice[i, j, 1] + H_ice[i, j+1, 1]) * dy_f
-        Qy[i, j+1, 1] = H_face * uy_bar[i, j+1, 1]
+        Qy[i, jp1f, 1] = H_face * uy_bar[i, jp1f, 1]
     end
-    @views Qy[:, 1, :] .= Qy[:, 2, :]
+    if Ty_top === Bounded
+        @views Qy[:, 1, :] .= Qy[:, 2, :]
+    end
 
     return qq_acx, qq_acy
 end

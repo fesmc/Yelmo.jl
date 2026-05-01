@@ -23,6 +23,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_lateral_bc_stress_2D!
@@ -82,6 +83,9 @@ function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
     Nx = size(interior(mask_frnt), 1)
     Ny = size(interior(mask_frnt), 2)
 
+    Tx_top = topology(taul_int_acx.grid, 1)
+    Ty_top = topology(taul_int_acy.grid, 2)
+
     # Reset the entire interior — the Fortran initialises to zero and
     # only writes at front faces.
     fill!(Tx, 0.0)
@@ -92,10 +96,13 @@ function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
         mE = mask_frnt[i+1, j, 1]
         mN = mask_frnt[i,   j+1, 1]
 
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
+
         # x-direction: front face between (i, j) and (i+1, j).
         if (m0 > 0.0 && mE < 0.0) || (m0 < 0.0 && mE > 0.0)
             i1 = m0 < 0.0 ? i + 1 : i
-            Tx[i+1, j, 1] = _calc_lateral_bc_stress(
+            Tx[ip1f, j, 1] = _calc_lateral_bc_stress(
                 Float64(H_ice[i1, j, 1]),
                 Float64(z_srf[i1, j, 1]),
                 Float64(z_sl[i1, j, 1]),
@@ -105,7 +112,7 @@ function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
         # y-direction: front face between (i, j) and (i, j+1).
         if (m0 > 0.0 && mN < 0.0) || (m0 < 0.0 && mN > 0.0)
             j1 = m0 < 0.0 ? j + 1 : j
-            Ty[i, j+1, 1] = _calc_lateral_bc_stress(
+            Ty[i, jp1f, 1] = _calc_lateral_bc_stress(
                 Float64(H_ice[i, j1, 1]),
                 Float64(z_srf[i, j1, 1]),
                 Float64(z_sl[i, j1, 1]),
@@ -114,8 +121,13 @@ function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
     end
 
     # Replicate first-face slot per the YelmoMirror loader convention.
-    @views Tx[1, :, :] .= Tx[2, :, :]
-    @views Ty[:, 1, :] .= Ty[:, 2, :]
+    # Bounded only — Periodic wraps the leading slot to the eastern face.
+    if Tx_top === Bounded
+        @views Tx[1, :, :] .= Tx[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Ty[:, 1, :] .= Ty[:, 2, :]
+    end
 
     return taul_int_acx, taul_int_acy
 end
