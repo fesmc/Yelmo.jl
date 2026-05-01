@@ -129,6 +129,10 @@ Analytical IC at time `t`. Returns a NamedTuple with:
   - `xc`, `yc`     — grid axes (metres).
   - `H_ice`        — 1000 m uniform.
   - `z_bed`        — `-x · tan α - H` (linear in x).
+  - `z_sl`         — −10 000 m (matches `yelmo_ismiphom.f90:180`,
+                     forcing all ice to be grounded so the bed slope
+                     drives the surface slope and the driving stress
+                     is non-trivial).
   - `smb_ref`      — zero (HOM-C has no mass-balance forcing).
   - `T_srf`        — 263.15 K (arbitrary; HOM-C is isothermal).
   - `Q_geo`        — 50.0 mW/m² (arbitrary).
@@ -144,11 +148,12 @@ function state(b::HOMCBenchmark, t::Real)
     H_ice = fill(b.H, Nx, Ny)
     z_srf = [-b.xc[i] * tan(b.alpha_rad) for i in 1:Nx, j in 1:Ny]
     z_bed = z_srf .- b.H
+    z_sl  = fill(-10_000.0, Nx, Ny)   # force grounded ice (Fortran convention)
     smb   = zeros(Nx, Ny)
     Tsrf  = fill(263.15, Nx, Ny)
     Qgeo  = fill(50.0,   Nx, Ny)
     return (xc = b.xc, yc = b.yc,
-            H_ice = H_ice, z_bed = z_bed,
+            H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb, T_srf = Tsrf, Q_geo = Qgeo)
 end
 
@@ -232,6 +237,11 @@ function write_fixture!(b::HOMCBenchmark, path::AbstractString;
         zb[:, :] = s.z_bed
         zb.attrib["units"]     = "m"
         zb.attrib["long_name"] = "Bedrock elevation (sloping bed, alpha=0.1°)"
+
+        zslv = defVar(ds, "z_sl", Float64, ("xc", "yc"))
+        zslv[:, :] = s.z_sl
+        zslv.attrib["units"]     = "m"
+        zslv.attrib["long_name"] = "Sea level (very negative — keeps ice grounded)"
 
         smbv = defVar(ds, "smb_ref", Float64, ("xc", "yc"))
         smbv[:, :] = s.smb_ref
