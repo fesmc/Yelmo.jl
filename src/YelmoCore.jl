@@ -583,9 +583,18 @@ function YelmoModel(restart_file::String, time::Float64;
 
     # SIA-only solver scratch buffers; not in the dyn schema because
     # they are recomputed every `dyn_step!` and not part of the model
-    # state. Exposed as `y.dyn.scratch.sia_tau_xz` /
-    # `y.dyn.scratch.sia_tau_yz`. See `src/dyn/velocity_sia.jl`.
-    sia_scratch = (sia_tau_xz = XFaceField(gt), sia_tau_yz = YFaceField(gt))
+    # state. Exposed as `y.dyn.scratch.<name>`. See
+    # `src/dyn/velocity_sia.jl`.
+    #
+    #   - `sia_tau_xz` / `sia_tau_yz` (3D, on `gt`): per-layer SIA
+    #     vertical shear stresses at Center positions.
+    #   - `ux_i_s` / `uy_i_s` (2D, on `g`): SIA shear velocity at the
+    #     ice surface (zeta = 1), computed by the wrapper since the
+    #     3D `ux_i` / `uy_i` Center stagger does NOT include the
+    #     surface endpoint under Option C. Read by `dyn_step!` to
+    #     assemble `ux_s = ux_i_s + ux_b` (and analogously for uy_s).
+    sia_scratch = (sia_tau_xz = XFaceField(gt), sia_tau_yz = YFaceField(gt),
+                   ux_i_s     = XFaceField(g),  uy_i_s     = YFaceField(g))
     dyn = merge(dyn, (scratch = sia_scratch,))
 
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
