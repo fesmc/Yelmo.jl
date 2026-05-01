@@ -40,8 +40,10 @@ export dyn_step!,
        calc_ydyn_neff!,
        calc_cb_ref!, calc_c_bed!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
-       calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
+       calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
+       gq2d_nodes
 
+include("quadrature.jl")
 include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")
