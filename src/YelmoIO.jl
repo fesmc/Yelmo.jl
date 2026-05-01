@@ -192,10 +192,18 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     ds = NCDataset(path, "c")
 
     # ---- dimensions -------------------------------------------------------
+    # Face dimension sizes depend on the horizontal-axis topology:
+    #   - Bounded: Nx+1 / Ny+1 face slots (boundary endpoints stored).
+    #   - Periodic: Nx / Ny (the wrap-around face is the 1st face and is
+    #     not stored separately).
+    Tx_g = topology(ylmo.g, 1)
+    Ty_g = topology(ylmo.g, 2)
+    x_f_size = Tx_g === Periodic ? ylmo.g.Nx : ylmo.g.Nx + 1
+    y_f_size = Ty_g === Periodic ? ylmo.g.Ny : ylmo.g.Ny + 1
     defDim(ds, "x_c",         ylmo.g.Nx)
-    defDim(ds, "x_f",         ylmo.g.Nx + 1)
+    defDim(ds, "x_f",         x_f_size)
     defDim(ds, "y_c",         ylmo.g.Ny)
-    defDim(ds, "y_f",         ylmo.g.Ny + 1)
+    defDim(ds, "y_f",         y_f_size)
     defDim(ds, "zeta",         ylmo.gt.Nz)
     defDim(ds, "zeta_ac",      ylmo.gt.Nz + 1)
     defDim(ds, "zeta_rock",    ylmo.gr.Nz)
