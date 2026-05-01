@@ -132,7 +132,7 @@ end
         fi_int = interior(f_ice)
 
         _D._calc_beta_aa_power_plastic!(b_int, ux_int, uy_int, c_int, fi_int,
-                                        q, u_0, false)
+                                        q, u_0, false, Bounded, Bounded)
 
         ub_sq_min = (1e-3)^2
         uxy = sqrt(U_test^2 + 0.0 + ub_sq_min)
@@ -431,7 +431,7 @@ end
         c_int  = interior(c_bed)
         fi_int = interior(f_ice)
         _D._calc_beta_aa_power_plastic!(b_int, ux_int, uy_int, c_int, fi_int,
-                                        q, u_0, false)
+                                        q, u_0, false, Bounded, Bounded)
 
         # ---- Compare to fixture ----
         ve_ref  = Array{Float64}(replace(ds["visc_eff"][:, :, :, 1], missing => NaN))
