@@ -251,3 +251,657 @@ function set_ssa_masks!(ssa_mask_acx, ssa_mask_acy,
 
     return ssa_mask_acx, ssa_mask_acy
 end
+
+# ----------------------------------------------------------------------
+# _assemble_ssa_matrix!
+#
+# Faithful 1:1 port of `solver_ssa_ac.f90:240-826
+# linear_solver_matrix_ssa_ac_csr_2D`. Populates the COO triplet
+# buffers + RHS in `dyn.scratch`. The actual sparse-matrix
+# construction and Krylov solve land in PR-B.
+#
+# Block-row interleaving (matches Fortran):
+#
+#     row(ux at cell (i,j)) = 2 * ((j-1)*Nx + i) - 1
+#     row(uy at cell (i,j)) = 2 * ((j-1)*Nx + i)
+#     col(ux at cell (i,j)) = 2 * ((j-1)*Nx + i) - 1
+#     col(uy at cell (i,j)) = 2 * ((j-1)*Nx + i)
+#
+# Boundary-condition palette (Fortran lines 156-212):
+#
+#     boundaries = :MISMIP3D     → (free-slip, periodic, no-slip, periodic)
+#     boundaries = :TROUGH       → (free-slip, periodic, no-slip, periodic)
+#     boundaries = :periodic     → (periodic, periodic, periodic, periodic)
+#     boundaries = :periodic_x   → (periodic, free-slip, periodic, free-slip)
+#     boundaries = :periodic_y   → (free-slip, periodic, free-slip, periodic)
+#     boundaries = :infinite     → (free-slip, free-slip, free-slip, free-slip)
+#     boundaries = :zeros        → (no-slip, no-slip, no-slip, no-slip)
+#     default                    → (no-slip, no-slip, no-slip, no-slip)
+#
+#   bcs[1] = right (i = Nx)
+#   bcs[2] = top (j = Ny)
+#   bcs[3] = left (i = 1)
+#   bcs[4] = bottom (j = 1)
+#
+# PR-A.2 supports topology pairs (Bounded, Bounded, Flat) and
+# (Bounded, Periodic, Flat). The (Periodic, *) pairs are deferred to
+# a later PR; the kernel asserts on entry and rejects them.
+#
+# Halo handling: caller pre-fills halos on the inputs. Inside the
+# kernel, all reads on `(im1, ip1, jm1, jp1)` go through the wrapped
+# integer indices (NOT halo reads) — required because the COO
+# column-index arithmetic must address actual interior cells, not halo
+# cells. The `mask_frnt` field is read at neighbouring (i+1, j+1)
+# diagonal positions for the lateral-BC detection (Fortran lines
+# 1028-1043 / 1080-1095 inside set_ssa_masks); this kernel does not
+# do diagonal reads itself, so `fill_corner_halos!` is not required.
+# ----------------------------------------------------------------------
+
+# Convert a `boundaries` symbol to the 4-tuple of edge-BC symbols.
+# Per Fortran `solver_ssa_ac.f90:156-212`. The 4-tuple is
+# (right, top, left, bottom) matching Fortran's `bcs(1:4)`.
+function _ssa_resolve_bcs(boundaries::Symbol)
+    if boundaries == :MISMIP3D || boundaries == :TROUGH
+        return (:free_slip, :periodic, :no_slip, :periodic)
+    elseif boundaries == :periodic
+        return (:periodic, :periodic, :periodic, :periodic)
+    elseif boundaries == :periodic_x
+        return (:periodic, :free_slip, :periodic, :free_slip)
+    elseif boundaries == :periodic_y || boundaries == :bounded_y_periodic ||
+           boundaries == :y_periodic
+        return (:free_slip, :periodic, :free_slip, :periodic)
+    elseif boundaries == :infinite
+        return (:free_slip, :free_slip, :free_slip, :free_slip)
+    elseif boundaries == :zeros || boundaries == :bounded || boundaries == :no_slip
+        return (:no_slip, :no_slip, :no_slip, :no_slip)
+    else
+        # Match the Fortran DEFAULT branch (no-slip).
+        return (:no_slip, :no_slip, :no_slip, :no_slip)
+    end
+end
+
+# Linear cell index. Fortran `lgs%ij2n(i, j) = (j-1)*Nx + i`.
+@inline _ij2n(i::Int, j::Int, Nx::Int) = (j - 1) * Nx + i
+# Block-interleaved row/column indices (Fortran convention).
+@inline _row_ux(i::Int, j::Int, Nx::Int) = 2 * _ij2n(i, j, Nx) - 1
+@inline _row_uy(i::Int, j::Int, Nx::Int) = 2 * _ij2n(i, j, Nx)
+
+# Append a single (row, col, val) triplet to the COO buffers and
+# bump the counter. Inlined to keep the kernel readable.
+@inline function _push_coo!(I_idx::Vector{Int}, J_idx::Vector{Int},
+                            vals::Vector{Float64}, k::Int,
+                            row::Int, col::Int, val::Float64)
+    I_idx[k] = row
+    J_idx[k] = col
+    vals[k]  = val
+    return k
+end
+
+"""
+    _assemble_ssa_matrix!(I_idx, J_idx, vals, b_vec, nnz_ref,
+                          ux_b, uy_b,
+                          beta_acx, beta_acy,
+                          visc_eff_int, visc_ab,
+                          ssa_mask_acx, ssa_mask_acy, mask_frnt,
+                          H_ice, f_ice,
+                          taud_acx, taud_acy,
+                          taul_int_acx, taul_int_acy,
+                          dx::Real, dy::Real, beta_min::Real;
+                          boundaries::Symbol=:bounded,
+                          lateral_bc::AbstractString="floating")
+
+Faithful port of `solver_ssa_ac.f90:240-826
+linear_solver_matrix_ssa_ac_csr_2D`. Populates the COO triplet
+buffers `(I_idx, J_idx, vals)` and the RHS `b_vec` for the SSA
+linear system. Updates `nnz_ref[]` to the actual number of non-zeros
+written.
+
+Inputs:
+
+  - `ux_b`, `uy_b` — current (Picard) velocity, XFace / YFace 2D.
+  - `beta_acx`, `beta_acy` — basal friction on faces (XFace / YFace).
+  - `visc_eff_int` — depth-integrated viscosity at aa cells (CenterField);
+    Fortran `N_aa(i, j)` ↔ `interior(visc_eff_int)[i, j, 1]`.
+  - `visc_ab` — corner-staggered viscosity from `stagger_visc_aa_ab!`,
+    `Field((Face(), Face(), Center()), g)`. Fortran `N_ab(i, j)` ↔
+    `interior(visc_ab)[i+1, j+1, 1]`.
+  - `ssa_mask_acx`, `ssa_mask_acy` — SSA mask, XFace / YFace 2D.
+  - `mask_frnt`, `H_ice`, `f_ice`, `taud_acx`, `taud_acy`,
+    `taul_int_acx`, `taul_int_acy` — geometry / forcing fields.
+  - `dx`, `dy` — grid spacing in metres.
+  - `beta_min` — minimum allowed beta for grounded ice
+    (Fortran lines 479, 762).
+  - `boundaries` — Symbol selecting the edge-BC palette.
+  - `lateral_bc` — accepted for signature parity (used by the caller
+    when pre-computing the masks).
+
+Block-row layout: row `2k - 1` is the ux equation at cell
+`k = (j-1)*Nx + i`, row `2k` is the uy equation at cell k.
+
+Returns the kernel arguments unchanged (in-place mutation of the
+COO buffers, RHS, and `nnz_ref`).
+
+Topology: only `(Bounded, Bounded, Flat)` and `(Bounded, Periodic, Flat)`
+are supported in PR-A.2. Other combinations error.
+"""
+function _assemble_ssa_matrix!(I_idx::Vector{Int},
+                               J_idx::Vector{Int},
+                               vals::Vector{Float64},
+                               b_vec::Vector{Float64},
+                               nnz_ref::Ref{Int},
+                               ux_b, uy_b,
+                               beta_acx, beta_acy,
+                               visc_eff_int, visc_ab,
+                               ssa_mask_acx, ssa_mask_acy, mask_frnt,
+                               H_ice, f_ice,
+                               taud_acx, taud_acy,
+                               taul_int_acx, taul_int_acy,
+                               dx::Real, dy::Real, beta_min::Real;
+                               boundaries::Symbol=:bounded,
+                               lateral_bc::AbstractString="floating")
+
+    # ---- Topology checks (PR-A.2 scope). ----
+    Tx_top = topology(visc_eff_int.grid, 1)
+    Ty_top = topology(visc_eff_int.grid, 2)
+    Tx_top === Bounded || error(
+        "_assemble_ssa_matrix!: x-topology must be Bounded for PR-A.2 (got $(Tx_top)).")
+    (Ty_top === Bounded || Ty_top === Periodic) || error(
+        "_assemble_ssa_matrix!: y-topology must be Bounded or Periodic " *
+        "for PR-A.2 (got $(Ty_top)).")
+
+    # Fill halos on every input the kernel reads with i±1 / j±1 stencils.
+    # Note: the kernel does NOT use halo reads for the column-index
+    # arithmetic — it computes `im1`, `ip1`, etc. as wrapped/clamped
+    # integers. The halo fills here are only for fields read through
+    # the standard halo path (none in PR-A.2 — kept here as a hook
+    # for symmetry with the SIA wrapper). Each input is filled to keep
+    # callers honest about boundary state.
+    fill_halo_regions!(visc_eff_int)
+    fill_halo_regions!(visc_ab)
+    fill_halo_regions!(beta_acx)
+    fill_halo_regions!(beta_acy)
+    fill_halo_regions!(ssa_mask_acx)
+    fill_halo_regions!(ssa_mask_acy)
+    fill_halo_regions!(mask_frnt)
+    fill_halo_regions!(H_ice)
+    fill_halo_regions!(f_ice)
+    fill_halo_regions!(taud_acx)
+    fill_halo_regions!(taud_acy)
+    fill_halo_regions!(taul_int_acx)
+    fill_halo_regions!(taul_int_acy)
+    fill_halo_regions!(ux_b)
+    fill_halo_regions!(uy_b)
+
+    Ux  = interior(ux_b)
+    Uy  = interior(uy_b)
+    Bx  = interior(beta_acx)
+    By  = interior(beta_acy)
+    Naa = interior(visc_eff_int)
+    Nab = interior(visc_ab)
+    Mx  = interior(ssa_mask_acx)
+    My  = interior(ssa_mask_acy)
+    MF  = interior(mask_frnt)
+    Hi  = interior(H_ice)
+    Fi  = interior(f_ice)
+    Tdx = interior(taud_acx)
+    Tdy = interior(taud_acy)
+    Tlx = interior(taul_int_acx)
+    Tly = interior(taul_int_acy)
+
+    Nx = size(Hi, 1)
+    Ny = size(Hi, 2)
+
+    bcs = _ssa_resolve_bcs(boundaries)
+
+    # Fortran `inv_dx*N` factors (lines 221-227). We compute the
+    # exact same combinations to keep the per-row arithmetic
+    # bit-equivalent to the reference.
+    inv_dx     = 1.0 / dx
+    inv_dxdx   = 1.0 / (dx * dx)
+    inv_dy     = 1.0 / dy
+    inv_dydy   = 1.0 / (dy * dy)
+    inv_dxdy   = 1.0 / (dx * dy)
+
+    # COO write counter (mirrors Fortran `k`).
+    k = 0
+
+    # Helpers to read field values via Fortran cell indices (i, j).
+    # Map to Yelmo.jl staggered storage:
+    #   ux(i, j)        ↔ Ux[i+1, j, 1]                (slot wraps under Periodic-x)
+    #   uy(i, j)        ↔ Uy[i, j+1, 1]                (slot wraps under Periodic-y)
+    #   beta_acx(i, j)  ↔ Bx[i+1, j, 1]
+    #   beta_acy(i, j)  ↔ By[i, j+1, 1]
+    #   N_aa(i, j)      ↔ Naa[i, j, 1]                 (Center)
+    #   N_ab(i, j)      ↔ Nab[i+1, j+1, 1]             (Face/Face/Center)
+    #   ssa_mask_acx    ↔ Mx[i+1, j, 1]
+    #   ssa_mask_acy    ↔ My[i, j+1, 1]
+    #   mask_frnt(i, j) ↔ MF[i, j, 1]
+    #   H_ice(i, j)     ↔ Hi[i, j, 1]
+    #   f_ice(i, j)     ↔ Fi[i, j, 1]
+    #   taud_acx(i, j)  ↔ Tdx[i+1, j, 1]
+    #   taud_acy(i, j)  ↔ Tdy[i, j+1, 1]
+    #   taul_int_acx    ↔ Tlx[i+1, j, 1]
+    #   taul_int_acy    ↔ Tly[i, j+1, 1]
+    #
+    # The (im1, ip1, jm1, jp1) wrap below mirrors Fortran lines 249-257.
+    # Independent of grid topology — Fortran's matrix assembly assumes
+    # periodic wrap unconditionally and then applies the boundary-row
+    # special case based on `bcs(1:4)`. We do the same.
+
+    # Iterate over Fortran cell coordinates (1-based). The Fortran loop
+    # is `do n = 1, lgs%nmax-1, 2` which maps `(n+1)/2 → cell index k`,
+    # incrementing in (i, j) row-major (j outer, i inner). Match it.
+    @inbounds for j in 1:Ny, i in 1:Nx
+        # Periodic-wrap neighbour indices (Fortran 249-257). These are
+        # used for the column-index arithmetic; the actual access is
+        # not field-halo, so the wrap must be explicit here.
+        im1 = i - 1
+        if im1 == 0;     im1 = Nx;  end
+        ip1 = i + 1
+        if ip1 == Nx + 1; ip1 = 1;  end
+        jm1 = j - 1
+        if jm1 == 0;     jm1 = Ny;  end
+        jp1 = j + 1
+        if jp1 == Ny + 1; jp1 = 1;  end
+
+        # ip1f / jp1f are the storage slots for "the +1 face" — match
+        # the staggered-storage convention (slot i+1 under Bounded,
+        # mod1(i+1, Nx) under Periodic). Used for ux/uy/beta/Mx/My/Tdx/Tdy/Tlx/Tly
+        # reads at the (i, j) face position itself.
+        ip1f_i = _ip1_modular(i, Nx, Tx_top)
+        jp1f_j = _jp1_modular(j, Ny, Ty_top)
+
+        # ===========================================================
+        # ----- Equations for ux at cell (i, j) -----
+        # Fortran lines 259-543.
+        # ===========================================================
+        nr = _row_ux(i, j, Nx)
+
+        # Read the int-valued mask (Float64 storage; cast at site).
+        ssa_mask_x = Int(Mx[ip1f_i, j, 1])
+
+        if ssa_mask_x == 0
+            # Fortran lines 265-273. Dirichlet u = 0.
+            k += 1
+            _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+            b_vec[nr] = 0.0
+
+        elseif ssa_mask_x == -1
+            # Fortran lines 275-285. Prescribed velocity.
+            ux_now = Ux[ip1f_i, j, 1]
+            k += 1
+            _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+            b_vec[nr] = ux_now
+
+        elseif i == 1 && bcs[3] !== :periodic
+            # Fortran lines 287-314. Left boundary (i == 1).
+            if bcs[3] === :free_slip
+                # ux(1, j) - ux(2, j) = 0 → ux(1) = ux(2).
+                nc1 = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_ux(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else  # no-slip
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif i == Nx && bcs[1] !== :periodic
+            # Fortran lines 316-343. Right boundary.
+            if bcs[1] === :free_slip
+                nc1 = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_ux(Nx - 1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif j == 1 && bcs[4] !== :periodic
+            # Fortran lines 345-373. Lower boundary.
+            if bcs[4] === :free_slip
+                nc1 = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_ux(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif j == Ny && bcs[2] !== :periodic
+            # Fortran lines 375-403. Upper boundary.
+            if bcs[2] === :free_slip
+                nc1 = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_ux(i, Ny - 1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif ssa_mask_x == 3
+            # Fortran lines 404-473. Lateral BC at calving front.
+            if Fi[i, j, 1] == 1.0 && Fi[ip1, j, 1] < 1.0
+                # === Case 1: ice-free to the right === (Fortran 407-439)
+                N_aa_now = Naa[i, j, 1]
+
+                nc = _row_ux(im1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -4.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, jm1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -2.0 * inv_dy * N_aa_now)
+
+                nc = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    4.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    2.0 * inv_dy * N_aa_now)
+
+                b_vec[nr] = Tlx[ip1f_i, j, 1]
+            else
+                # === Case 2: ice-free to the left === (Fortran 440-472)
+                N_aa_now = Naa[ip1, j, 1]
+
+                nc = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -4.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(ip1, jm1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -2.0 * inv_dy * N_aa_now)
+
+                nc = _row_ux(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    4.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    2.0 * inv_dy * N_aa_now)
+
+                b_vec[nr] = Tlx[ip1f_i, j, 1]
+            end
+
+        else
+            # Fortran lines 475-540. === Inner SSA solution. ===
+            beta_now = Bx[ip1f_i, j, 1]
+            if ssa_mask_x == 1 && Bx[ip1f_i, j, 1] == 0.0
+                beta_now = beta_min
+            end
+
+            # Index helpers for `N_ab` reads. Fortran `N_ab(i, j)` ↔
+            # `Nab[i+1, j+1, 1]`. With wrapped (im1, jm1) this becomes
+            # `Nab[im1+1, j+1, 1]` etc. — but `im1+1` under wrap maps
+            # to `i` (when i == 1, im1 = Nx → im1+1 = Nx+1 which is
+            # out of bounds under Bounded-x; PR-A.2 only supports
+            # Bounded-x so we use the standard slot. For safety we
+            # use `_ab_idx` helpers below.
+            # Under Bounded-x: i+1 ∈ 2..Nx+1, im1+1 ∈ 1..Nx, both in
+            # bounds of the Nab array shape (Nx+1, Ny+1, 1).
+            # Under Periodic-y: j+1 = jp1f_j (Ny if j == Ny → wraps),
+            # jm1+1 = j (in bounds when j ≥ 1).
+            #
+            # For the inner-stencil reads at `(i, j)`, `(i, jm1)`,
+            # use slot `i+1, j+1` (always in bounds under Bounded-x)
+            # and slot `i+1, jp1f_j` for jp1 reads.
+            # Under Bounded-x, slot `i+1` ∈ 2..Nx+1 is in bounds for
+            # the (Nx+1, Ny+1)-shaped `Nab` interior. Under Periodic-y
+            # the Y-Face dim has shape Ny, so slot `j+1` must wrap via
+            # `_jp1_modular(j, Ny, Ty_top)`. Use the wrap helpers
+            # uniformly.
+            ip1f_x = _ip1_modular(i, Nx, Tx_top)
+            jp1f_y = _jp1_modular(j, Ny, Ty_top)
+            jm1_y  = _jp1_modular(jm1, Ny, Ty_top)   # = jm1 + 1 with wrap
+            im1_x  = _ip1_modular(im1, Nx, Tx_top)   # = im1 + 1 with wrap
+
+            Nab_ij   = Nab[ip1f_x, jp1f_y, 1]
+            Nab_ijm1 = Nab[ip1f_x, jm1_y,  1]
+            Nab_im1j = Nab[im1_x,  jp1f_y, 1]
+
+            # -- vx terms (Fortran 481-508). --
+            nc = _row_ux(i, j, Nx)
+            v  = -4.0 * inv_dxdx * (Naa[ip1, j, 1] + Naa[i, j, 1]) -
+                  1.0 * inv_dydy * (Nab_ij + Nab_ijm1) -
+                  beta_now
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_ux(ip1, j, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                4.0 * inv_dxdx * Naa[ip1, j, 1])
+
+            nc = _row_ux(im1, j, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                4.0 * inv_dxdx * Naa[i, j, 1])
+
+            nc = _row_ux(i, jp1, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                1.0 * inv_dydy * Nab_ij)
+
+            nc = _row_ux(i, jm1, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                1.0 * inv_dydy * Nab_ijm1)
+
+            # -- vy terms (Fortran 510-534). --
+            nc = _row_uy(i, j, Nx)
+            v = -2.0 * inv_dxdy * Naa[i, j, 1] -
+                 1.0 * inv_dxdy * Nab_ij
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_uy(ip1, j, Nx)
+            v =  2.0 * inv_dxdy * Naa[ip1, j, 1] +
+                 1.0 * inv_dxdy * Nab_ij
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_uy(ip1, jm1, Nx)
+            v = -2.0 * inv_dxdy * Naa[ip1, j, 1] -
+                 1.0 * inv_dxdy * Nab_ijm1
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_uy(i, jm1, Nx)
+            v =  2.0 * inv_dxdy * Naa[i, j, 1] +
+                 1.0 * inv_dxdy * Nab_ijm1
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            b_vec[nr] = Tdx[ip1f_i, j, 1]
+        end
+
+        # ===========================================================
+        # ----- Equations for uy at cell (i, j) -----
+        # Fortran lines 546-824.
+        # ===========================================================
+        nr = _row_uy(i, j, Nx)
+        ssa_mask_y = Int(My[i, jp1f_j, 1])
+
+        if ssa_mask_y == 0
+            k += 1
+            _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+            b_vec[nr] = 0.0
+
+        elseif ssa_mask_y == -1
+            uy_now = Uy[i, jp1f_j, 1]
+            k += 1
+            _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+            b_vec[nr] = uy_now
+
+        elseif j == 1 && bcs[4] !== :periodic
+            # Fortran lines 571-598.
+            if bcs[4] === :free_slip
+                nc1 = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_uy(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif j == Ny && bcs[2] !== :periodic
+            # Fortran lines 600-627.
+            if bcs[2] === :free_slip
+                nc1 = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_uy(i, Ny - 1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif i == 1 && bcs[3] !== :periodic
+            # Fortran lines 629-656.
+            if bcs[3] === :free_slip
+                nc1 = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_uy(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif i == Nx && bcs[1] !== :periodic
+            # Fortran lines 658-685.
+            if bcs[1] === :free_slip
+                nc1 = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc1, 1.0)
+                nc2 = _row_uy(Nx - 1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc2, -1.0)
+                b_vec[nr] = 0.0
+            else
+                k += 1
+                _push_coo!(I_idx, J_idx, vals, k, nr, nr, 1.0)
+                b_vec[nr] = 0.0
+            end
+
+        elseif ssa_mask_y == 3
+            # Fortran lines 687-756.
+            if Fi[i, j, 1] == 1.0 && Fi[i, jp1, 1] < 1.0
+                # Case 1: ice-free to the top (Fortran 690-722).
+                N_aa_now = Naa[i, j, 1]
+
+                nc = _row_ux(im1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -2.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, jm1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -4.0 * inv_dy * N_aa_now)
+
+                nc = _row_ux(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    2.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    4.0 * inv_dy * N_aa_now)
+
+                b_vec[nr] = Tly[i, jp1f_j, 1]
+            else
+                # Case 2: ice-free to the bottom (Fortran 723-755).
+                N_aa_now = Naa[i, jp1, 1]
+
+                nc = _row_ux(im1, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -2.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                   -4.0 * inv_dy * N_aa_now)
+
+                nc = _row_ux(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    2.0 * inv_dx * N_aa_now)
+
+                nc = _row_uy(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                    4.0 * inv_dy * N_aa_now)
+
+                b_vec[nr] = Tly[i, jp1f_j, 1]
+            end
+
+        else
+            # Fortran lines 758-822. === Inner SSA solution (uy). ===
+            beta_now = By[i, jp1f_j, 1]
+            if ssa_mask_y == 1 && By[i, jp1f_j, 1] == 0.0
+                beta_now = beta_min
+            end
+
+            ip1f_x = _ip1_modular(i, Nx, Tx_top)
+            jp1f_y = _jp1_modular(j, Ny, Ty_top)
+            im1_x  = _ip1_modular(im1, Nx, Tx_top)
+
+            Nab_ij   = Nab[ip1f_x, jp1f_y, 1]
+            Nab_im1j = Nab[im1_x,  jp1f_y, 1]
+
+            # -- vy terms (Fortran 764-791). --
+            nc = _row_uy(i, j, Nx)
+            v = -4.0 * inv_dydy * (Naa[i, jp1, 1] + Naa[i, j, 1]) -
+                 1.0 * inv_dxdx * (Nab_ij + Nab_im1j) -
+                 beta_now
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_uy(i, jp1, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                4.0 * inv_dydy * Naa[i, jp1, 1])
+
+            nc = _row_uy(i, jm1, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                4.0 * inv_dydy * Naa[i, j, 1])
+
+            nc = _row_uy(ip1, j, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                1.0 * inv_dxdx * Nab_ij)
+
+            nc = _row_uy(im1, j, Nx)
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc,
+                                1.0 * inv_dxdx * Nab_im1j)
+
+            # -- vx terms (Fortran 793-817). --
+            nc = _row_ux(i, j, Nx)
+            v = -2.0 * inv_dxdy * Naa[i, j, 1] -
+                 1.0 * inv_dxdy * Nab_ij
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_ux(i, jp1, Nx)
+            v =  2.0 * inv_dxdy * Naa[i, jp1, 1] +
+                 1.0 * inv_dxdy * Nab_ij
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_ux(im1, jp1, Nx)
+            v = -2.0 * inv_dxdy * Naa[i, jp1, 1] -
+                 1.0 * inv_dxdy * Nab_im1j
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            nc = _row_ux(im1, j, Nx)
+            v =  2.0 * inv_dxdy * Naa[i, j, 1] +
+                 1.0 * inv_dxdy * Nab_im1j
+            k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc, v)
+
+            b_vec[nr] = Tdy[i, jp1f_j, 1]
+        end
+    end
+
+    nnz_ref[] = k
+    return nothing
+end
+

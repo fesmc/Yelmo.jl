@@ -44,7 +44,7 @@ export dyn_step!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
-       set_ssa_masks!
+       set_ssa_masks!, _assemble_ssa_matrix!
 
 include("topology_helpers.jl")
 include("quadrature.jl")
