@@ -584,10 +584,34 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     #     `stagger_visc_aa_ab!`; consumed by the SSA matrix assembly
     #     (PR-A.2). Allocated here so the buffer is ready when the SSA
     #     solver wires up.
+    #   - `ssa_I_idx` / `ssa_J_idx` / `ssa_vals` (PR-A.2): COO triplet
+    #     buffers for the SSA stiffness matrix. Pre-allocated to a
+    #     generous size (2 * 9 * Nx * Ny) covering the 9-point inner
+    #     stencil for both ux and uy block rows. The actual non-zero
+    #     count is tracked in `ssa_nnz`.
+    #   - `ssa_b_vec` / `ssa_x_vec` (PR-A.2): RHS and solution buffers,
+    #     length 2 * Nx * Ny. The matrix-assembly kernel writes
+    #     `ssa_b_vec` and the (PR-B) Krylov solver writes `ssa_x_vec`.
+    #   - `ssa_iter_now` (PR-A.2): `Ref{Int}` for the Picard iteration
+    #     counter (PR-B's driver writes here).
+    Nx_int, Ny_int = size(g, 1), size(g, 2)
+    N_cells = Nx_int * Ny_int
+    N_rows = 2 * N_cells
+    N_nz_max = 2 * 9 * N_cells
+
     sia_scratch = (sia_tau_xz  = XFaceField(gt), sia_tau_yz  = YFaceField(gt),
                    ux_i_s      = XFaceField(g),  uy_i_s      = YFaceField(g),
                    ssa_n_aa_ab = Field((Face(), Face(), Center()), g))
-    dyn = merge(dyn, (scratch = sia_scratch,))
+    ssa_scratch = (
+        ssa_I_idx    = Vector{Int}(undef, N_nz_max),
+        ssa_J_idx    = Vector{Int}(undef, N_nz_max),
+        ssa_vals     = Vector{Float64}(undef, N_nz_max),
+        ssa_nnz      = Ref{Int}(0),
+        ssa_b_vec    = Vector{Float64}(undef, N_rows),
+        ssa_x_vec    = Vector{Float64}(undef, N_rows),
+        ssa_iter_now = Ref{Int}(0),
+    )
+    dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch),))
 
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
     # boundary conditions on the domain edge. The upwind advection
