@@ -48,7 +48,14 @@ using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
-export set_ssa_masks!, _assemble_ssa_matrix!
+using SparseArrays: SparseMatrixCSC, sparse
+using LinearAlgebra: norm
+using Krylov: bicgstab!
+using AlgebraicMultigrid: smoothed_aggregation, aspreconditioner,
+                          GaussSeidel, Jacobi
+
+export set_ssa_masks!, _assemble_ssa_matrix!,
+       _solve_ssa_linear!
 
 # Integer constants for `mask_frnt`. Mirror the Fortran values from
 # `solver_ssa_ac.f90:899-903`. `val_disabled = 5` is internal to
@@ -903,5 +910,95 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
 
     nnz_ref[] = k
     return nothing
+end
+
+# ----------------------------------------------------------------------
+# Linear-solve wrapper (PR-B commit 2).
+#
+# Runs Krylov.jl BiCGStab with an AlgebraicMultigrid.jl smoothed-
+# aggregation preconditioner over the assembled SSA system `A x = b`.
+# `A` is the COO-built `SparseMatrixCSC` and `b` is the assembled RHS.
+#
+# AMG configuration: per the locked-in SSASolver.smoother knob:
+#   :gauss_seidel → smoothed_aggregation(A; presmoother=GaussSeidel(),
+#                                         postsmoother=GaussSeidel())
+#   :jacobi       → smoothed_aggregation(A; presmoother=Jacobi(),
+#                                         postsmoother=Jacobi())
+#
+# AlgebraicMultigrid's `aspreconditioner` returns a `Preconditioner`
+# object whose `ldiv!` overload approximates `A^{-1} y`. We pass
+# `ldiv=true` to Krylov so it dispatches to `ldiv!` rather than `mul!`.
+#
+# Soft-warn on non-convergence: matches Fortran's Lis behavior of
+# logging non-convergence and proceeding (the outer Picard iteration
+# is the safety net).
+# ----------------------------------------------------------------------
+
+# Choose the AMG smoother per the SSASolver knob. Currently only
+# :gauss_seidel is wired — AlgebraicMultigrid.jl's `Jacobi`
+# constructor requires an explicit workspace vector matching the
+# level's matrix size at construction time, which doesn't fit the
+# closure-style API the SA driver expects. Future work: wrap a
+# closure that lazily constructs Jacobi(x; iter=1) with the level's
+# residual vector. Soft-fail with a clear error message for now —
+# matches the "no autonomous shortcuts" guidance from CLAUDE.md.
+function _amg_smoother(sym::Symbol)
+    if sym === :gauss_seidel
+        return GaussSeidel()
+    elseif sym === :jacobi
+        error("_amg_smoother: :jacobi smoother not yet supported. " *
+              "AlgebraicMultigrid.jl's Jacobi smoother needs a per-level " *
+              "workspace at construction time which the current wrapper " *
+              "doesn't provide. Use :gauss_seidel for now.")
+    else
+        error("_amg_smoother: smoother=$(sym) not supported. " *
+              "Choose :gauss_seidel (default).")
+    end
+end
+
+"""
+    _solve_ssa_linear!(scratch, A::SparseMatrixCSC{Float64,Int},
+                       b::Vector{Float64}, ssa::SSASolver) -> Vector{Float64}
+
+Solve `A x = b` for the SSA linear system using the configured Krylov
+method + AMG preconditioner. Returns `x` (a fresh `Vector{Float64}`
+sized to match `b`). Uses the Krylov workspace stored in
+`scratch.ssa_solver_workspace` so per-call allocation is minimal.
+
+Soft-warns (does not error) on non-convergence — Fortran-faithful;
+the outer Picard loop is the safety net for poor inner convergence.
+"""
+function _solve_ssa_linear!(scratch,
+                            A::SparseMatrixCSC{Float64,Int},
+                            b::Vector{Float64},
+                            ssa::SSASolver)
+    # Build (or rebuild) the AMG preconditioner. The matrix coefficients
+    # change every Picard iteration so we cannot cache across calls.
+    smoother = _amg_smoother(ssa.smoother)
+    ml = smoothed_aggregation(A; presmoother = smoother,
+                                  postsmoother = smoother)
+    M  = aspreconditioner(ml)
+    scratch.ssa_amg_cache[] = ml  # keep alive for diagnostics
+
+    # Run BiCGStab. The AMG `Preconditioner` overloads `ldiv!`, so pass
+    # ldiv=true to make Krylov call `ldiv!(y, M, x)` rather than `mul!`.
+    # Currently only :bicgstab is implemented; future expansion to
+    # :gmres / :cg goes here.
+    if ssa.method === :bicgstab
+        workspace = scratch.ssa_solver_workspace
+        bicgstab!(workspace, A, b;
+                  M = M, ldiv = true,
+                  rtol = ssa.rtol, itmax = ssa.itmax,
+                  history = false)
+        x = copy(workspace.x)
+        if !workspace.stats.solved
+            res = norm(A * x .- b)
+            @warn "SSA BiCGStab did not converge" niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
+        end
+        return x
+    else
+        error("_solve_ssa_linear!: method=$(ssa.method) not yet implemented. " *
+              "Currently only :bicgstab is supported.")
+    end
 end
 

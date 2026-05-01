@@ -47,10 +47,7 @@ export dyn_step!,
        stagger_visc_aa_ab!,
        set_ssa_masks!, _assemble_ssa_matrix!,
        Solver, SSASolver,
-       calc_velocity_ssa!, calc_basal_stress!,
-       picard_relax_visc!, picard_relax_vel!,
-       picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
-       set_inactive_margins!
+       _solve_ssa_linear!
 
 include("topology_helpers.jl")
 include("quadrature.jl")

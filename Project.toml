@@ -4,12 +4,20 @@ version = "0.1.0"
 authors = ["Alexander Robinson <alexander.robinson@awi.de>"]
 
 [deps]
+AlgebraicMultigrid = "2169fc97-5a83-5252-b627-83903c6c433c"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 FastGaussQuadrature = "442a2c76-b920-505d-bb47-c5924d526838"
+Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
 Oceananigans = "9e8cae18-63c1-5223-a75c-80ca9d6e9a09"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
+AlgebraicMultigrid = "1.2.0"
+Krylov = "0.10.6"
+LinearAlgebra = "1.12.0"
 Printf = "1.11.0"
+SparseArrays = "1.12.0"

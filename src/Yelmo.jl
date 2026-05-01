@@ -101,10 +101,6 @@ export gq2d_nodes
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!
 export stagger_visc_aa_ab!
 export set_ssa_masks!
-export calc_velocity_ssa!, calc_basal_stress!
-export picard_relax_visc!, picard_relax_vel!
-export picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!
-export set_inactive_margins!
 
 # YelmoIO
 export init_output
