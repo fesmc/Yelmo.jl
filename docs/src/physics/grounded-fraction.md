@@ -5,12 +5,11 @@ sub-grid-resolved area of cell `(i, j)` that is anchored to the bed
 (as opposed to floating). It is read by basal mass balance,
 calving, and grounding-line stress treatments. Yelmo.jl uses the
 **CISM bilinear-interpolation scheme** of Leguy et al. (2021), via
-IMAU-ICE v2.0, ported from
-[`physics/topography.f90:1896`](../yelmo/src/physics/topography.f90).
-The Julia implementation
-[`src/topo/grounded.jl`](../src/topo/grounded.jl) introduces two
-analytical-limit fixes that improve numerical accuracy without
-changing the algorithm structure.
+IMAU-ICE v2.0, ported from `physics/topography.f90:1896` (the
+linked Yelmo Fortran tree). The Julia implementation
+[`src/topo/grounded.jl`](https://github.com/fesmc/Yelmo.jl/blob/main/src/topo/grounded.jl)
+introduces two analytical-limit fixes that improve numerical
+accuracy without changing the algorithm structure.
 
 This document describes:
 
@@ -26,16 +25,16 @@ This document describes:
 
 Define the per-cell flotation function
 
-$$
+```math
 H_\mathrm{grnd}(x, y) = H_\mathrm{ice}(x, y) - \max\bigl(z_\mathrm{sl}(x, y) - z_\mathrm{bed}(x, y),\, 0\bigr) \cdot \frac{\rho_\mathrm{sw}}{\rho_\mathrm{ice}}
-$$
+```
 
 so that `H_grnd > 0` at grounded points and `H_grnd < 0` at
 floating points. The per-cell sub-grid grounded fraction is
 
-$$
+```math
 f_\mathrm{grnd}(i, j) = \frac{1}{|\Omega_{ij}|} \int_{\Omega_{ij}} \mathbb{1}[H_\mathrm{grnd}(x, y) \ge 0] \, dx\, dy.
-$$
+```
 
 ## 2. CISM sub-cell reconstruction
 
@@ -63,9 +62,9 @@ i+1   ─•─────•───────•─
 Each value is a 4-cell mean of `f_flt` at the surrounding cell
 centres. For example,
 
-$$
+```math
 f_{NW}(i, j) = \tfrac{1}{4}\bigl(f_\mathrm{flt}(i{-}1, j{+}1) + f_\mathrm{flt}(i, j{+}1) + f_\mathrm{flt}(i{-}1, j) + f_\mathrm{flt}(i, j)\bigr).
-$$
+```
 
 For any *bilinear* `f_flt(x, y) = a + b x + c y + d x y`, this
 4-cell mean equals the value of `f_flt` at the corner exactly —
@@ -82,27 +81,27 @@ Map each quadrant onto the unit square `[0, 1]²` with corner values
 `f_NW`, `f_NE`, `f_SW`, `f_SE`. Define the bilinear interpolant in
 terms of the SW corner:
 
-$$
+```math
 f(u, v) = \mathit{aa} + \mathit{bb}\,u + \mathit{cc}\,v + \mathit{dd}\,u\,v
-$$
+```
 
 where
 
-$$
+```math
 \begin{aligned}
 \mathit{aa} &= f_{SW},\\
 \mathit{bb} &= f_{SE} - f_{SW},\\
 \mathit{cc} &= f_{NW} - f_{SW},\\
 \mathit{dd} &= f_{NE} + f_{SW} - f_{NW} - f_{SE}.
 \end{aligned}
-$$
+```
 
 Note that `dd = 0` exactly when the bilinear interpolant degenerates
 to a linear function. We compute
 
-$$
+```math
 \varphi(\mathit{aa}, \mathit{bb}, \mathit{cc}, \mathit{dd}) = \int_0^1 \int_0^1 \mathbb{1}[f(u, v) \le 0] \, du\, dv.
-$$
+```
 
 By convention `f \le 0` is grounded and `f > 0` is floating; corners
 exactly equal to zero sit on the level set, contribute measure zero
@@ -129,9 +128,9 @@ For each scenario the level-set curve `f = 0` has a known geometry
 within the unit square, and the area `\varphi` is computable in
 closed form by integrating along `u`. The level-set curve is
 
-$$
+```math
 v(u) = -\frac{\mathit{aa} + \mathit{bb}\,u}{\mathit{cc} + \mathit{dd}\,u},
-$$
+```
 
 which is a hyperbola for `dd \ne 0` and a line for `dd = 0`.
 
@@ -142,9 +141,9 @@ bottom edge from `(0, 0)` to `(u_x, 0)` with `u_x = -aa/bb`, the
 level-set arc from `(u_x, 0)` to `(0, v_y)` with `v_y = -aa/cc`,
 and the left edge back to `(0, 0)`. Its area is
 
-$$
+```math
 \varphi_1 = \frac{(\mathit{bb}\,\mathit{cc} - \mathit{aa}\,\mathit{dd}) \log\bigl|1 - \frac{\mathit{aa}\,\mathit{dd}}{\mathit{bb}\,\mathit{cc}}\bigr| + \mathit{aa}\,\mathit{dd}}{\mathit{dd}^2}.
-$$
+```
 
 This is the standard Fortran/CISM formula. It has two numerical
 fragilities, addressed in §4.
@@ -154,9 +153,9 @@ fragilities, addressed in §4.
 By antisymmetry, the floating fraction equals
 `\varphi_1(-aa, -bb, -cc, -dd)`, so
 
-$$
+```math
 \varphi_2 = 1 - \varphi_1(-\mathit{aa}, -\mathit{bb}, -\mathit{cc}, -\mathit{dd}).
-$$
+```
 
 ### 3.5 Scenario 3 (south grounded, north floating)
 
@@ -164,9 +163,9 @@ The level set crosses from `(0, v_W)` on the left edge to `(1, v_E)`
 on the right edge. The grounded region lies below the curve.
 Integrating `v(u)` on `[0, 1]`:
 
-$$
+```math
 \varphi_3 = F(1) - F(0), \quad F(u) = \frac{(\mathit{bb}\,\mathit{cc} - \mathit{aa}\,\mathit{dd}) \log|\mathit{cc} + \mathit{dd}\,u| - \mathit{bb}\,\mathit{dd}\,u}{\mathit{dd}^2}.
-$$
+```
 
 Within scenario 3 both `cc > 0` and `cc + dd > 0`, so the log
 arguments are strictly positive and the formula is well-conditioned.
@@ -196,9 +195,9 @@ removable: as `dd \to 0`, the numerator vanishes at the same rate.
 Using `\log(1 - x) = -x - x^2/2 + O(x^3)` with `x = aa\,dd/(bb\,cc)`,
 expanding the numerator, and dividing by `dd^2`, we obtain
 
-$$
+```math
 \lim_{dd \to 0} \varphi_1 = \frac{\mathit{aa}^2}{2\,\mathit{bb}\,\mathit{cc}}.
-$$
+```
 
 Rather than evaluate this Taylor limit, we observe that for `dd = 0`
 the grounded set is *exactly* a half-plane intersected with the
@@ -219,9 +218,9 @@ and avoids the ill-conditioned division by `dd^2`. The Fortran
 In scenarios 1, 2, and 4 the formula has another removable
 singularity at
 
-$$
+```math
 \delta \equiv \mathit{bb}\,\mathit{cc} - \mathit{aa}\,\mathit{dd} \to 0,
-$$
+```
 
 which corresponds geometrically to the level-set curve passing
 through the corner being integrated to (e.g. the SW corner
@@ -230,16 +229,16 @@ sitting exactly on the curve). At the singularity,
 indeterminate form `0 \cdot \infty`. Using `\delta\log|\delta|
 \to 0` as `\delta \to 0`:
 
-$$
+```math
 \delta \cdot \log\bigl|\tfrac{\delta}{\mathit{bb}\,\mathit{cc}}\bigr|
 = \delta(\log|\delta| - \log|\mathit{bb}\,\mathit{cc}|) \to 0,
-$$
+```
 
 so the surviving term is `aa\,dd / dd^2 = aa/dd`. We thus take
 
-$$
+```math
 \lim_{\delta \to 0} \varphi_1 = \frac{\mathit{aa}}{\mathit{dd}}.
-$$
+```
 
 In the Julia kernel this is the helper
 
@@ -306,11 +305,10 @@ the negative final rate was the perturbation noise floor (~`5 \times
 - Leguy, G. R., Lipscomb, W. H., & Asay-Davis, X. S. (2021).
   *Marine ice sheet experiments with the Community Ice Sheet Model.*
   The Cryosphere, 15(7), 3229–3253.
-- Yelmo Fortran:
-  [`physics/topography.f90:determine_grounded_fractions`](../yelmo/src/physics/topography.f90)
-  (line 1896 onwards).
+- Yelmo Fortran: `physics/topography.f90:determine_grounded_fractions`
+  (line 1896 onwards in the linked Yelmo source tree).
 - Julia port:
-  [`src/topo/grounded.jl`](../src/topo/grounded.jl).
+  [`src/topo/grounded.jl`](https://github.com/fesmc/Yelmo.jl/blob/main/src/topo/grounded.jl).
 - Tests:
-  [`test/test_yelmo_topo.jl`](../test/test_yelmo_topo.jl) — search for
-  `determine_grounded_fractions!` testsets.
+  [`test/test_yelmo_topo.jl`](https://github.com/fesmc/Yelmo.jl/blob/main/test/test_yelmo_topo.jl)
+  — search for `determine_grounded_fractions!` testsets.

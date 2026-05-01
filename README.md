@@ -26,15 +26,52 @@ julia> using Yelmo
 
 ## Quick-start
 
-To do...
+```julia
+using Yelmo
+
+# Build a YelmoModel from a Yelmo Fortran restart NetCDF.
+y = YelmoModel("yelmo_restart.nc", 0.0;
+               alias  = "demo",
+               groups = (:bnd, :dyn, :mat, :thrm, :tpo),
+               strict = false)
+
+init_state!(y, 0.0)
+out = init_output(y, "demo.nc")
+
+for k in 1:5
+    step!(y, 1.0)
+    write_output!(out, y)
+end
+
+close(out)
+```
+
+A Fortran-backed [`YelmoMirror`] that goes through `libyelmo` exists
+behind the same interface — see the documentation linked below.
 
 ## Documentation
 
-- [`docs/topo-step.md`](docs/topo-step.md) — per-phase reference for
-  `topo_step!`, the topography component's per-timestep orchestrator
-  (advection, mass balance, residual cleanup, diagnostics).
-- [`docs/grounded-fraction.md`](docs/grounded-fraction.md) —
-  mathematical description of the subgrid grounded-fraction kernel
-  (CISM bilinear-interpolation scheme of Leguy et al. 2021), with
-  derivation of the analytical-limit stabilisations introduced by
-  the Julia port.
+The full documentation lives under [`docs/`](docs/) as a Documenter.jl
+site. Build locally:
+
+```bash
+julia --project=docs -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+then open `docs/build/index.html`. The site covers:
+
+- **Getting started** — install, link the Yelmo Fortran tree, run a
+  five-step smoke test.
+- **Concepts** — the two backends (`YelmoModel` vs `YelmoMirror`),
+  the six-component state, the Arakawa C grid, parameters vs constants.
+- **Usage** — loading from a restart, stepping the model, NetCDF
+  output and selection, lockstepping the two backends.
+- **Physics** — the topography step's 21-phase pipeline, advection,
+  mass balance (SMB / BMB / FMB / DMB / residual cleanup), the CISM
+  subgrid-grounded-fraction algorithm with analytical-limit fixes,
+  optional relaxation, and the level-set calving formulation.
+- **API reference** — auto-generated from the docstrings, one page
+  per public-facing module.
+- **Variables** — the canonical variable tables for the six state
+  groups (and how to add a new field).

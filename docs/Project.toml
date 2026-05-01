@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Yelmo = "f480e141-c095-4a5e-9e4c-f8685db772bc"
+
+[compat]
+Documenter = "1"
