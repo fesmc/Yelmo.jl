@@ -31,6 +31,7 @@ using Oceananigans
 using Oceananigans: interior
 using Oceananigans.Grids: topology, Bounded, Periodic
 using Oceananigans.BoundaryConditions: fill_halo_regions!
+using NCDatasets
 
 # ======================================================================
 # Test 1 — RectilinearGrid construction with periodic-y topology
@@ -378,4 +379,104 @@ end
                      H_ice, f_ice, ATT, 3.0, zeta_aa)
     @test all(isfinite, interior(ux))
     @test all(isfinite, interior(uy))
+end
+
+# ======================================================================
+# Test 5 — `_load_into_field!` is topology-aware on face fields
+# ======================================================================
+#
+# Regression for the Periodic-y / Periodic-x branch added to the
+# face-field `_load_into_field!` methods in `src/YelmoCore.jl`.
+# Fixture data is written at `(Nx, Ny)` Center resolution (Yelmo
+# Fortran's "all variables on cell-centred grid" convention). The
+# loader has to reshape that for Yelmo.jl's staggered Field interiors:
+#
+#   - Bounded-y YFaceField interior `(Nx, Ny+1, 1)` — write into
+#     slots `2:end`, replicate slot `1` from slot `2`.
+#   - Periodic-y YFaceField interior `(Nx, Ny, 1)` — direct copy,
+#     no replicate slot.
+#
+# Pre-fix, the YFaceField loader assumed Bounded-y unconditionally,
+# so under Periodic-y the broadcast `int[:, 2:end, 1] .= data` raised
+# a DimensionMismatch.
+
+@testset "loader: _load_into_field! face-field topology dispatch" begin
+    Nx, Ny = 4, 3
+    # Synthetic test pattern: data[i, j] = 10 * i + j.
+    data_x = Float64[10*i + j for i in 1:Nx, j in 1:Ny]
+    data_y = Float64[10*i + j for i in 1:Nx, j in 1:Ny]
+
+    mktempdir() do dir
+        fp = joinpath(dir, "synth_face_load.nc")
+        NCDataset(fp, "c") do ds
+            defDim(ds, "x", Nx)
+            defDim(ds, "y", Ny)
+            v = defVar(ds, "ux_face", Float64, ("x", "y"))
+            v[:, :] = data_x
+            v2 = defVar(ds, "uy_face", Float64, ("x", "y"))
+            v2[:, :] = data_y
+        end
+
+        # ----- Bounded-y YFaceField: legacy path, regression guard -----
+        g_bnd = RectilinearGrid(size=(Nx, Ny),
+                                x=(0.0, Float64(Nx)), y=(0.0, Float64(Ny)),
+                                topology=(Bounded, Bounded, Flat))
+        yf_bnd = YFaceField(g_bnd)
+        @test size(interior(yf_bnd)) == (Nx, Ny + 1, 1)
+        NCDataset(fp, "r") do ds
+            Yelmo.YelmoCore._load_into_field!(yf_bnd, ds["uy_face"])
+        end
+        intb = interior(yf_bnd)
+        # Slots 2..Ny+1 carry data[:, j] for j = 1..Ny.
+        for j in 1:Ny, i in 1:Nx
+            @test intb[i, j + 1, 1] == data_y[i, j]
+        end
+        # Slot 1 replicated from slot 2 (= data[:, 1]).
+        for i in 1:Nx
+            @test intb[i, 1, 1] == data_y[i, 1]
+        end
+
+        # ----- Periodic-y YFaceField: the fix -----
+        g_per_y = RectilinearGrid(size=(Nx, Ny),
+                                  x=(0.0, Float64(Nx)), y=(0.0, Float64(Ny)),
+                                  topology=(Bounded, Periodic, Flat))
+        yf_per = YFaceField(g_per_y)
+        @test size(interior(yf_per)) == (Nx, Ny, 1)
+        NCDataset(fp, "r") do ds
+            Yelmo.YelmoCore._load_into_field!(yf_per, ds["uy_face"])
+        end
+        intp = interior(yf_per)
+        # Direct copy: data[i, j] writes to int[i, j, 1] for j = 1..Ny.
+        for j in 1:Ny, i in 1:Nx
+            @test intp[i, j, 1] == data_y[i, j]
+        end
+
+        # ----- Bounded-x XFaceField: legacy path, regression guard -----
+        xf_bnd = XFaceField(g_bnd)
+        @test size(interior(xf_bnd)) == (Nx + 1, Ny, 1)
+        NCDataset(fp, "r") do ds
+            Yelmo.YelmoCore._load_into_field!(xf_bnd, ds["ux_face"])
+        end
+        intxb = interior(xf_bnd)
+        for j in 1:Ny, i in 1:Nx
+            @test intxb[i + 1, j, 1] == data_x[i, j]
+        end
+        for j in 1:Ny
+            @test intxb[1, j, 1] == data_x[1, j]
+        end
+
+        # ----- Periodic-x XFaceField: the symmetric fix -----
+        g_per_x = RectilinearGrid(size=(Nx, Ny),
+                                  x=(0.0, Float64(Nx)), y=(0.0, Float64(Ny)),
+                                  topology=(Periodic, Bounded, Flat))
+        xf_per = XFaceField(g_per_x)
+        @test size(interior(xf_per)) == (Nx, Ny, 1)
+        NCDataset(fp, "r") do ds
+            Yelmo.YelmoCore._load_into_field!(xf_per, ds["ux_face"])
+        end
+        intxp = interior(xf_per)
+        for j in 1:Ny, i in 1:Nx
+            @test intxp[i, j, 1] == data_x[i, j]
+        end
+    end
 end

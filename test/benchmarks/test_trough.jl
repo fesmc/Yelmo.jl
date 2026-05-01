@@ -132,23 +132,20 @@ end
     # =====================================================================
     # 1. File-based load.
     #
-    # NOTE: the Fortran TROUGH-F17 grid is periodic in y (the trough
-    # wraps around). The natural fix is `boundaries = :periodic_y`,
-    # but `_load_into_field!(::Field{Center, Face, Center}, ...)` in
-    # YelmoCore.jl currently assumes a Bounded YFaceField (Ny+1
-    # faces) when broadcasting Center-stored fixture data; under
-    # Periodic-y the YFaceField has Ny faces and the broadcast
-    # raises DimensionMismatch. Loading on `:bounded` works but
-    # leaves the y=1 / y=Ny rows of `ux_bar` clamped to zero by the
-    # SSA solver's no-slip BC (vs ~350 m/yr in the fixture), which
-    # contributes the bulk of the residual `err_ux` lockstep gap.
-    # Closing that gap requires extending the periodic-Face loader
-    # in production code, deferred to a follow-up task.
+    # The Fortran TROUGH-F17 grid is periodic in y (the trough wraps
+    # around). Load on `boundaries = :periodic_y` so the SSA solver
+    # treats the y=1 / y=Ny rows as wrapping interior rows rather
+    # than clamping them to zero via a Bounded no-slip BC. The
+    # `_load_into_field!` methods in `src/YelmoCore.jl` are
+    # topology-aware and dispatch on the y-axis topology so a
+    # Periodic-y YFaceField (interior shape `(Nx, Ny, 1)`) loads
+    # the fixture's `(Nx, Ny)` data directly, no replicate slot.
     # =====================================================================
     p = _trough_yelmo_params()
     y_file = YelmoModel(fixture_path, _T_OUT;
                         alias  = "trough_f17_load",
                         p      = p,
+                        boundaries = :periodic_y,
                         groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                         strict = false)
 
@@ -160,17 +157,20 @@ end
     #    returns only Center-aligned fields, then routes them through
     #    the same allocation path the file loader uses.
     # =====================================================================
-    y_mem = YelmoModel(_SPEC, _T_OUT; p=p)
+    y_mem = YelmoModel(_SPEC, _T_OUT; p=p, boundaries = :periodic_y)
     @test y_mem isa AbstractYelmoModel
     @test y_mem.time == _T_OUT
 
     Nx, Ny = length(_SPEC.xc), length(_SPEC.yc)
 
     # Shape check: 88×21×1 (singleton z-axis on a Flat grid).
+    # Under Periodic-y, YFaceField has Ny face slots (the Ny+1-th face
+    # is the 1-st by wrap and is not stored). XFaceField under Bounded-x
+    # still has Nx+1 slots.
     @test size(interior(y_mem.tpo.H_ice))    == (Nx, Ny, 1)
     @test size(interior(y_file.tpo.H_ice))   == (Nx, Ny, 1)
-    @test size(interior(y_file.dyn.ux_b))    == (Nx + 1, Ny, 1)   # XFaceField
-    @test size(interior(y_file.dyn.uy_b))    == (Nx, Ny + 1, 1)   # YFaceField
+    @test size(interior(y_file.dyn.ux_b))    == (Nx + 1, Ny, 1)   # XFaceField, Bounded-x
+    @test size(interior(y_file.dyn.uy_b))    == (Nx, Ny, 1)       # YFaceField, Periodic-y
 
     # =====================================================================
     # 3. Center-field state agreement: file vs in-memory at machine

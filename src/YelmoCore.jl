@@ -780,29 +780,74 @@ _read_nc_3d(ncvar) = ndims(ncvar) == 3 ? ncvar[:, :, :] : ncvar[:, :, :, 1]
 @inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
 function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Face, Center}
+    # XFaceField loader. Interior shape depends on x-axis topology:
+    #   - Bounded-x:  `(Nx+1, Ny[, Nz])` — Ny cells × (Nx+1) face slots.
+    #     Fixture stores face data at `(Nx, Ny[, Nz])` (Fortran cell-centred
+    #     convention); we write `data` into slots `[2:end, :, …]` and
+    #     replicate the leading slot from the first written column to
+    #     match the convention used by `load_field_from_dataset_2D`.
+    #   - Periodic-x: `(Nx, Ny[, Nz])` — incoming data shape matches
+    #     interior shape directly; write in place, no replicate slot.
+    #
+    # The `Tx` dispatch matches the pattern used by `_ip1_modular` and
+    # related helpers in `src/dyn/topology_helpers.jl`.
+    Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
     if _is_3d_field(int)
         data = _read_nc_3d(ncvar)
-        int[2:end, :, :] .= data
-        int[1, :, :]     .= @view data[1, :, :]
+        if Tx === Bounded
+            int[2:end, :, :] .= data
+            int[1, :, :]     .= @view data[1, :, :]
+        elseif Tx === Periodic
+            int[:, :, :] .= data
+        else
+            error("_load_into_field!(XFaceField, 3D): unsupported x-topology $Tx")
+        end
     else
         data = _read_nc_2d(ncvar)
-        int[2:end, :, 1] .= data
-        int[1, :, 1]     .= @view data[1, :]
+        if Tx === Bounded
+            int[2:end, :, 1] .= data
+            int[1, :, 1]     .= @view data[1, :]
+        elseif Tx === Periodic
+            int[:, :, 1] .= data
+        else
+            error("_load_into_field!(XFaceField, 2D): unsupported x-topology $Tx")
+        end
     end
     return field
 end
 
 function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Face, Center}
+    # YFaceField loader. Symmetric to the XFaceField method above —
+    # interior shape depends on y-axis topology:
+    #   - Bounded-y:  `(Nx, Ny+1[, Nz])`. Fixture stores `(Nx, Ny[, Nz])`,
+    #     written into slots `[:, 2:end, …]` with the first slot
+    #     replicated.
+    #   - Periodic-y: `(Nx, Ny[, Nz])`. Direct copy — no replicate slot,
+    #     no extra face row (the `Ny+1`-th face is the `1`-st by wrap
+    #     and is not stored).
+    _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
     if _is_3d_field(int)
         data = _read_nc_3d(ncvar)
-        int[:, 2:end, :] .= data
-        int[:, 1, :]     .= @view data[:, 1, :]
+        if Ty === Bounded
+            int[:, 2:end, :] .= data
+            int[:, 1, :]     .= @view data[:, 1, :]
+        elseif Ty === Periodic
+            int[:, :, :] .= data
+        else
+            error("_load_into_field!(YFaceField, 3D): unsupported y-topology $Ty")
+        end
     else
         data = _read_nc_2d(ncvar)
-        int[:, 2:end, 1] .= data
-        int[:, 1, 1]     .= @view data[:, 1]
+        if Ty === Bounded
+            int[:, 2:end, 1] .= data
+            int[:, 1, 1]     .= @view data[:, 1]
+        elseif Ty === Periodic
+            int[:, :, 1] .= data
+        else
+            error("_load_into_field!(YFaceField, 2D): unsupported y-topology $Ty")
+        end
     end
     return field
 end
