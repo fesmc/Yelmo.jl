@@ -53,14 +53,13 @@ import Pkg; Pkg.activate("..")
 # spatially-varying β, and uniform forcing — three orthogonal axes
 # beyond the trough / slab tests already in CI.
 #
-# NOTE: This test currently uses `visc_method=0` (constant viscosity).
-# `visc_method=1` (Gaussian-quadrature) produces a ~5% structural
-# asymmetry under fully-periodic BC with spatially-varying β
-# (rel err_ux=1.88%, rel err_uy=5.48% vs ~1e-9 with visc_method=0).
-# The Phase C bisect (cb2fe84..bc6b677 + this commit) traced the bug
-# to `calc_visc_eff_3D_nodes!` — likely a periodic-wrap bug in face-
-# staggered velocity gradients or aa→ac stagger reads. Tracked for
-# follow-up; see PR description.
+# Test exercises the SSA solver under fully-periodic boundaries with
+# `visc_method=1` (Gaussian-quadrature). Prior to the periodic-wrap fix
+# in viscosity.jl this test used `visc_method=0` due to a bug in
+# `calc_visc_eff_3D_nodes!` / `calc_visc_eff_3D_aa!` /
+# `_calc_strain_rate_horizontal_2D!` — Bounded-style `max(i-1,1)` /
+# `min(i+1,Nx)` clamps that did not wrap under periodic BC. See the
+# git log for details.
 
 using Test
 using Yelmo
@@ -76,15 +75,14 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 
 # HOM-C SSA parameters: solver = "ssa", external β (`beta_method = -1`,
 # `beta_gl_stag = -1` so pre-filled β fields survive every Picard
-# iteration), constant viscosity (`visc_method = 0` reads directly from
-# `dyn.visc`, which Yelmo fills uniformly with `visc_const`), N_eff
-# irrelevant under external β, isothermal ATT.
+# iteration), Glen-flow viscosity via Gauss quadrature
+# (`visc_method = 1` → `calc_visc_eff_3D_nodes!`), N_eff irrelevant
+# under external β, isothermal ATT.
 function _hom_c_yelmo_params()
     return YelmoModelParameters("hom_c";
         ydyn = ydyn_params(
             solver         = "ssa",
-            visc_method    = 0,                       # constant viscosity (visc_method=1 has known asymmetry bug)
-            visc_const     = 1e7,
+            visc_method    = 1,                       # Glen-flow Gauss-quadrature
             beta_method    = -1,                      # external β (preserved by Picard loop)
             beta_gl_stag   = -1,                      # bypass standard staggering + GL block
             beta_const     = 1000.0,
