@@ -375,3 +375,267 @@ end
         @test interior(s.beta_acx)[i+1, j, 1] == 100.0
     end
 end
+
+# ======================================================================
+# Commit 2 — viscosity helpers
+# ======================================================================
+#
+# Glen-flow effective viscosity (Lipscomb 2019 Eq. 2):
+#   visc = 0.5 * eps_eff_sq^p1 * ATT^p2,  p1 = (1-n)/(2n), p2 = -1/n
+#
+# For a uniform x-velocity ramp ux_face[i+1, j] = U·i·dx and uy = 0:
+#   dudx_aa = (ux[i+1] - ux[i]) / dx = U  (independent of i, j)
+#   dudy = dvdx = dvdy = 0
+#   eps_sq = U² + eps_0²
+
+# Helper: build a 3D ice grid for ATT/visc.
+_grid3d(Nx, Ny, Nz; dx=1.0) = RectilinearGrid(size=(Nx, Ny, Nz),
+                                              x=(0.0, Nx*dx), y=(0.0, Ny*dx),
+                                              z=(0.0, 1.0),
+                                              topology=(Bounded, Bounded, Bounded))
+
+@testset "calc_visc_eff_3D_aa!: linear-x velocity, hand-derived" begin
+    Nx, Ny, Nz = 5, 4, 3
+    dx = 1000.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+
+    # Linear-x face velocity: ux[i+1, j, 1] = U_per_m · i · dx
+    # → centered difference dudx_aa = U_per_m everywhere.
+    U_per_m = 1e-3
+    ux  = XFaceField(g)
+    uy  = YFaceField(g);  fill!(interior(uy), 0.0)
+    for j in 1:Ny, i in 0:Nx
+        interior(ux)[i+1, j, 1] = U_per_m * i * dx
+    end
+
+    H_ice  = CenterField(g);  fill!(interior(H_ice),  1000.0)
+    f_ice  = CenterField(g);  fill!(interior(f_ice),  1.0)
+    ATT_3d = CenterField(g3); fill!(interior(ATT_3d), 1e-16)
+    visc_3d = CenterField(g3)
+
+    n_glen, eps_0 = 3.0, 1e-6
+
+    calc_visc_eff_3D_aa!(visc_3d, ux, uy, ATT_3d, H_ice, f_ice, zeta_aa,
+                         dx, dx, n_glen, eps_0)
+
+    p1 = (1.0 - n_glen) / (2.0 * n_glen)
+    p2 = -1.0 / n_glen
+    eps_sq = U_per_m^2 + eps_0^2
+    expected = 0.5 * eps_sq^p1 * (1e-16)^p2
+
+    # Check interior cells (skip outermost row/col where im1/jm1 clamp).
+    for k in 1:Nz, j in 2:Ny-1, i in 2:Nx-1
+        @test interior(visc_3d)[i, j, k] ≈ expected rtol=1e-9
+    end
+end
+
+@testset "calc_visc_eff_3D_aa!: ice-free cells get visc=0" begin
+    Nx, Ny, Nz = 4, 3, 2
+    dx = 1.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+
+    ux = XFaceField(g);  fill!(interior(ux), 0.0)
+    uy = YFaceField(g);  fill!(interior(uy), 0.0)
+    H_ice = CenterField(g);  fill!(interior(H_ice), 1000.0)
+    f_ice = CenterField(g);  fill!(interior(f_ice), 1.0)
+    interior(f_ice)[2, 2, 1] = 0.5   # partial ice
+    ATT_3d = CenterField(g3); fill!(interior(ATT_3d), 1e-16)
+    visc_3d = CenterField(g3)
+
+    calc_visc_eff_3D_aa!(visc_3d, ux, uy, ATT_3d, H_ice, f_ice, zeta_aa,
+                         dx, dx, 3.0, 1e-6)
+    # Cell (2, 2) has f_ice<1 → visc[2, 2, :] = 0.
+    @test interior(visc_3d)[2, 2, 1] == 0.0
+    @test interior(visc_3d)[2, 2, 2] == 0.0
+end
+
+@testset "calc_visc_eff_3D_nodes!: linear-x velocity, agrees with _aa" begin
+    # On a smooth uniform-strain-rate slab, both quadrature variants
+    # should agree at deep-interior cells. The two kernels differ near
+    # the domain edge: `_aa` reads `(ux(i)-ux(im1))/dx` so at i=1 the
+    # clamped im1=1 gives dudx=0; `_nodes` reads
+    # `(ux(ip1)-ux(im1))/(2dx)` (from `calc_strain_rate_horizontal_2D`)
+    # which gives U/2 at i=1. The corner-stagger in `_nodes` then
+    # propagates this i=1 oddity into cell i=2 too. Cells i ≥ 3 are
+    # unaffected and agree to ~1%.
+    Nx, Ny, Nz = 8, 5, 3
+    dx = 1000.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+
+    U_per_m = 1e-3
+    ux = XFaceField(g)
+    for j in 1:Ny, i in 0:Nx
+        interior(ux)[i+1, j, 1] = U_per_m * i * dx
+    end
+    uy = YFaceField(g);  fill!(interior(uy), 0.0)
+    H_ice = CenterField(g);  fill!(interior(H_ice), 1000.0)
+    f_ice = CenterField(g);  fill!(interior(f_ice), 1.0)
+    ATT_3d = CenterField(g3); fill!(interior(ATT_3d), 1e-16)
+
+    visc_aa = CenterField(g3)
+    visc_no = CenterField(g3)
+
+    calc_visc_eff_3D_aa!(visc_aa, ux, uy, ATT_3d, H_ice, f_ice, zeta_aa,
+                         dx, dx, 3.0, 1e-6)
+    calc_visc_eff_3D_nodes!(visc_no, ux, uy, ATT_3d, H_ice, f_ice, zeta_aa,
+                            dx, dx, 3.0, 1e-6)
+
+    # Deep-interior cells (skip i ≤ 2 and i ≥ Nx-1, j ≤ 1 and j ≥ Ny).
+    for k in 1:Nz, j in 2:Ny-1, i in 3:Nx-2
+        a = interior(visc_aa)[i, j, k]
+        b = interior(visc_no)[i, j, k]
+        @test abs(a - b) / abs(a) < 1e-2
+    end
+end
+
+@testset "calc_visc_eff_3D_nodes!: hand-derived linear-x answer" begin
+    # On a smooth uniform-gradient slab, the corner-stagger averaging
+    # of dudx (which is constant = U) preserves the constant value at
+    # every node, so the result equals the analytical Glen formula.
+    Nx, Ny, Nz = 5, 4, 2
+    dx = 1000.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+
+    U_per_m = 1e-3
+    ux = XFaceField(g)
+    for j in 1:Ny, i in 0:Nx
+        interior(ux)[i+1, j, 1] = U_per_m * i * dx
+    end
+    uy = YFaceField(g);  fill!(interior(uy), 0.0)
+    H_ice = CenterField(g);  fill!(interior(H_ice), 1000.0)
+    f_ice = CenterField(g);  fill!(interior(f_ice), 1.0)
+    ATT_3d = CenterField(g3); fill!(interior(ATT_3d), 1e-16)
+    visc_no = CenterField(g3)
+
+    n_glen, eps_0 = 3.0, 1e-6
+    calc_visc_eff_3D_nodes!(visc_no, ux, uy, ATT_3d, H_ice, f_ice, zeta_aa,
+                            dx, dx, n_glen, eps_0)
+
+    p1 = (1.0 - n_glen) / (2.0 * n_glen)
+    p2 = -1.0 / n_glen
+    eps_sq = U_per_m^2 + eps_0^2
+    expected = 0.5 * eps_sq^p1 * (1e-16)^p2
+
+    # Inner cells: gauss-quadrature uniform in this scenario.
+    for k in 1:Nz, j in 2:Ny-1, i in 3:Nx-2
+        @test interior(visc_no)[i, j, k] ≈ expected rtol=1e-6
+    end
+end
+
+@testset "calc_visc_eff_int!: trapezoidal slab" begin
+    Nx, Ny, Nz = 3, 3, 4
+    dx = 1.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    # zeta spans [0, 1] → ∫ dζ = 1, so trapezoidal integral of a
+    # constant `c` from zeta_aa[1] to zeta_aa[end] equals
+    # c · (zeta_aa[end] - zeta_aa[1]) — NOT 1·c, because the Fortran
+    # `integrate_trapezoid1D_pt` doesn't include the endpoints. Use
+    # the same span the kernel uses.
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+    span    = zeta_aa[end] - zeta_aa[1]
+
+    visc_3d  = CenterField(g3); fill!(interior(visc_3d), 1e8)
+    visc_int = CenterField(g)
+    H_ice    = CenterField(g);  fill!(interior(H_ice), 1000.0)
+    f_ice    = CenterField(g);  fill!(interior(f_ice), 1.0)
+
+    calc_visc_eff_int!(visc_int, visc_3d, H_ice, f_ice, zeta_aa)
+
+    # visc_eff_mean = 1e8 · span; visc_int = visc_eff_mean · H_ice.
+    expected = 1e8 * span * 1000.0
+    for j in 1:Ny, i in 1:Nx
+        @test interior(visc_int)[i, j, 1] ≈ expected rtol=1e-9
+    end
+end
+
+@testset "calc_visc_eff_int!: ice-free cells get floor visc_min" begin
+    Nx, Ny, Nz = 3, 3, 2
+    dx = 1.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    g3 = _grid3d(Nx, Ny, Nz; dx=dx)
+    zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
+
+    visc_3d  = CenterField(g3); fill!(interior(visc_3d), 1e8)
+    visc_int = CenterField(g)
+    H_ice    = CenterField(g);  fill!(interior(H_ice), 1000.0)
+    f_ice    = CenterField(g);  fill!(interior(f_ice), 1.0)
+    interior(f_ice)[1, 1, 1] = 0.0
+
+    calc_visc_eff_int!(visc_int, visc_3d, H_ice, f_ice, zeta_aa)
+
+    # Ice-free cell: kernel sets visc_int = 0, then floor → visc_min.
+    @test interior(visc_int)[1, 1, 1] == 1e5
+    # Other cells: span * 1e8 * 1000.
+    span = zeta_aa[end] - zeta_aa[1]
+    @test interior(visc_int)[2, 2, 1] ≈ 1e8 * span * 1000.0 rtol=1e-9
+end
+
+@testset "stagger_visc_aa_ab!: 4-cell average at interior corners" begin
+    Nx, Ny = 4, 4
+    g = _bounded_2d(Nx, Ny)
+    visc_2d = CenterField(g);   fill!(interior(visc_2d), 1e8)
+    H_ice   = CenterField(g);   fill!(interior(H_ice),   1000.0)
+    f_ice   = CenterField(g);   fill!(interior(f_ice),   1.0)
+
+    visc_ab = Field((Face(), Face(), Center()), g)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+
+    # Interior corners (i, j) for i in 1:Nx, j in 1:Ny → array index
+    # [i+1, j+1, 1]. With f_ice=1 everywhere, each corner reads 4
+    # iced cells → mean = 1e8.
+    for j in 1:Ny, i in 1:Nx
+        @test interior(visc_ab)[i+1, j+1, 1] ≈ 1e8
+    end
+end
+
+@testset "stagger_visc_aa_ab!: only ice-covered neighbours contribute" begin
+    Nx, Ny = 4, 4
+    g = _bounded_2d(Nx, Ny)
+    visc_2d = CenterField(g);   fill!(interior(visc_2d), 1e8)
+    H_ice   = CenterField(g);   fill!(interior(H_ice),   1000.0)
+    f_ice   = CenterField(g);   fill!(interior(f_ice),   1.0)
+
+    interior(f_ice)[2, 2, 1] = 0.5   # partial ice excluded
+    interior(visc_2d)[2, 2, 1] = 5e8
+
+    visc_ab = Field((Face(), Face(), Center()), g)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+
+    # Corner (i=1, j=1) reads aa-cells (1, 1), (2, 1), (1, 2), (2, 2).
+    # Cell (2, 2) excluded. Mean of the other three (all 1e8) = 1e8.
+    @test interior(visc_ab)[2, 2, 1] ≈ 1e8 rtol=1e-12
+    # Corner not touching cell (2, 2) — e.g. (i=3, j=3) → reads cells
+    # (3, 3), (4, 3), (3, 4), (4, 4); all iced → mean = 1e8.
+    @test interior(visc_ab)[4, 4, 1] ≈ 1e8 rtol=1e-12
+end
+
+@testset "stagger_visc_aa_ab!: zero corner when no neighbour is iced" begin
+    Nx, Ny = 4, 4
+    g = _bounded_2d(Nx, Ny)
+    visc_2d = CenterField(g);   fill!(interior(visc_2d), 1e8)
+    H_ice   = CenterField(g);   fill!(interior(H_ice),   1000.0)
+    f_ice   = CenterField(g);   fill!(interior(f_ice),   0.0)
+
+    visc_ab = Field((Face(), Face(), Center()), g)
+    fill!(interior(visc_ab), 0.0)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+    @test maximum(abs.(interior(visc_ab))) == 0.0
+end
+
+# Smoke: verify the new `dyn.scratch.ssa_n_aa_ab` field type is what
+# `stagger_visc_aa_ab!` expects (corner-staggered, shape Nx+1 × Ny+1).
+@testset "dyn.scratch.ssa_n_aa_ab: allocation shape" begin
+    Nx, Ny = 4, 4
+    g  = _bounded_2d(Nx, Ny)
+    f  = Field((Face(), Face(), Center()), g)
+    @test size(interior(f)) == (Nx + 1, Ny + 1, 1)
+end
