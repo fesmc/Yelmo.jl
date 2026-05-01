@@ -136,3 +136,37 @@ const _NX   = length(_SPEC.xc)   # 31
     @test all(isfinite, ux_ref)
     @test all(isfinite, uy_ref)
 end
+
+# ----------------------------------------------------------------------
+# TroughBenchmark construction smoke (no fixture round-trip — that lives
+# in `test_trough.jl` once the YelmoMirror-produced fixture is committed).
+# ----------------------------------------------------------------------
+
+@testset "benchmarks: TroughBenchmark(:F17) construction" begin
+    # 8-km variant for the regression fixture (smaller — fits in <1 MB).
+    b8 = TroughBenchmark(:F17; dx_km=8.0)
+    @test b8.variant === :F17
+    @test b8.dx_km   == 8.0
+    @test length(b8.xc) == 88                  # int(700/8) + 1
+    @test length(b8.yc) == 21                  # int(160/8) + 1
+    @test b8.xc[1]   == 0.0                    # Fortran origin in x
+    @test b8.xc[end] == 696_000.0              # (Nx-1)·dx in metres
+    @test b8.yc[1]   == -80_000.0              # -ly/2
+    @test b8.yc[end] ==  80_000.0              # +ly/2
+    @test b8.namelist_path |> isabspath        # resolved path
+    @test endswith(b8.namelist_path, "specs/yelmo_TROUGH.nml")
+
+    # 4-km variant for higher-fidelity local runs.
+    b4 = TroughBenchmark(:F17; dx_km=4.0)
+    @test length(b4.xc) == 176                 # int(700/4) + 1
+    @test length(b4.yc) == 41                  # int(160/4) + 1
+
+    # Fields default to TROUGH-F17.nml values.
+    @test b8.fc_km   == 16.0
+    @test b8.dc_m    == 500.0
+    @test b8.wc_km   == 24.0
+    @test b8.x_cf_km == 640.0
+
+    # Variant validation.
+    @test_throws ErrorException TroughBenchmark(:F18; dx_km=8.0)
+end
