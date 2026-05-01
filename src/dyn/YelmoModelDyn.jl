@@ -31,6 +31,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
+using ..YelmoSolvers: Solver, SSASolver
 
 import ..YelmoCore: dyn_step!
 
@@ -44,7 +45,12 @@ export dyn_step!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
-       set_ssa_masks!, _assemble_ssa_matrix!
+       set_ssa_masks!, _assemble_ssa_matrix!,
+       Solver, SSASolver,
+       calc_velocity_ssa!, calc_basal_stress!,
+       picard_relax_visc!, picard_relax_vel!,
+       picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
+       set_inactive_margins!
 
 include("topology_helpers.jl")
 include("quadrature.jl")
