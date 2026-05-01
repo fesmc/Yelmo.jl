@@ -636,6 +636,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_picard_ux_b_nm1        = XFaceField(g),
         ssa_picard_uy_b_nm1        = YFaceField(g),
         ssa_residuals              = Vector{Float64}(undef, 100),
+        # Bed (zeta = 0) / surface (zeta = 1) visc boundary fields for
+        # the Option C trapezoidal-with-boundary depth-integration in
+        # `calc_visc_eff_int!`. Filled per Picard iteration in
+        # `calc_velocity_ssa!` from the nearest-Center value.
+        ssa_visc_eff_b             = CenterField(g),
+        ssa_visc_eff_s             = CenterField(g),
     )
     dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch),))
 

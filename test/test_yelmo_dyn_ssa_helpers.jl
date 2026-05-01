@@ -530,28 +530,29 @@ end
     end
 end
 
-@testset "calc_visc_eff_int!: trapezoidal slab" begin
+@testset "calc_visc_eff_int!: trapezoidal slab (Option C, full [0,1])" begin
     Nx, Ny, Nz = 3, 3, 4
     dx = 1.0
     g  = _bounded_2d(Nx, Ny; dx=dx)
     g3 = _grid3d(Nx, Ny, Nz; dx=dx)
-    # zeta spans [0, 1] → ∫ dζ = 1, so trapezoidal integral of a
-    # constant `c` from zeta_aa[1] to zeta_aa[end] equals
-    # c · (zeta_aa[end] - zeta_aa[1]) — NOT 1·c, because the Fortran
-    # `integrate_trapezoid1D_pt` doesn't include the endpoints. Use
-    # the same span the kernel uses.
+    # Option C: 3D `visc_eff` Center stagger does NOT include zeta = 0
+    # or zeta = 1; bed/surface boundary visc are passed in separately.
+    # For a constant-1e8 column with bed/surface boundary visc also =
+    # 1e8, the full ∫₀¹ visc dζ = 1e8 exactly (no end-strip drop).
     zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
-    span    = zeta_aa[end] - zeta_aa[1]
 
     visc_3d  = CenterField(g3); fill!(interior(visc_3d), 1e8)
+    visc_b   = CenterField(g);  fill!(interior(visc_b),  1e8)
+    visc_s   = CenterField(g);  fill!(interior(visc_s),  1e8)
     visc_int = CenterField(g)
     H_ice    = CenterField(g);  fill!(interior(H_ice), 1000.0)
     f_ice    = CenterField(g);  fill!(interior(f_ice), 1.0)
 
-    calc_visc_eff_int!(visc_int, visc_3d, H_ice, f_ice, zeta_aa)
+    calc_visc_eff_int!(visc_int, visc_3d, visc_b, visc_s,
+                       H_ice, f_ice, zeta_aa)
 
-    # visc_eff_mean = 1e8 · span; visc_int = visc_eff_mean · H_ice.
-    expected = 1e8 * span * 1000.0
+    # ∫₀¹ visc dζ = 1e8; visc_int = 1e8 · H_ice = 1e11.
+    expected = 1e8 * 1.0 * 1000.0
     for j in 1:Ny, i in 1:Nx
         @test interior(visc_int)[i, j, 1] ≈ expected rtol=1e-9
     end
@@ -565,18 +566,20 @@ end
     zeta_aa = collect(range(0.5/Nz, 1 - 0.5/Nz, length=Nz))
 
     visc_3d  = CenterField(g3); fill!(interior(visc_3d), 1e8)
+    visc_b   = CenterField(g);  fill!(interior(visc_b),  1e8)
+    visc_s   = CenterField(g);  fill!(interior(visc_s),  1e8)
     visc_int = CenterField(g)
     H_ice    = CenterField(g);  fill!(interior(H_ice), 1000.0)
     f_ice    = CenterField(g);  fill!(interior(f_ice), 1.0)
     interior(f_ice)[1, 1, 1] = 0.0
 
-    calc_visc_eff_int!(visc_int, visc_3d, H_ice, f_ice, zeta_aa)
+    calc_visc_eff_int!(visc_int, visc_3d, visc_b, visc_s,
+                       H_ice, f_ice, zeta_aa)
 
     # Ice-free cell: kernel sets visc_int = 0, then floor → visc_min.
     @test interior(visc_int)[1, 1, 1] == 1e5
-    # Other cells: span * 1e8 * 1000.
-    span = zeta_aa[end] - zeta_aa[1]
-    @test interior(visc_int)[2, 2, 1] ≈ 1e8 * span * 1000.0 rtol=1e-9
+    # Other cells: full [0,1] integral · H = 1e8 · 1000.
+    @test interior(visc_int)[2, 2, 1] ≈ 1e8 * 1.0 * 1000.0 rtol=1e-9
 end
 
 @testset "stagger_visc_aa_ab!: 4-cell average at interior corners" begin

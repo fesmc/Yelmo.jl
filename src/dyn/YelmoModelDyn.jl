@@ -52,7 +52,8 @@ export dyn_step!,
        _solve_ssa_linear!,
        picard_relax_visc!, picard_relax_vel!,
        picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
-       set_inactive_margins!, calc_basal_stress!
+       set_inactive_margins!, calc_basal_stress!,
+       dump_ssa_assembly
 
 include("topology_helpers.jl")
 include("quadrature.jl")
@@ -62,6 +63,7 @@ include("neff.jl")
 include("basal_dragging.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
+include("integration.jl")
 include("velocity_sia.jl")
 include("velocity_ssa.jl")
 

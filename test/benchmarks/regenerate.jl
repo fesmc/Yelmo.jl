@@ -32,22 +32,24 @@ using .YelmoBenchmarks
 # entries side-by-side.
 const SPECS = Any[
     BuelerBenchmark(:B; dx_km=50.0),
+    TroughBenchmark(:F17; dx_km=8.0),
     # Future BenchmarkSpec entries get pushed here.
 ]
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 
-# Single output time for the BUELER-B Halfar smoke fixture. Multi-time
-# regeneration is deferred to a future milestone alongside the
-# multi-time `write_fixture!` extension.
-const _BUELER_B_OUT_TIME = 1000.0
+# Single output time for the BUELER-B Halfar smoke fixture and the
+# TROUGH-F17 YelmoMirror smoke fixture. Multi-time regeneration is
+# deferred to a future milestone alongside the multi-time
+# `write_fixture!` extension.
+const _DEFAULT_OUT_TIME = 1000.0
 
 _spec_name(b::AbstractBenchmark) = YelmoBenchmarks._spec_name(b)
 _spec_name(s::BenchmarkSpec)     = s.name
 
 function _regenerate_one!(b::AbstractBenchmark; fixtures_dir, overwrite)
     name = _spec_name(b)
-    t_out = _BUELER_B_OUT_TIME
+    t_out = _DEFAULT_OUT_TIME
     path = joinpath(fixtures_dir, "$(name)_t$(Int(round(t_out))).nc")
 
     if !overwrite && isfile(path)

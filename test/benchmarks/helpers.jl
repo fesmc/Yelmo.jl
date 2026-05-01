@@ -34,9 +34,10 @@ using Oceananigans: interior
 
 include("benchmarks.jl")
 include("bueler.jl")
+include("trough.jl")
 
 export BenchmarkSpec
-export AbstractBenchmark, BuelerBenchmark
+export AbstractBenchmark, BuelerBenchmark, TroughBenchmark
 export run_mirror_benchmark!, load_fixture
 export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma

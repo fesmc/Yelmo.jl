@@ -17,9 +17,10 @@
 #     `calc_beta_aa_power_plastic`).
 #
 #   - `calc_visc_eff_int!` — depth-integrate `visc_eff` to a 2D field
-#     `visc_eff_int = ∫ visc dz · H_ice` via the trapezoidal rule
-#     (`velocity_ssa.f90:634`). Includes the Fortran `visc_min = 1e5`
-#     floor.
+#     `visc_eff_int = (∫₀¹ visc dζ) · H_ice` via the trapezoidal rule
+#     with explicit 2D bed and surface boundary visc inputs
+#     (`velocity_ssa.f90:634`, with the Option C end-strip closure).
+#     Includes the Fortran `visc_min = 1e5` floor.
 #
 #   - `stagger_visc_aa_ab!` — average a 2D `visc_eff_int` aa-field to
 #     the 4-corner ab-grid (`solver_ssa_ac.f90:1160`). Only ice-covered
@@ -390,32 +391,52 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
 end
 
 """
-    calc_visc_eff_int!(visc_eff_int, visc_eff, H_ice, f_ice,
-                       zeta_aa) -> visc_eff_int
+    calc_visc_eff_int!(visc_eff_int, visc_eff, visc_eff_b, visc_eff_s,
+                       H_ice, f_ice, zeta_aa) -> visc_eff_int
 
 Depth-integrate the 3D effective viscosity to a 2D `visc_eff_int`
-field via the trapezoidal rule, scaled by ice thickness:
+field via the trapezoidal rule with explicit bed and surface boundary
+values, scaled by ice thickness:
 
-    visc_eff_int(i, j) = mean_over_zeta(visc_eff[i, j, :]) · H_ice(i, j)
+    visc_eff_int(i, j) = (∫₀¹ visc(ζ) dζ) · H_ice(i, j)
 
 For ice-free cells (`f_ice < 1`), `visc_eff_int` is set to 0 (Fortran
 line 666). A `visc_min = 1e5` floor is then applied (Fortran line 670)
 — so partially-iced cells with `H_ice > 0` end up at `visc_min` rather
-than `mean · H_ice`.
+than `(∫ visc dζ) · H_ice`.
 
-The Fortran `integrate_trapezoid1D_pt(visc_eff(i, j, :), zeta_aa)`
-returns the mean (∫₀¹ v dζ); the trapezoidal scheme uses the supplied
-`zeta_aa` nodes — typically the layer-centre vector from
-`znodes(y.gt, Center())`. The first/last segments only use the
-nodes given (no separate bed/surface boundary handling, unlike the SIA
-`_vert_int_trapz_with_boundary!`).
+Vertical convention (Option C): `visc_eff` is a 3D `Center()`-staggered
+field whose `Nz` layers do NOT include the bed (zeta = 0) or surface
+(zeta = 1) endpoints. The integration thus consumes two 2D boundary
+fields — `visc_eff_b` at the bed and `visc_eff_s` at the surface — to
+cover the full [0, 1] interval. The shared `vert_int_trapz_boundary!`
+helper performs the trapezoidal sum.
 
-Port of `velocity_ssa.f90:634 calc_visc_eff_int`.
+Boundary visc handling at SSA call sites:
+
+  - `visc_method = 0` (constant): caller fills the boundary fields with
+    `visc_const`.
+  - `visc_method = 1, 2` (Glen-flow): caller approximates the boundary
+    visc by the nearest-Center value (`visc_eff_b ≈ visc_eff[:, :, 1]`,
+    `visc_eff_s ≈ visc_eff[:, :, end]`). Exact for isothermal (uniform
+    ATT) cases; approximate for temperature-dependent ATT — matches the
+    existing SIA convention. Revisit when therm wires
+    temperature-dependent ATT (milestone 3g).
+
+Port of `velocity_ssa.f90:634 calc_visc_eff_int`. The Fortran
+`integrate_trapezoid1D_pt(visc_eff(i, j, :), zeta_aa)` is the centre-
+only quadrature; the Option C extension here closes the bed and
+surface end-strips that the centre-only scheme silently drops (e.g.
+0.75 × correct for Nz = 4 with uniform spacing).
 """
-function calc_visc_eff_int!(visc_eff_int, visc_eff, H_ice, f_ice,
+function calc_visc_eff_int!(visc_eff_int, visc_eff,
+                            visc_eff_b, visc_eff_s,
+                            H_ice, f_ice,
                             zeta_aa::AbstractVector{<:Real})
     Vi = interior(visc_eff_int)
     V  = interior(visc_eff)
+    Vb = interior(visc_eff_b)
+    Vs = interior(visc_eff_s)
     H  = interior(H_ice)
     fi = interior(f_ice)
 
@@ -424,25 +445,14 @@ function calc_visc_eff_int!(visc_eff_int, visc_eff, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_int!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
-    @inbounds for j in 1:Ny, i in 1:Nx
-        # Trapezoidal mean over ζ ∈ [zeta_aa[1], zeta_aa[end]] of the
-        # column visc_eff(i, j, :). Mirrors Fortran's
-        # `integrate_trapezoid1D_pt`: returns the integral, not the
-        # mean. Then divides by (zeta_max - zeta_min) is NOT done in
-        # the Fortran (it expects zeta_aa to span [0, 1] so
-        # ∫ v dζ ≈ mean v).
-        acc = 0.0
-        for k in 2:Nz
-            acc += 0.5 * (V[i, j, k-1] + V[i, j, k]) *
-                   (Float64(zeta_aa[k]) - Float64(zeta_aa[k-1]))
-        end
-        # Fortran integrate_trapezoid1D_pt returns the integral over
-        # [zeta_min, zeta_max] (≈ mean over [0, 1] when zeta spans
-        # the full vertical range). We mirror that: visc_eff_mean = acc.
-        visc_eff_mean = acc
+    # Pure ∫₀¹ visc dζ via the shared trapezoidal-with-boundary helper.
+    # Output is dimensionless ∫ over zeta — units of visc · dζ = Pa·yr.
+    # The H multiplication and ice-mask / floor are applied below.
+    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
 
+    @inbounds for j in 1:Ny, i in 1:Nx
         if fi[i, j, 1] == 1.0
-            Vi[i, j, 1] = visc_eff_mean * H[i, j, 1]
+            Vi[i, j, 1] = Vi[i, j, 1] * H[i, j, 1]
         else
             # Fortran line 666: visc_eff_int = 0 on ice-free cells.
             Vi[i, j, 1] = 0.0
