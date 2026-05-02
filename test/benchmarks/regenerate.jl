@@ -34,6 +34,7 @@ const SPECS = Any[
     BuelerBenchmark(:B; dx_km=50.0),
     TroughBenchmark(:F17; dx_km=8.0),
     HOMCBenchmark(:C; L_km=80.0, dx_km=2.0),
+    MISMIP3DBenchmark(:Stnd; dx_km=16.0),
     # Future BenchmarkSpec entries get pushed here.
 ]
 
@@ -45,6 +46,7 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 # multi-time `write_fixture!` extension.
 _default_out_time(::AbstractBenchmark)  = 1000.0
 _default_out_time(::HOMCBenchmark)      = 0.0
+_default_out_time(::MISMIP3DBenchmark)  = 0.0
 
 _spec_name(b::AbstractBenchmark) = YelmoBenchmarks._spec_name(b)
 _spec_name(s::BenchmarkSpec)     = s.name

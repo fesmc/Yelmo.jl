@@ -1534,6 +1534,39 @@ function calc_velocity_ssa!(y)
             @views Uy[:, 1, :] .= Uy[:, 2, :]
         end
 
+        # ---- Step 9b: NaN-scrub + ssa_vel_max clamp on raw post-solve velocities. ----
+        # Mirrors Fortran's Lis safety net: rank-deficient or poorly
+        # conditioned linear systems (e.g. all-floating IC with zero β
+        # and zero taud — MISMIP3D Stnd t=0) can return garbage or NaN
+        # entries. Replacing NaN with 0 prevents propagation through the
+        # Picard relaxation, and the per-component absolute clamp to
+        # `ssa_vel_max` (default 5000 m/yr) keeps the iterate bounded so
+        # the time loop can grow ice via SMB until the system is
+        # well-posed. Sign is preserved by the symmetric clamp.
+        ssa_vel_max = p_ydyn.ssa_vel_max
+        nan_seen = false
+        @inbounds for k in eachindex(Ux)
+            v = Ux[k]
+            if isnan(v)
+                Ux[k] = 0.0
+                nan_seen = true
+            else
+                Ux[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+            end
+        end
+        @inbounds for k in eachindex(Uy)
+            v = Uy[k]
+            if isnan(v)
+                Uy[k] = 0.0
+                nan_seen = true
+            else
+                Uy[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+            end
+        end
+        if nan_seen
+            @warn "calc_velocity_ssa!: NaN entries from linear solve; replaced with 0 and clamped." iter = iter ssa_vel_max = ssa_vel_max
+        end
+
         # ---- Step 10: linear Picard velocity relaxation. ----
         if iter > 1
             picard_relax_vel!(y.dyn.ux_b, y.dyn.uy_b,

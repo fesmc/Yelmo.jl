@@ -36,9 +36,11 @@ include("benchmarks.jl")
 include("bueler.jl")
 include("trough.jl")
 include("hom_c.jl")
+include("mismip3d.jl")
 
 export BenchmarkSpec
-export AbstractBenchmark, BuelerBenchmark, TroughBenchmark, HOMCBenchmark
+export AbstractBenchmark, BuelerBenchmark, TroughBenchmark, HOMCBenchmark,
+       MISMIP3DBenchmark
 export run_mirror_benchmark!, load_fixture
 export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma

@@ -642,3 +642,120 @@ end
     @test err_4 < 1e-4
     @test err_2 < 1e-4
 end
+
+# ======================================================================
+# Test set 6 — `ssa_vel_max` clamp on rank-deficient SSA
+# ======================================================================
+#
+# Ill-posed setup mirroring MISMIP3D Stnd's t=0 IC: thin ice that is
+# entirely floating (z_sl >> z_bed), zero slope (no driving stress),
+# beta_const = 0 (no friction). The SSA stiffness matrix is rank-
+# deficient on this state — without the per-component `ssa_vel_max`
+# clamp inside `calc_velocity_ssa!`'s Picard loop, the Krylov solve
+# returns garbage (or NaN) entries that poison the Picard relaxation
+# and propagate through the time loop.
+#
+# We assert: (i) no NaN entries on output; (ii) every face component
+# satisfies |u| <= ssa_vel_max + ε. Picard convergence is NOT asserted
+# (the system is degenerate by construction).
+
+# All-floating, zero-slope slab fixture.
+function _write_floating_slab_fixture!(path::AbstractString;
+                                       Nx::Int, Ny::Int, dx::Float64,
+                                       H_const::Float64, Nz::Int)
+    xc_m = collect(range(0.5*dx, (Nx - 0.5)*dx; length=Nx))
+    yc_m = collect(range(0.5*dx, (Ny - 0.5)*dx; length=Ny))
+    zeta_ac = collect(range(0.0, 1.0; length=Nz + 1))
+    zeta_rock_ac = collect(range(0.0, 1.0; length=5))
+
+    NCDataset(path, "c") do ds
+        defDim(ds, "xc",           Nx)
+        defDim(ds, "yc",           Ny)
+        defDim(ds, "zeta",         Nz)
+        defDim(ds, "zeta_ac",      Nz + 1)
+        defDim(ds, "zeta_rock",    length(zeta_rock_ac) - 1)
+        defDim(ds, "zeta_rock_ac", length(zeta_rock_ac))
+
+        xv = defVar(ds, "xc", Float64, ("xc",))
+        xv[:] = xc_m ./ 1e3; xv.attrib["units"] = "km"
+        yv = defVar(ds, "yc", Float64, ("yc",))
+        yv[:] = yc_m ./ 1e3; yv.attrib["units"] = "km"
+
+        zc  = defVar(ds, "zeta",      Float64, ("zeta",));     zc[:]  = 0.5 .* (zeta_ac[1:end-1] .+ zeta_ac[2:end]); zc.attrib["units"] = "1"
+        zac = defVar(ds, "zeta_ac",   Float64, ("zeta_ac",));  zac[:] = zeta_ac;                                      zac.attrib["units"] = "1"
+        zrc = defVar(ds, "zeta_rock", Float64, ("zeta_rock",)); zrc[:] = 0.5 .* (zeta_rock_ac[1:end-1] .+ zeta_rock_ac[2:end]); zrc.attrib["units"] = "1"
+        zrac = defVar(ds, "zeta_rock_ac", Float64, ("zeta_rock_ac",)); zrac[:] = zeta_rock_ac; zrac.attrib["units"] = "1"
+
+        # Floating slab: z_bed = -500 m everywhere, H = 10 m, z_sl = 0 m.
+        # H_grnd = H - rho_sw/rho_ice * (z_sl - z_bed) = 10 - 1.028 * 500 < 0
+        # -> floating everywhere. No slope -> taud = 0.
+        H     = fill(H_const,  Nx, Ny)
+        z_bed = fill(-500.0,   Nx, Ny)
+        f_ice = ones(Nx, Ny)
+        z_sl  = zeros(Nx, Ny)
+
+        for (name, arr) in (("H_ice", H), ("z_bed", z_bed),
+                            ("f_ice", f_ice), ("z_sl", z_sl))
+            v = defVar(ds, name, Float64, ("xc", "yc"))
+            v[:, :] = arr
+        end
+    end
+    return path
+end
+
+@testset "calc_velocity_ssa!: ssa_vel_max clamp on rank-deficient floating slab" begin
+    Nx, Ny, Nz = 9, 5, 4
+    dx         = 1000.0   # 1 km
+    H          = 10.0
+    ssa_vel_max = 5000.0
+
+    tdir = mktempdir(; prefix="ssa_clamp_")
+    path = joinpath(tdir, "ssa_floating.nc")
+    _write_floating_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
+                                  H_const=H, Nz=Nz)
+
+    p = YelmoModelParameters("slab-floating-ssa";
+        ydyn = ydyn_params(
+            solver         = "ssa",
+            visc_method    = 0,
+            visc_const     = 1e7,
+            beta_method    = 0,
+            beta_const     = 0.0,            # no friction -> rank-deficient
+            beta_min       = 0.0,
+            ssa_lat_bc     = "floating",
+            ssa_vel_max    = ssa_vel_max,
+            ssa_solver     = SSASolver(rtol = 1e-6, itmax = 200,
+                                        picard_tol = 1e-3,
+                                        picard_iter_max = 5,
+                                        picard_relax = 0.7),
+        ),
+        yneff = yneff_params(method = -1, const_ = 1.0),
+        ytill = ytill_params(method = -1),
+        ymat  = ymat_params(n_glen = 3.0),
+    )
+    y = YelmoModel(path, 0.0;
+                   rundir = tdir,
+                   alias  = "slab-floating-ssa",
+                   p      = p,
+                   boundaries = :periodic_y,
+                   strict = false)
+    fill!(interior(y.mat.ATT),    1e-16)
+    fill!(interior(y.dyn.cb_ref), 0.0)
+    fill!(interior(y.dyn.N_eff),  1.0)
+    Yelmo.update_diagnostics!(y)
+
+    # Direct call to the SSA driver (skip dyn_step!'s pre-amble so the
+    # rank-deficient setup is hit without other dyn machinery).
+    Yelmo.YelmoModelDyn.calc_velocity_ssa!(y)
+
+    Ux = interior(y.dyn.ux_b)
+    Uy = interior(y.dyn.uy_b)
+
+    # No NaN propagation.
+    @test !any(isnan, Ux)
+    @test !any(isnan, Uy)
+
+    # Per-component absolute clamp respected (allow tiny float slack).
+    @test maximum(abs.(Ux)) <= ssa_vel_max + 1e-9
+    @test maximum(abs.(Uy)) <= ssa_vel_max + 1e-9
+end
