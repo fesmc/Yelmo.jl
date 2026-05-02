@@ -13,17 +13,22 @@ import Pkg; Pkg.activate("..")
 #                   with β₀ = β_amp = 1000 (Yelmo Fortran convention).
 #   - Boundaries  : fully periodic in x and y.
 #
-# dzsdx OVERRIDE (after `update_diagnostics!`, before `dyn_step!`):
+# Periodic-slope offset (config-time, not a post-`update_diagnostics!`
+# override):
 #
 #   `update_diagnostics!` calls `calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,
 #   …)` which finite-differences `z_srf = -x · tan α` across the periodic-x
 #   wrap. `z_srf` is monotonically decreasing in x and discontinuous across
-#   the periodic boundary, so the wrap-column gradient is anomalous. To
-#   bypass this production bug we overwrite `tpo.dzsdx` and `tpo.dzsdy`
-#   with the analytical uniform values BEFORE `dyn_step!`. Step 2 of
-#   `dyn_step!` (`calc_driving_stress!`) then produces the desired
-#   uniform `taud_acx = -ρgH·tan α`, `taud_acy = 0`. Overriding `taud_acx`
-#   directly would NOT work — `dyn_step!` recomputes it from `dzsdx`.
+#   the periodic boundary, so without help the wrap-column gradient would
+#   be anomalous. The HOM-C config sets
+#   `ytopo.dzsdx_periodic_offset = -tan(α) · Lx_m`, which the gradient
+#   kernel adds to the wrap-face halo read so the FD recovers the true
+#   uniform `-tan α` everywhere. Step 2 of `dyn_step!`
+#   (`calc_driving_stress!`) then produces the desired uniform
+#   `taud_acx = -ρgH·tan α`, `taud_acy = 0`. The same offset is applied
+#   to the `z_base` gradient since `z_base = z_srf - H_ice` and `H_ice`
+#   is periodic. See `src/topo/gradients.jl::calc_gradient_acx!` and
+#   the `dzsdx_periodic_offset` field on `YtopoParams`.
 #
 # 180° rotational symmetry physics:
 #
@@ -45,8 +50,8 @@ import Pkg; Pkg.activate("..")
 #   With uniform `taud = ρgH·tan α ≈ 1.56e4 Pa` and β₀ = 1000, in the
 #   pure-friction limit ux ≈ taud / β = 15.6 m/yr. Membrane terms
 #   modify this slightly. The test asserts `mean(|ux_bar|) ∈ [10, 50]`
-#   m/yr — wildly out-of-range values are a sign that the override
-#   didn't apply or has the wrong sign.
+#   m/yr — wildly out-of-range values are a sign that the periodic-
+#   slope offset didn't apply or has the wrong sign.
 #
 # This test does NOT check against an analytical velocity (HOM-C has
 # no closed-form). It exercises the SSA solver under fully-periodic BC,
@@ -80,7 +85,7 @@ include("helpers.jl")
 using .YelmoBenchmarks
 
 using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params
+                           yneff_params, ytill_params, ytopo_params
 
 const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 
@@ -90,7 +95,16 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 # (`visc_method = 1` → `calc_visc_eff_3D_nodes!`), N_eff irrelevant
 # under external β, isothermal ATT.
 function _hom_c_yelmo_params()
+    Lx_m = _SPEC.L_km * 1e3
     return YelmoModelParameters("hom_c";
+        # Periodic-slope offset for surface gradients on the periodic-x
+        # axis (HOM-C `z_srf = -x · tan α`). Without this the wrap-face
+        # FD reads the raw periodic image and produces a giant spurious
+        # gradient. See module docstring above and gradients.jl docstring.
+        ytopo = ytopo_params(
+            dzsdx_periodic_offset = -tan(_SPEC.alpha_rad) * Lx_m,
+            dzsdy_periodic_offset =  0.0,
+        ),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,                       # Glen-flow Gauss-quadrature
@@ -154,17 +168,19 @@ end
     fill!(interior(y.mat.ATT), p.ymat.rf_const)
 
     # Run topo diagnostics: this populates z_srf, dzsdx, dzsdy from
-    # H_ice + z_bed. dzsdx will have the wrap-column anomaly we override
-    # below.
+    # H_ice + z_bed. The `dzsdx_periodic_offset = -tan(α) · Lx_m` set on
+    # `ytopo` above makes `calc_gradient_acx!` shift the wrap-face halo
+    # read by the correct amount, so `dzsdx` comes out uniformly equal
+    # to `-tan α` across all faces (interior + wrap) — no post-hoc
+    # override needed.
     Yelmo.update_diagnostics!(y)
 
-    # OVERRIDE dzsdx / dzsdy with the analytical uniform values.
-    # `z_srf = -x · tan α` ⇒ `∂z_srf/∂x = -tan α`, `∂z_srf/∂y = 0`.
-    # `calc_driving_stress!` (step 2 of `dyn_step!`) then produces
-    # `taud_acx[i+1, j] = ρ_ice · g · H · dzsdx[i, j] = -ρ g H tan α`,
-    # which is the desired uniform driving stress for HOM-C.
-    fill!(interior(y.tpo.dzsdx), -tan(b.alpha_rad))
-    fill!(interior(y.tpo.dzsdy), 0.0)
+    # Sanity-check: the periodic-slope offset mechanism produced the
+    # analytical uniform gradient at every interior + wrap face.
+    @test all(isapprox.(interior(y.tpo.dzsdx)[:, :, 1],
+                        -tan(b.alpha_rad); atol = 1e-12))
+    @test all(isapprox.(interior(y.tpo.dzsdy)[:, :, 1],
+                        0.0; atol = 1e-12))
 
     # Run one SSA dyn_step. dt is irrelevant for the SSA solve itself
     # (steady-state at fixed H_ice / ATT / β); the value matters only
@@ -183,10 +199,11 @@ end
     @test all(isfinite, uy)
 
     # Sanity-check magnitude: should be O(15 m/yr) for HOM-C-C with
-    # L = 80 km. If the dzsdx override didn't apply, ux would be near
-    # zero (no driving stress). If it has the wrong sign, mean(|ux|)
-    # might still pass but the test is more useful as a catch on
-    # "override forgotten" than on sign errors.
+    # L = 80 km. If the periodic-slope offset didn't apply, ux would
+    # be near zero (no driving stress on most cells, garbage on the
+    # wrap face). If the offset has the wrong sign, mean(|ux|) might
+    # still pass but the test is more useful as a catch on "offset
+    # forgotten" than on sign errors.
     mean_abs_ux = sum(abs, ux) / length(ux)
     @info "HOM-C mean(|ux_bar|) = $(round(mean_abs_ux; digits=3)) m/yr " *
           "(expected ≈ 15.6 for taud / β₀ = ρgH·tan α / 1000)"

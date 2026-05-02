@@ -2236,6 +2236,122 @@ end
     @test Dx[3, 2, 1] ≈ 400.0
 end
 
+@testset "tpo: calc_gradient_acx! — periodic-x slope offset" begin
+    # Periodic-x grid with `var = -slope · x_centre`. Without a
+    # `periodic_offset`, the wrap face (i = Nx) reads the raw periodic
+    # image `var[1]` and produces a spurious large positive gradient.
+    # With `periodic_offset = -slope · Lx`, the wrap face sees the
+    # correct one-image-east shift and recovers the true uniform
+    # `-slope` everywhere.
+    Nx = 8
+    dx = 1.0
+    slope = 0.1
+    Lx = Nx * dx                 # one periodic image distance
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Lx), y=(0.0, Lx),
+                        topology=(Periodic, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)
+
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = -slope * (i - 0.5) * dx
+    end
+
+    # Without offset: interior faces all see -slope; wrap face is wrong.
+    calc_gradient_acx!(dvardx, var, f_ice, dx)
+    Dx = interior(dvardx)
+    @test all(isapprox.(Dx[1:Nx-1, :, 1], -slope; atol = 1e-12))
+    @test abs(Dx[Nx, 1, 1]) > 0.1   # demonstrably wrong without offset
+
+    # With offset = -slope · Lx, all faces (interior + wrap) recover
+    # the true uniform slope.
+    fill!(interior(dvardx), 0.0)
+    calc_gradient_acx!(dvardx, var, f_ice, dx;
+                       periodic_offset = -slope * Lx)
+    Dx = interior(dvardx)
+    @test all(isapprox.(Dx[:, :, 1], -slope; atol = 1e-12))
+end
+
+@testset "tpo: calc_gradient_acy! — periodic-y slope offset" begin
+    # Mirror of the acx test on the y-axis: Periodic-y grid, var
+    # increasing in y with constant slope, wrap face at j = Ny.
+    Nx = 8
+    dy = 2.0
+    slope = -0.05
+    Ly = Nx * dy
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dy), y=(0.0, Ly),
+                        topology=(Bounded, Periodic, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardy = CenterField(g)
+
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = slope * (j - 0.5) * dy
+    end
+
+    calc_gradient_acy!(dvardy, var, f_ice, dy)
+    Dy = interior(dvardy)
+    @test all(isapprox.(Dy[:, 1:Nx-1, 1], slope; atol = 1e-12))
+    @test abs(Dy[1, Nx, 1]) > 0.1   # wrap face wrong without offset
+
+    fill!(interior(dvardy), 0.0)
+    calc_gradient_acy!(dvardy, var, f_ice, dy;
+                       periodic_offset = slope * Ly)
+    Dy = interior(dvardy)
+    @test all(isapprox.(Dy[:, :, 1], slope; atol = 1e-12))
+end
+
+@testset "tpo: calc_gradient_acx! — Bounded ignores periodic_offset" begin
+    # Under Bounded-x there is no wrap face, so `periodic_offset` is
+    # silently a no-op. Confirm the output is identical with offset=0
+    # vs offset=large.
+    Nx = 6
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Bounded, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx_a = CenterField(g)
+    dvardx_b = CenterField(g)
+
+    fill!(interior(f_ice), 1.0)
+    @inbounds for j in 1:Nx, i in 1:Nx
+        interior(var)[i, j, 1] = 1.5 * (i - 0.5) * dx
+    end
+
+    calc_gradient_acx!(dvardx_a, var, f_ice, dx)
+    calc_gradient_acx!(dvardx_b, var, f_ice, dx; periodic_offset = 1234.0)
+    @test interior(dvardx_a) == interior(dvardx_b)
+end
+
+@testset "tpo: calc_gradient_acx! — margin2nd + offset rejected" begin
+    # 2nd-order margin extrapolation reaches one cell further across
+    # the periodic wrap and needs a wrap-aware reach-2 stencil. Until
+    # that is implemented, the combination is rejected with a clear
+    # error.
+    Nx = 6
+    dx = 1.0
+    g = RectilinearGrid(size=(Nx, Nx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
+                        topology=(Periodic, Bounded, Flat))
+    var    = CenterField(g)
+    f_ice  = CenterField(g)
+    dvardx = CenterField(g)
+    fill!(interior(f_ice), 1.0)
+
+    @test_throws ErrorException calc_gradient_acx!(dvardx, var, f_ice, dx;
+                                                    margin2nd = true,
+                                                    periodic_offset = 1.0)
+    @test_throws ErrorException calc_gradient_acy!(dvardx, var, f_ice, dx;
+                                                    margin2nd = true,
+                                                    periodic_offset = 1.0)
+end
+
 @testset "tpo: calc_f_grnd_subgrid_linear!" begin
     Nx = 5
     g = RectilinearGrid(size=(Nx, Nx),
