@@ -79,7 +79,13 @@ struct MISMIP3DBenchmark <: AbstractBenchmark
     A_glen::Float64
     cf_ref::Float64
     N_eff_const::Float64
+    namelist_path::String
 end
+
+# Default namelist path, relative to this file. Mirrors the
+# `_DEFAULT_TROUGH_NAMELIST` pattern.
+const _DEFAULT_MISMIP3D_NAMELIST = abspath(joinpath(@__DIR__, "specs",
+                                                     "yelmo_MISMIP3D.nml"))
 
 function MISMIP3DBenchmark(variant::Symbol = :Stnd;
                             dx_km::Real         = 16.0,
@@ -98,7 +104,8 @@ function MISMIP3DBenchmark(variant::Symbol = :Stnd;
                             n_glen::Real        = 3.0,
                             A_glen::Real        = 3.1536e-18,
                             cf_ref::Real        = 3.165176e4,
-                            N_eff_const::Real   = 1.0)
+                            N_eff_const::Real   = 1.0,
+                            namelist_path::AbstractString = _DEFAULT_MISMIP3D_NAMELIST)
     variant === :Stnd || error(
         "MISMIP3DBenchmark: only variant :Stnd is supported (got $(variant)).")
 
@@ -145,18 +152,20 @@ function MISMIP3DBenchmark(variant::Symbol = :Stnd;
                               Float64(n_glen),
                               Float64(A_glen),
                               Float64(cf_ref),
-                              Float64(N_eff_const))
+                              Float64(N_eff_const),
+                              String(namelist_path))
 end
 
 """
     state(b::MISMIP3DBenchmark, t::Real) -> NamedTuple
 
-Analytical IC at time `t`. (The Stnd benchmark has no closed-form time
-evolution; `state` returns the same t=0 IC for any `t`. The actual
-trajectory is produced by running `step!(YelmoModel(b, 0.0), dt)` in the
-test.)
+Dual-path: at `t = 0`, returns the analytical Stnd IC (closed-form
+NamedTuple, no NetCDF round-trip). For `t > 0`, reads the YelmoMirror
+reference fixture at `_mismip3d_fixture_path(b, t)` (mirrors the
+`TroughBenchmark` pattern). The fixture file must already exist —
+errors with a hint to run `regenerate.jl` if missing.
 
-Returns a NamedTuple with:
+Analytical (`t = 0`) returned NamedTuple keys:
 
   - `xc`, `yc`     — grid axes (metres).
   - `H_ice`        — 10 m where z_bed ≥ -500 m, else 0 (extends to x_km ≤ 400
@@ -172,8 +181,44 @@ Returns a NamedTuple with:
   - `H_sed`        — 0 m.
   - `ice_allowed`  — 1 everywhere except `[Nx, :] = 0` (kill column at
                      calving boundary).
+
+Fixture-loaded (`t > 0`) returned keys: `xc`, `yc`, plus whichever
+schema-Center fields the fixture carries (`H_ice`, `z_bed`, `f_grnd`,
+`smb_ref`, `T_srf`, `Q_geo`). Face-staggered fields (`ux_b`, `uy_b`,
+…) are deliberately not returned — see the `TroughBenchmark.state`
+docstring for rationale.
 """
 function state(b::MISMIP3DBenchmark, t::Real)
+    t_f = Float64(t)
+
+    if t_f == 0.0
+        return _mismip3d_analytical_state(b)
+    end
+
+    # Fixture-backed path (YelmoMirror reference).
+    path = _mismip3d_fixture_path(b, t_f)
+    isfile(path) || error(
+        "MISMIP3DBenchmark.state: fixture missing at $path. " *
+        "Run `julia --project=test test/benchmarks/regenerate.jl " *
+        "$(_spec_name(b)) --overwrite` first.")
+
+    NCDataset(path, "r") do ds
+        out = Dict{Symbol,Any}(:xc => b.xc, :yc => b.yc)
+        for name in ("H_ice", "z_bed", "f_grnd",
+                     "smb_ref", "T_srf", "Q_geo")
+            if haskey(ds, name)
+                raw = ds[name][:, :, :]
+                arr2d = ndims(raw) == 3 ? raw[:, :, 1] : raw
+                out[Symbol(name)] = Array{Float64}(arr2d)
+            end
+        end
+        return NamedTuple(out)
+    end
+end
+
+# Analytical Stnd IC NamedTuple (extracted so `state(b, 0.0)` returns
+# the historical analytical content unchanged).
+function _mismip3d_analytical_state(b::MISMIP3DBenchmark)
     Nx, Ny = length(b.xc), length(b.yc)
 
     # z_bed = bed_intercept - bed_slope·x_km (y-invariant).
@@ -204,6 +249,18 @@ end
 # Spec name used by `regenerate.jl` and the fixture filename.
 _spec_name(b::MISMIP3DBenchmark) = "mismip3d_$(lowercase(string(b.variant)))"
 
+# Resolve the canonical fixture path for `b` at time `t`. Mirrors the
+# `_trough_fixture_path` helper. Single-time fixtures only; Phase 2
+# emits two: the analytical IC at t=0 and the YelmoMirror reference
+# at the requested end-time.
+const _MISMIP3D_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+
+function _mismip3d_fixture_path(b::MISMIP3DBenchmark, t::Real;
+                                fixtures_dir::AbstractString = _MISMIP3D_FIXTURES_DIR)
+    return joinpath(fixtures_dir,
+                    "$(_spec_name(b))_t$(Int(round(Float64(t)))).nc")
+end
+
 # Default zeta axes for MISMIP3D analytical fixture. Match BUELER /
 # HOM-C (uniform 11-point ice / 5-point rock) for consistency with
 # the file-based loader's default schema.
@@ -214,21 +271,39 @@ const _MISMIP3D_DEFAULT_ZETA_ROCK_AC = collect(range(0.0, 1.0; length=5))
     write_fixture!(b::MISMIP3DBenchmark, path::AbstractString;
                    times = [0.0]) -> Vector{String}
 
-Serialise the analytical MISMIP3D Stnd IC at time `t = first(times)` to
-a NetCDF restart at `path`. Single-time only — Stnd has no analytical
-time evolution at the benchmark level; multi-step dynamics live in the
-test, not the fixture.
+Dual-mode fixture writer. For each `t` in `times`:
 
-Returns a 1-element `Vector{String}` containing `path`.
+  - **t == 0.0**: serialise the analytical MISMIP3D Stnd IC to
+    `_mismip3d_fixture_path(b, 0.0)` (or `path` when `times = [0.0]`).
+    No YelmoMirror; closed-form NamedTuple → NetCDF.
+  - **t > 0.0**: drive YelmoMirror from the analytical IC through
+    the `_setup_mismip3d_initial_state!` callback + the namelist at
+    `b.namelist_path`, integrate to `t`, write the restart to
+    `_mismip3d_fixture_path(b, t)` (or `path` when `times = [t]`).
+
+Returns a `Vector{String}` containing one path per requested time
+(in the same order as `times`).
+
+When called with the default single-element `times = [0.0]` the
+behaviour is identical to the original analytical-only contract:
+the file is written verbatim to `path`. When `times` has more than
+one entry, only `path` for `times == [first(times)]`-style call sites
+makes sense; `regenerate.jl` dispatches `[0.0, 500.0]` via the
+multi-call wrapper below, where each call passes its own `path`.
 """
 function write_fixture!(b::MISMIP3DBenchmark, path::AbstractString;
                         times::AbstractVector{<:Real} = [0.0])
     length(times) == 1 ||
-        error("write_fixture!(MISMIP3DBenchmark, …): multi-time fixtures " *
-              "not supported (got $(length(times)) times).")
+        error("write_fixture!(MISMIP3DBenchmark, …): pass `times` with " *
+              "exactly one entry per call (got $(length(times))). " *
+              "regenerate.jl loops over [0.0, 500.0] one t at a time.")
     t = Float64(first(times))
 
-    s = state(b, t)
+    if t > 0.0
+        return _write_mismip3d_mirror_fixture!(b, path, t)
+    end
+
+    s = _mismip3d_analytical_state(b)
     mkpath(dirname(path))
     isfile(path) && rm(path)
 
@@ -347,3 +422,103 @@ end
 # `analytical_velocity` is intentionally not implemented (no closed-form
 # velocity solution for MISMIP3D Stnd). Falls through to the
 # `AbstractBenchmark` default error stub.
+
+# ----------------------------------------------------------------------
+# YelmoMirror initial-state callback for MISMIP3D Stnd.
+#
+# Mirrors the Yelmo.jl-side test override (test_mismip3d_stnd.jl
+# lines 184-196): apply the thicker grounded-IC variant from the
+# Fortran source's commented-out section in mismip3D.f90:62-64
+#   `H_ice = max(0, 1000 - 0.9·z_bed)` for z_bed < 0
+# so the SSA system is well-posed from step 1 (the literal Fortran
+# 10 m all-floating IC is rank-deficient — see test header for the
+# full discussion). z_bed below `b.z_bed_floor` stays ice-free.
+#
+# Also sets the constant Stnd boundary forcing (T_srf, smb_ref, Q_geo,
+# z_sl, bmb_shlf, H_sed) plus `calv_mask[Nx, :] = 1` for the Fortran
+# kill-pos calving of the eastern column.
+# ----------------------------------------------------------------------
+
+# `time` is unused (Stnd IC has no time dependence); kept for the
+# `(ymirror, time)` callback signature `BenchmarkSpec.setup_initial_state!`
+# expects.
+function _setup_mismip3d_initial_state!(ymirror, b::MISMIP3DBenchmark, time::Real)
+    Nx = length(b.xc)
+    Ny = length(b.yc)
+
+    # Compute z_bed and the thicker grounded H_ice override on the
+    # Julia side, then assign into YelmoMirror Field interiors.
+    z_bed = zeros(Nx, Ny)
+    H_ice = zeros(Nx, Ny)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        x_km = b.xc[i] / 1e3
+        zb   = b.bed_intercept - b.bed_slope * x_km
+        z_bed[i, j] = zb
+        H_ice[i, j] = (zb < b.z_bed_floor) ? 0.0 :
+                                              max(0.0, 1000.0 - 0.9 * zb)
+    end
+
+    _assign_field!(ymirror.bnd.z_bed, z_bed)
+    _assign_field!(ymirror.tpo.H_ice, H_ice)
+
+    # Stnd boundary forcing (uniform).
+    fill!(interior(ymirror.bnd.z_sl),     0.0)
+    fill!(interior(ymirror.bnd.bmb_shlf), 0.0)
+    fill!(interior(ymirror.bnd.H_sed),    0.0)
+    fill!(interior(ymirror.bnd.T_shlf),   b.T_srf_const)
+    fill!(interior(ymirror.bnd.T_srf),    b.T_srf_const)
+    fill!(interior(ymirror.bnd.smb_ref),  b.smb_const)
+    fill!(interior(ymirror.bnd.Q_geo),    b.Q_geo_const)
+
+    # Calving mask: True only on the eastern (i=Nx) column (Fortran's
+    # kill-pos calv_mask). Stored as Float64 (0/1) in the YelmoMirror.
+    calv_mask = zeros(Nx, Ny)
+    calv_mask[Nx, :] .= 1.0
+    _assign_field!(ymirror.bnd.calv_mask, calv_mask)
+
+    # Sync Julia → Fortran so `init_state!` sees the override.
+    yelmo_sync!(ymirror)
+
+    return ymirror
+end
+
+# ----------------------------------------------------------------------
+# write_fixture! YelmoMirror branch (t > 0). Builds a `BenchmarkSpec`,
+# drives YelmoMirror to `t`, writes the restart, moves into place.
+# Mirrors the trough.jl `write_fixture!` body verbatim.
+# ----------------------------------------------------------------------
+
+function _write_mismip3d_mirror_fixture!(b::MISMIP3DBenchmark,
+                                         path::AbstractString,
+                                         t_out::Float64)
+    isfile(b.namelist_path) || error(
+        "MISMIP3DBenchmark.write_fixture!: namelist not found at " *
+        "$(b.namelist_path).")
+
+    spec = BenchmarkSpec(
+        name           = _spec_name(b),
+        namelist_path  = b.namelist_path,
+        grid           = (xc = b.xc, yc = b.yc,
+                          grid_name = "MISMIP3D"),
+        time_init      = 0.0,
+        end_time       = t_out,
+        output_times   = [t_out],
+        dt             = 1.0,
+        setup_initial_state! = (ymirror, t) ->
+            _setup_mismip3d_initial_state!(ymirror, b, t),
+    )
+
+    fixtures_dir = dirname(path)
+    mkpath(fixtures_dir)
+    isfile(path) && rm(path)
+
+    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+                                  overwrite = true)
+    src = paths[1]
+    if src != path
+        mv(src, path; force = true)
+        paths = [path]
+    end
+    return paths
+end

@@ -40,26 +40,29 @@ const SPECS = Any[
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 
-# Default output time per AbstractBenchmark type. BUELER-B uses the
-# Halfar t=1000 snapshot; HOM-C is steady-state IC at t=0. Multi-time
-# regeneration is deferred to a future milestone alongside the
-# multi-time `write_fixture!` extension.
-_default_out_time(::AbstractBenchmark)  = 1000.0
-_default_out_time(::HOMCBenchmark)      = 0.0
-_default_out_time(::MISMIP3DBenchmark)  = 0.0
+# Default output time(s) per AbstractBenchmark type. BUELER-B uses the
+# Halfar t=1000 snapshot; HOM-C is steady-state IC at t=0. MISMIP3D
+# emits BOTH the analytical IC (t=0) and the YelmoMirror reference
+# (t=500) so the lockstep test can compare against a Fortran-driven
+# end-state while the standalone trajectory test still seeds from t=0.
+_default_out_times(::AbstractBenchmark) = [1000.0]
+_default_out_times(::HOMCBenchmark)     = [0.0]
+_default_out_times(::MISMIP3DBenchmark) = [0.0, 500.0]
 
 _spec_name(b::AbstractBenchmark) = YelmoBenchmarks._spec_name(b)
 _spec_name(s::BenchmarkSpec)     = s.name
 
 function _regenerate_one!(b::AbstractBenchmark; fixtures_dir, overwrite)
     name = _spec_name(b)
-    t_out = _default_out_time(b)
-    path = joinpath(fixtures_dir, "$(name)_t$(Int(round(t_out))).nc")
-
-    if !overwrite && isfile(path)
-        error("regenerate: $(path) exists; pass --overwrite to clobber.")
+    paths = String[]
+    for t_out in _default_out_times(b)
+        path = joinpath(fixtures_dir, "$(name)_t$(Int(round(t_out))).nc")
+        if !overwrite && isfile(path)
+            error("regenerate: $(path) exists; pass --overwrite to clobber.")
+        end
+        append!(paths, write_fixture!(b, path; times=[t_out]))
     end
-    return write_fixture!(b, path; times=[t_out])
+    return paths
 end
 
 function _regenerate_one!(spec::BenchmarkSpec; fixtures_dir, overwrite)
