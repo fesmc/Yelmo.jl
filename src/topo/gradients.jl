@@ -20,6 +20,7 @@
 
 using Oceananigans.Fields: interior, Field
 using Oceananigans.BoundaryConditions: fill_halo_regions!
+using Oceananigans.Grids: topology, Bounded, Periodic
 
 using ..YelmoCore: fill_corner_halos!
 
@@ -44,11 +45,25 @@ export calc_gradient_acx!, calc_gradient_acy!
                                        var, f_ice,
                                        dx::Float64,
                                        margin2nd::Bool,
-                                       zero_outside::Bool)
+                                       zero_outside::Bool,
+                                       Nx::Int,
+                                       ::Type{Tx},
+                                       periodic_offset::Float64) where {Tx}
     V0 = var[i,   j, k]
     V1 = var[i+1, j, k]
     f0 = f_ice[i,   j, 1]
     f1 = f_ice[i+1, j, 1]
+
+    # Periodic-wrap offset: at the wrap face (i = Nx under Periodic-x),
+    # the halo read `var[Nx+1] == var[1]` is the raw periodic image.
+    # For benchmark fields that are *additively non-periodic* with a
+    # known wrap step (e.g. HOM-C `z_srf = -x · tan α`), shift the halo
+    # value by the configured offset so the FD recovers the true slope.
+    # Under Bounded, the offset is meaningless (no wrap face) and is
+    # silently ignored — the FD then sees the Neumann-clamped halo.
+    if Tx === Periodic && i == Nx && periodic_offset != 0.0
+        V1 += periodic_offset
+    end
 
     if zero_outside
         f0 < 1.0 && (V0 = 0.0)
@@ -92,11 +107,20 @@ end
                                        var, f_ice,
                                        dy::Float64,
                                        margin2nd::Bool,
-                                       zero_outside::Bool)
+                                       zero_outside::Bool,
+                                       Ny::Int,
+                                       ::Type{Ty},
+                                       periodic_offset::Float64) where {Ty}
     V0 = var[i, j,   k]
     V1 = var[i, j+1, k]
     f0 = f_ice[i, j,   1]
     f1 = f_ice[i, j+1, 1]
+
+    # Periodic-wrap offset on the y-axis: see `_gradient_acx_kernel`
+    # docstring above. Under Bounded-y, the offset is silently ignored.
+    if Ty === Periodic && j == Ny && periodic_offset != 0.0
+        V1 += periodic_offset
+    end
 
     if zero_outside
         f0 < 1.0 && (V0 = 0.0)
@@ -135,7 +159,8 @@ end
 """
     calc_gradient_acx!(dvardx, var, f_ice, dx;
                        grad_lim=Inf, margin2nd=false,
-                       zero_outside=false) -> dvardx
+                       zero_outside=false,
+                       periodic_offset=0.0) -> dvardx
 
 Compute the per-cell `∂var/∂x` on the acx-staggered diagnostic
 `dvardx` (a Center field per the Yelmo schema, with the convention
@@ -152,6 +177,13 @@ Modes:
     upstream cell is fully covered. Falls back to 0 otherwise.
   - `grad_lim`: clamp `|dvardx|` to `≤ grad_lim` (matches Fortran's
     final `minmax` post-processing). Default `Inf` means no clamp.
+  - `periodic_offset`: signed `Δvar` (in the units of `var`) added
+    to the wrap-face halo read on a Periodic-x grid. Used for
+    benchmark fields that are *additively non-periodic* with a known
+    wrap step (e.g. HOM-C `z_srf = -x · tan α`, with
+    `periodic_offset = -tan(α) · Lx_m`). Under Bounded-x the offset
+    is silently ignored — the FD is already correct via the Neumann
+    clamp. Default `0.0` preserves the legacy behaviour.
 
 Halo handling: `var` and `f_ice` halos are filled via
 `fill_halo_regions!`; corner halos are filled when `margin2nd=true`
@@ -163,7 +195,17 @@ Port of `yelmo_tools.f90:723 calc_gradient_acx`.
 function calc_gradient_acx!(dvardx, var, f_ice, dx::Real;
                             grad_lim::Real = Inf,
                             margin2nd::Bool = false,
-                            zero_outside::Bool = false)
+                            zero_outside::Bool = false,
+                            periodic_offset::Real = 0.0)
+    if margin2nd && periodic_offset != 0
+        error("calc_gradient_acx!: 2nd-order margin extrapolation " *
+              "(`margin2nd=true`) with non-zero `periodic_offset` is " *
+              "not yet supported. The 2nd-order stencil reaches one " *
+              "cell further across the periodic wrap and needs a " *
+              "wrap-aware reach-2 implementation; this will land when " *
+              "a benchmark exercises both modes simultaneously.")
+    end
+
     fill_halo_regions!(var)
     fill_halo_regions!(f_ice)
     if margin2nd
@@ -178,10 +220,14 @@ function calc_gradient_acx!(dvardx, var, f_ice, dx::Real;
     Dx = interior(dvardx)
     dx_f = Float64(dx)
     cap  = Float64(grad_lim)
+    off  = Float64(periodic_offset)
+    Tx   = topology(var.grid, 1)
+    Nx   = size(Dx, 1)
 
     @inbounds for k in axes(Dx, 3), j in axes(Dx, 2), i in axes(Dx, 1)
         g = _gradient_acx_kernel(i, j, k, var, f_ice,
-                                  dx_f, margin2nd, zero_outside)
+                                  dx_f, margin2nd, zero_outside,
+                                  Nx, Tx, off)
         if isfinite(cap)
             g = clamp(g, -cap, cap)
         end
@@ -193,17 +239,29 @@ end
 """
     calc_gradient_acy!(dvardy, var, f_ice, dy;
                        grad_lim=Inf, margin2nd=false,
-                       zero_outside=false) -> dvardy
+                       zero_outside=false,
+                       periodic_offset=0.0) -> dvardy
 
 `∂var/∂y` on the acy-staggered diagnostic `dvardy` (Center field per
 the Yelmo schema, interior index `j` ↔ *north* face of aa-cell `j`).
-Same options as [`calc_gradient_acx!`](@ref). Port of
+Same options as [`calc_gradient_acx!`](@ref); `periodic_offset` is
+applied to the y-axis wrap face under Periodic-y. Port of
 `yelmo_tools.f90:829 calc_gradient_acy`.
 """
 function calc_gradient_acy!(dvardy, var, f_ice, dy::Real;
                             grad_lim::Real = Inf,
                             margin2nd::Bool = false,
-                            zero_outside::Bool = false)
+                            zero_outside::Bool = false,
+                            periodic_offset::Real = 0.0)
+    if margin2nd && periodic_offset != 0
+        error("calc_gradient_acy!: 2nd-order margin extrapolation " *
+              "(`margin2nd=true`) with non-zero `periodic_offset` is " *
+              "not yet supported. The 2nd-order stencil reaches one " *
+              "cell further across the periodic wrap and needs a " *
+              "wrap-aware reach-2 implementation; this will land when " *
+              "a benchmark exercises both modes simultaneously.")
+    end
+
     fill_halo_regions!(var)
     fill_halo_regions!(f_ice)
     if margin2nd
@@ -214,10 +272,14 @@ function calc_gradient_acy!(dvardy, var, f_ice, dy::Real;
     Dy = interior(dvardy)
     dy_f = Float64(dy)
     cap  = Float64(grad_lim)
+    off  = Float64(periodic_offset)
+    Ty   = topology(var.grid, 2)
+    Ny   = size(Dy, 2)
 
     @inbounds for k in axes(Dy, 3), j in axes(Dy, 2), i in axes(Dy, 1)
         g = _gradient_acy_kernel(i, j, k, var, f_ice,
-                                  dy_f, margin2nd, zero_outside)
+                                  dy_f, margin2nd, zero_outside,
+                                  Ny, Ty, off)
         if isfinite(cap)
             g = clamp(g, -cap, cap)
         end
