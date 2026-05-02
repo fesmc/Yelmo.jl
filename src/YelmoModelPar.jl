@@ -118,6 +118,22 @@ Base.@kwdef struct YtopoParams
     # `dzsdx`/`dzsdy`/`dzbdx`/`dzbdy` gradient calls (the `z_base`
     # gradient sees the same offset since `z_base = z_srf - H_ice` and
     # `H_ice` is periodic by construction in these benchmarks).
+    #
+    # IMPORTANT — *config-time constant*: this is set ONCE at
+    # `YelmoModelParameters` construction and is NOT recomputed during
+    # the simulation. The mechanism is correct for benchmarks where the
+    # uniform-slope component of the surface is static — typically those
+    # using `topo_fixed = true` (HOM-C, MISMIP3D Stnd, ISMIP-HOM family).
+    # For prognostic runs that simultaneously have (a) a periodic axis,
+    # (b) a uniform-slope surface component, AND (c) topographic evolution
+    # that changes that slope (e.g. a slab thinning under load), this
+    # mechanism would silently desynchronise from the true surface slope.
+    # Such configurations are rare in practice (real ice sheets are
+    # Bounded, and benchmarks with periodic geometry are typically
+    # diagnostic / fixed-geometry). If a future use case requires a
+    # dynamically-evolving slope under periodic BC, the offset should be
+    # promoted to a per-step recomputed quantity (e.g. derived from a
+    # least-squares fit of the slope component of `z_srf` each step).
     dzsdx_periodic_offset ::Float64 = 0.0
     dzsdy_periodic_offset ::Float64 = 0.0
 end
