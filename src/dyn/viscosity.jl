@@ -53,7 +53,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded, Periodic
+using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!
@@ -75,47 +75,64 @@ function _calc_strain_rate_horizontal_2D!(dudx::AbstractArray, dudy::AbstractArr
                                           dvdx::AbstractArray, dvdy::AbstractArray,
                                           ux_int::AbstractArray, uy_int::AbstractArray,
                                           fi_int::AbstractArray,
-                                          dx::Float64, dy::Float64)
+                                          dx::Float64, dy::Float64,
+                                          Tx::Type{<:AbstractTopology},
+                                          Ty::Type{<:AbstractTopology})
     Nx, Ny = size(dudx, 1), size(dudx, 2)
 
     fill!(dudx, 0.0); fill!(dudy, 0.0)
     fill!(dvdx, 0.0); fill!(dvdy, 0.0)
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        im1 = max(i - 1, 1)
-        ip1 = min(i + 1, Nx)
-        jm1 = max(j - 1, 1)
-        jp1 = min(j + 1, Ny)
+        im1 = _neighbor_im1(i, Nx, Tx)
+        ip1 = _neighbor_ip1(i, Nx, Tx)
+        jm1 = _neighbor_jm1(j, Ny, Ty)
+        jp1 = _neighbor_jp1(j, Ny, Ty)
 
-        # Centered, second-order. Yelmo ux idx for Fortran ux(i, j) at
-        # array slot [i+1, j, 1].
-        dudx[i, j] = (ux_int[ip1+1, j, 1] - ux_int[im1+1, j, 1]) / (2 * dx)
-        dudy[i, j] = (ux_int[i+1,   jp1, 1] - ux_int[i+1, jm1, 1]) / (2 * dy)
-        dvdx[i, j] = (uy_int[ip1, j+1, 1]   - uy_int[im1, j+1, 1]) / (2 * dx)
-        dvdy[i, j] = (uy_int[i,   jp1+1, 1] - uy_int[i,   jm1+1, 1]) / (2 * dy)
+        # Yelmo ux idx for Fortran ux(k, j) at array slot
+        # `_ip1_modular(k, Nx, Tx)` (i+1 under Bounded; mod1(i+1, Nx)
+        # under Periodic). Same for uy on the y-axis with `_jp1_modular`.
+        ux_i   = _ip1_modular(i,   Nx, Tx)
+        ux_im1 = _ip1_modular(im1, Nx, Tx)
+        ux_ip1 = _ip1_modular(ip1, Nx, Tx)
+        uy_j   = _jp1_modular(j,   Ny, Ty)
+        uy_jm1 = _jp1_modular(jm1, Ny, Ty)
+        uy_jp1 = _jp1_modular(jp1, Ny, Ty)
+
+        # Centered, second-order.
+        dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_im1, j, 1]) / (2 * dx)
+        dudy[i, j] = (ux_int[ux_i,   jp1, 1] - ux_int[ux_i, jm1, 1]) / (2 * dy)
+        dvdx[i, j] = (uy_int[ip1, uy_j, 1]   - uy_int[im1, uy_j, 1]) / (2 * dx)
+        dvdy[i, j] = (uy_int[i,   uy_jp1, 1] - uy_int[i,   uy_jm1, 1]) / (2 * dy)
 
         # Margin one-sided corrections (Fortran line 1716 onward; the
-        # `if (.TRUE.) then` block is always active).
+        # `if (.TRUE.) then` block is always active). Margin-guard
+        # semantics under Periodic (im1>1 / ip1<Nx tests for one-cell-
+        # from-boundary detection) are not reworked here — HOM-C is
+        # full-ice and doesn't exercise this branch. Revisit when
+        # calving lands.
         # dudx (Fortran line 1721-1739).
         if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] < 1.0
             if fi_int[im1, j, 1] == 1.0 && im1 > 1
                 im2 = im1 - 1
-                dudx[i, j] = (1 * ux_int[im2+1, j, 1] - 4 * ux_int[im1+1, j, 1] +
-                              3 * ux_int[i+1, j, 1]) / (2 * dx)
+                ux_im2 = _ip1_modular(im2, Nx, Tx)
+                dudx[i, j] = (1 * ux_int[ux_im2, j, 1] - 4 * ux_int[ux_im1, j, 1] +
+                              3 * ux_int[ux_i,   j, 1]) / (2 * dx)
             else
-                dudx[i, j] = (ux_int[i+1, j, 1] - ux_int[im1+1, j, 1]) / dx
+                dudx[i, j] = (ux_int[ux_i, j, 1] - ux_int[ux_im1, j, 1]) / dx
             end
         elseif fi_int[i, j, 1] < 1.0 && fi_int[ip1, j, 1] == 1.0
             if ip1 < Nx
                 ip2 = ip1 + 1
                 if fi_int[ip2, j, 1] == 1.0
-                    dudx[i, j] = -(1 * ux_int[ip2+1, j, 1] - 4 * ux_int[ip1+1, j, 1] +
-                                   3 * ux_int[i+1, j, 1]) / (2 * dx)
+                    ux_ip2 = _ip1_modular(ip2, Nx, Tx)
+                    dudx[i, j] = -(1 * ux_int[ux_ip2, j, 1] - 4 * ux_int[ux_ip1, j, 1] +
+                                   3 * ux_int[ux_i,   j, 1]) / (2 * dx)
                 else
-                    dudx[i, j] = (ux_int[ip1+1, j, 1] - ux_int[i+1, j, 1]) / dx
+                    dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_i, j, 1]) / dx
                 end
             else
-                dudx[i, j] = (ux_int[ip1+1, j, 1] - ux_int[i+1, j, 1]) / dx
+                dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_i, j, 1]) / dx
             end
         end
 
@@ -123,19 +140,21 @@ function _calc_strain_rate_horizontal_2D!(dudx::AbstractArray, dudy::AbstractArr
         if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] < 1.0
             if fi_int[i, jm1, 1] == 1.0 && jm1 > 1
                 jm2 = jm1 - 1
-                dvdy[i, j] = (1 * uy_int[i, jm2+1, 1] - 4 * uy_int[i, jm1+1, 1] +
-                              3 * uy_int[i, j+1, 1]) / (2 * dy)
+                uy_jm2 = _jp1_modular(jm2, Ny, Ty)
+                dvdy[i, j] = (1 * uy_int[i, uy_jm2, 1] - 4 * uy_int[i, uy_jm1, 1] +
+                              3 * uy_int[i, uy_j,   1]) / (2 * dy)
             else
-                dvdy[i, j] = (uy_int[i, j+1, 1] - uy_int[i, jm1+1, 1]) / dy
+                dvdy[i, j] = (uy_int[i, uy_j, 1] - uy_int[i, uy_jm1, 1]) / dy
             end
         elseif fi_int[i, j, 1] < 1.0 && fi_int[i, jp1, 1] == 1.0
             if jp1 < Ny
                 jp2 = jp1 + 1
                 if fi_int[i, jp2, 1] == 1.0
-                    dvdy[i, j] = -(1 * uy_int[i, jp2+1, 1] - 4 * uy_int[i, jp1+1, 1] +
-                                   3 * uy_int[i, j+1, 1]) / (2 * dy)
+                    uy_jp2 = _jp1_modular(jp2, Ny, Ty)
+                    dvdy[i, j] = -(1 * uy_int[i, uy_jp2, 1] - 4 * uy_int[i, uy_jp1, 1] +
+                                   3 * uy_int[i, uy_j,   1]) / (2 * dy)
                 else
-                    dvdy[i, j] = (uy_int[i, jp1+1, 1] - uy_int[i, j+1, 1]) / dy
+                    dvdy[i, j] = (uy_int[i, uy_jp1, 1] - uy_int[i, uy_j, 1]) / dy
                 end
             end
         end
@@ -183,6 +202,15 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_aa!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
+    # Topology-dispatched neighbour helpers — under Periodic the i±1 /
+    # j±1 indices wrap modularly; under Bounded they clamp. Mirrors the
+    # Fortran `get_neighbor_indices_bc_codes` (`yelmo_tools.f90`) which
+    # dispatches on BC. The Yelmo face-array slot `[i+1, j, 1]` for
+    # Fortran `ux(i, j)` similarly wraps under Periodic via
+    # `_ip1_modular`.
+    Tx_top = topology(visc_eff.grid, 1)
+    Ty_top = topology(visc_eff.grid, 2)
+
     p1 = (1.0 - Float64(n_glen)) / (2.0 * Float64(n_glen))
     p2 = -1.0 / Float64(n_glen)
     eps_0_sq = Float64(eps_0)^2
@@ -191,23 +219,28 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi_int[i, j, 1] == 1.0
-            im1 = max(i - 1, 1)
-            ip1 = min(i + 1, Nx)
-            jm1 = max(j - 1, 1)
-            jp1 = min(j + 1, Ny)
+            im1 = _neighbor_im1(i, Nx, Tx_top)
+            ip1 = _neighbor_ip1(i, Nx, Tx_top)
+            jm1 = _neighbor_jm1(j, Ny, Ty_top)
+            jp1 = _neighbor_jp1(j, Ny, Ty_top)
 
-            # Fortran lines 594-603. Yelmo ux/uy indexing converts
-            # Fortran (i, j) → array [i+1, j, 1] for x-face, [i, j+1, 1]
-            # for y-face.
-            dudx_aa = (ux_int[i+1, j, 1] - ux_int[im1+1, j, 1]) / Float64(dx)
-            dvdy_aa = (uy_int[i, j+1, 1] - uy_int[i, jm1+1, 1]) / Float64(dy)
+            ux_i   = _ip1_modular(i,   Nx, Tx_top)
+            ux_im1 = _ip1_modular(im1, Nx, Tx_top)
+            uy_j   = _jp1_modular(j,   Ny, Ty_top)
+            uy_jm1 = _jp1_modular(jm1, Ny, Ty_top)
 
-            dudy_aa_1 = (ux_int[i+1,   jp1, 1] - ux_int[i+1,   jm1, 1]) / (2 * Float64(dy))
-            dudy_aa_2 = (ux_int[im1+1, jp1, 1] - ux_int[im1+1, jm1, 1]) / (2 * Float64(dy))
+            # Fortran lines 594-603. Face-slot indices are `_ip1_modular` /
+            # `_jp1_modular`, which under Bounded resolve to k+1 (the Yelmo
+            # face-array convention) and under Periodic wrap modularly.
+            dudx_aa = (ux_int[ux_i, j, 1] - ux_int[ux_im1, j, 1]) / Float64(dx)
+            dvdy_aa = (uy_int[i, uy_j, 1] - uy_int[i, uy_jm1, 1]) / Float64(dy)
+
+            dudy_aa_1 = (ux_int[ux_i,   jp1, 1] - ux_int[ux_i,   jm1, 1]) / (2 * Float64(dy))
+            dudy_aa_2 = (ux_int[ux_im1, jp1, 1] - ux_int[ux_im1, jm1, 1]) / (2 * Float64(dy))
             dudy_aa   = 0.5 * (dudy_aa_1 + dudy_aa_2)
 
-            dvdx_aa_1 = (uy_int[ip1, j+1,   1] - uy_int[im1, j+1,   1]) / (2 * Float64(dx))
-            dvdx_aa_2 = (uy_int[ip1, jm1+1, 1] - uy_int[im1, jm1+1, 1]) / (2 * Float64(dx))
+            dvdx_aa_1 = (uy_int[ip1, uy_j,   1] - uy_int[im1, uy_j,   1]) / (2 * Float64(dx))
+            dvdx_aa_2 = (uy_int[ip1, uy_jm1, 1] - uy_int[im1, uy_jm1, 1]) / (2 * Float64(dx))
             dvdx_aa   = 0.5 * (dvdx_aa_1 + dvdx_aa_2)
 
             eps_sq_aa = dudx_aa^2 + dvdy_aa^2 + dudx_aa * dvdy_aa +
@@ -278,6 +311,12 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_nodes!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
+    # Topology-dispatched neighbour helpers — under Periodic the i±1 /
+    # j±1 indices wrap modularly; under Bounded they clamp. Mirrors the
+    # Fortran `get_neighbor_indices_bc_codes` (`yelmo_tools.f90`).
+    Tx_top = topology(visc_eff.grid, 1)
+    Ty_top = topology(visc_eff.grid, 2)
+
     p1 = (1.0 - Float64(n_glen)) / (2.0 * Float64(n_glen))
     p2 = -1.0 / Float64(n_glen)
     eps_0_sq = Float64(eps_0)^2
@@ -291,17 +330,18 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
     dvdy = Matrix{Float64}(undef, Nx, Ny)
     _calc_strain_rate_horizontal_2D!(dudx, dudy, dvdx, dvdy,
                                      ux_int, uy_int, fi_int,
-                                     Float64(dx), Float64(dy))
+                                     Float64(dx), Float64(dy),
+                                     Tx_top, Ty_top)
 
     xr, yr, wt, wt_tot = gq2d_nodes(2)
     fill!(V, _VISC_MIN)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi_int[i, j, 1] == 1.0
-            im1 = max(i - 1, 1)
-            ip1 = min(i + 1, Nx)
-            jm1 = max(j - 1, 1)
-            jp1 = min(j + 1, Ny)
+            im1 = _neighbor_im1(i, Nx, Tx_top)
+            ip1 = _neighbor_ip1(i, Nx, Tx_top)
+            jm1 = _neighbor_jm1(j, Ny, Ty_top)
+            jp1 = _neighbor_jp1(j, Ny, Ty_top)
 
             # Corner-staggering: the 4 Gauss nodes interpolate from
             # corner values, computed via the relevant Fortran recipe.
@@ -496,8 +536,8 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
     Ty_top = topology(visc_ab.grid, 2)
 
     @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = min(i + 1, Nx)
-        jp1 = min(j + 1, Ny)
+        ip1 = _neighbor_ip1(i, Nx, Tx_top)
+        jp1 = _neighbor_jp1(j, Ny, Ty_top)
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
 

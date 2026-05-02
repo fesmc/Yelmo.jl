@@ -53,14 +53,24 @@ import Pkg; Pkg.activate("..")
 # spatially-varying β, and uniform forcing — three orthogonal axes
 # beyond the trough / slab tests already in CI.
 #
-# NOTE: This test currently uses `visc_method=0` (constant viscosity).
-# `visc_method=1` (Gaussian-quadrature) produces a ~5% structural
-# asymmetry under fully-periodic BC with spatially-varying β
-# (rel err_ux=1.88%, rel err_uy=5.48% vs ~1e-9 with visc_method=0).
-# The Phase C bisect (cb2fe84..bc6b677 + this commit) traced the bug
-# to `calc_visc_eff_3D_nodes!` — likely a periodic-wrap bug in face-
-# staggered velocity gradients or aa→ac stagger reads. Tracked for
-# follow-up; see PR description.
+# Test exercises the SSA solver under fully-periodic boundaries with
+# `visc_method=1` (Gaussian-quadrature). Prior to the periodic-wrap fix
+# in viscosity.jl this test used `visc_method=0` due to a bug in
+# `calc_visc_eff_3D_nodes!` / `calc_visc_eff_3D_aa!` /
+# `_calc_strain_rate_horizontal_2D!` — Bounded-style `max(i-1,1)` /
+# `min(i+1,Nx)` clamps that did not wrap under periodic BC. See the
+# git log for details.
+#
+# Residual symmetry tolerance:
+#
+#   At production solver settings (`rtol=1e-8`, `picard_tol=1e-6`) the
+#   measured `rel_uy` sits at ~2e-8 — this is the iterative-solver noise
+#   floor on the SSA system (BiCGStab + Picard), NOT a kernel bug.
+#   Tightening to `rtol=1e-12, picard_tol=1e-12` drops `rel_uy` below
+#   1e-11, confirming the residual is purely solver tolerance and not
+#   structural asymmetry. The assertion threshold (1e-7) is set ×5 above
+#   that noise floor while still ~5×10⁵ below the original clamp bug
+#   (~5e-2) it is designed to catch.
 
 using Test
 using Yelmo
@@ -76,24 +86,23 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 
 # HOM-C SSA parameters: solver = "ssa", external β (`beta_method = -1`,
 # `beta_gl_stag = -1` so pre-filled β fields survive every Picard
-# iteration), constant viscosity (`visc_method = 0` reads directly from
-# `dyn.visc`, which Yelmo fills uniformly with `visc_const`), N_eff
-# irrelevant under external β, isothermal ATT.
+# iteration), Glen-flow viscosity via Gauss quadrature
+# (`visc_method = 1` → `calc_visc_eff_3D_nodes!`), N_eff irrelevant
+# under external β, isothermal ATT.
 function _hom_c_yelmo_params()
     return YelmoModelParameters("hom_c";
         ydyn = ydyn_params(
             solver         = "ssa",
-            visc_method    = 0,                       # constant viscosity (visc_method=1 has known asymmetry bug)
-            visc_const     = 1e7,
+            visc_method    = 1,                       # Glen-flow Gauss-quadrature
             beta_method    = -1,                      # external β (preserved by Picard loop)
             beta_gl_stag   = -1,                      # bypass standard staggering + GL block
             beta_const     = 1000.0,
             beta_min       = 0.0,
             ssa_lat_bc     = "floating",
             taud_lim       = 2e5,
-            ssa_solver     = SSASolver(rtol            = 1e-6,
+            ssa_solver     = SSASolver(rtol            = 1e-8,
                                        itmax           = 500,
-                                       picard_tol      = 1e-4,
+                                       picard_tol      = 1e-6,
                                        picard_iter_max = 100,
                                        picard_relax    = 0.7),
         ),
@@ -221,6 +230,13 @@ end
           "max|ux|=$(max_abs_ux)  max|uy|=$(max_abs_uy)  " *
           "abs err_ux=$err_ux  err_uy=$err_uy  " *
           "rel err_ux=$rel_ux  rel_uy=$rel_uy"
-    @test rel_ux < 1e-8
-    @test rel_uy < 1e-8
+    # Threshold 1e-7: the residual ~2e-8 at production tolerances
+    # (rtol=1e-8, picard_tol=1e-6) is solver-iterative noise — tightening
+    # to rtol=1e-12, picard_tol=1e-12 drops rel_uy below 1e-11. The 1e-7
+    # threshold sits comfortably above the noise floor (×5 margin) and
+    # well below the original clamp-bug regression (~5e-2), giving a
+    # ~5×10⁵ detection ratio for any future regression of the periodic-
+    # wrap clamp issue fixed in commits 899fbe5..518468d.
+    @test rel_ux < 1e-7
+    @test rel_uy < 1e-7
 end

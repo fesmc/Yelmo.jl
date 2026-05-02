@@ -88,3 +88,10 @@ for "the Y-face one cell north of cell `j`".
 @inline _neighbor_jm1(j::Int, Ny::Int, ::Type{Periodic}) = j == 1 ? Ny : j - 1
 @inline _neighbor_im1(i::Int, Nx::Int, ::Type{Bounded})  = max(i - 1, 1)
 @inline _neighbor_im1(i::Int, Nx::Int, ::Type{Periodic}) = i == 1 ? Nx : i - 1
+
+# Mirror "next neighbour" helpers. `Bounded` clamps to N; `Periodic` wraps
+# modularly (i = Nx → 1, j = Ny → 1).
+@inline _neighbor_ip1(i::Int, Nx::Int, ::Type{Bounded})  = min(i + 1, Nx)
+@inline _neighbor_ip1(i::Int, Nx::Int, ::Type{Periodic}) = i == Nx ? 1 : i + 1
+@inline _neighbor_jp1(j::Int, Ny::Int, ::Type{Bounded})  = min(j + 1, Ny)
+@inline _neighbor_jp1(j::Int, Ny::Int, ::Type{Periodic}) = j == Ny ? 1 : j + 1
