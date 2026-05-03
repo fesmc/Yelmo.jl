@@ -99,8 +99,8 @@ standard halo machinery rather than via per-cell branches.
 Two distinct concepts, two distinct types:
 
 - [`YelmoModelParameters`](@ref) — **per-run configuration**: solver
-  choices (`solver = "diva"`), thresholds (`H_min_grnd = 5.0`),
-  parameterisation switches (`bmb_gl_method = "pmp"`,
+  choices (`solver = "diva"`), thresholds (`H_min_grnd`,
+  `H_min_flt`), parameterisation switches (`bmb_gl_method = "pmp"`,
   `topo_rel = 0`). These are read from a namelist or built from
   Julia keyword arguments. There is one parameter object per model.
 

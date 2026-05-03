@@ -82,8 +82,8 @@ Base.@kwdef struct YtopoParams
     grad_lim            ::Float64 = 0.5
     grad_lim_zb         ::Float64 = 0.5
     dHdt_dyn_lim        ::Float64 = 100.0
-    H_min_grnd          ::Float64 = 5.0
-    H_min_flt           ::Float64 = 75.0
+    H_min_grnd          ::Float64 = 0.0
+    H_min_flt           ::Float64 = 0.0
     margin2nd           ::Bool    = false
     margin_flt_subgrid  ::Bool    = false
     use_bmb             ::Bool    = true

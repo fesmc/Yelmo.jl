@@ -164,8 +164,8 @@ end
     #     does not zero the patch via the boundary-mask rule
     #     (the chosen patch sits over open ocean in the restart);
     #   - lift `z_bed` above sea level over the patch so the cells
-    #     are unambiguously grounded (`f_grnd = 1`), keeping the
-    #     `H_min_grnd = 5` margin-thinning rule trivially satisfied.
+    #     are unambiguously grounded (`f_grnd = 1`); the default
+    #     `H_min_grnd = 0` margin-thinning rule is a no-op anyway.
     patch_i = 9:13
     patch_j = 9:13
     for j in patch_j, i in patch_i
