@@ -674,6 +674,16 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # without per-cell branching in the kernel.
     haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = dirichlet_2d_field(g, 0.0),)))
 
+    # Implicit advection scratch (src/topo/advection.jl).
+    # `Ref{Any}` is filled lazily on the first
+    # `advect_tracer!(...; scheme=:upwind_implicit)` call with an
+    # `ImplicitAdvectionCache(grid)`. The concrete type lives in the
+    # later-included YelmoModelTopo module, so we mirror the
+    # `pc_scratch` / `ssa_amg_cache` lazy pattern rather than
+    # eagerly typing it here.
+    tpo_scratch = (adv_cache = Ref{Any}(nothing),)
+    tpo = merge(tpo, (scratch = tpo_scratch,))
+
     return bnd, dta, dyn, mat, thrm, tpo
 end
 
