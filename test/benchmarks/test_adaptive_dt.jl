@@ -43,12 +43,12 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
 
 # Same params as `test_mismip3d_stnd_lockstep.jl::_mismip3d_lockstep_params`,
 # but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC),
-# `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
-function _adaptive_params()
-    return YelmoModelParameters("mismip3d_stnd_adaptive";
+# parametric `pc_method`, `pc_controller = "PI42"`, plus tolerances.
+function _adaptive_params(; pc_method::AbstractString = "FE-SBE")
+    return YelmoModelParameters("mismip3d_stnd_adaptive_$(lowercase(replace(pc_method, '-' => '_')))";
         yelmo = yelmo_params(
             dt_method     = 2,
-            pc_method     = "HEUN",
+            pc_method     = pc_method,
             pc_controller = "PI42",
             pc_tol        = 5.0,        # rejection threshold (m/yr)
             pc_eps        = 1.0,        # controller floor
@@ -153,8 +153,7 @@ end
 
 @testset "Adaptive PC: MISMIP3D Stnd 500-yr trajectory" begin
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
-    p_adaptive = _adaptive_params()
-    p_fixed    = _fixed_params()
+    p_fixed = _fixed_params()
 
     # Fixed-FE reference run.
     y_ref = _build(b, p_fixed)
@@ -164,83 +163,109 @@ end
     H_ref  = interior(y_ref.tpo.H_ice)[:, :, 1]
     fg_ref = interior(y_ref.tpo.f_grnd)[:, :, 1]
     ux_ref = interior(y_ref.dyn.ux_b)[:, :, 1]
-    @info "Fixed-FE  reference @ t=$(y_ref.time):  " *
+    @info "Fixed-FE reference @ t=$(y_ref.time):  " *
           "max(H)=$(round(maximum(H_ref); digits=2))  " *
           "mean(H)=$(round(mean(H_ref); digits=2))  " *
           "mean(f_grnd)=$(round(mean(fg_ref); digits=4))  " *
           "max|ux_b|=$(round(maximum(abs, ux_ref); digits=2))"
 
-    # Adaptive PC run with same outer dt = 1.
-    y_ad = _build(b, p_adaptive)
-    for _ in 1:500
-        Yelmo.step!(y_ad, 1.0)
+    for pc_method in ["FE-SBE", "HEUN"]
+        @testset "$(pc_method)" begin
+            p_adaptive = _adaptive_params(; pc_method=pc_method)
+            y_ad = _build(b, p_adaptive)
+            for _ in 1:500
+                Yelmo.step!(y_ad, 1.0)
+            end
+            H_ad  = interior(y_ad.tpo.H_ice)[:, :, 1]
+            fg_ad = interior(y_ad.tpo.f_grnd)[:, :, 1]
+            ux_ad = interior(y_ad.dyn.ux_b)[:, :, 1]
+            @info "Adaptive $(pc_method) @ t=$(y_ad.time):  " *
+                  "max(H)=$(round(maximum(H_ad); digits=2))  " *
+                  "mean(H)=$(round(mean(H_ad); digits=2))  " *
+                  "mean(f_grnd)=$(round(mean(fg_ad); digits=4))  " *
+                  "max|ux_b|=$(round(maximum(abs, ux_ad); digits=2))"
+
+            # Sanity.
+            @test all(isfinite, H_ad)
+            @test all(isfinite, ux_ad)
+            # Tolerance allows for FP accumulation across (potentially many)
+            # adaptive sub-steps. With `dt_min = 0.01`, 500 yr worst-case
+            # accumulated FP error is ~1e-9.
+            @test isapprox(y_ad.time, 500.0; atol = 1e-6)
+
+            # Should land in the same neighbourhood as fixed FE.
+            rel_max_H  = abs(maximum(H_ad)  - maximum(H_ref))  / maximum(H_ref)
+            rel_mean_H = abs(mean(H_ad)     - mean(H_ref))     / mean(H_ref)
+            abs_fg     = abs(mean(fg_ad)    - mean(fg_ref))
+            @info "$(pc_method) vs fixed-FE: " *
+                  "rel_max_H=$(round(rel_max_H; digits=4))  " *
+                  "rel_mean_H=$(round(rel_mean_H; digits=4))  " *
+                  "abs_fg=$(round(abs_fg; digits=4))"
+
+            @test rel_max_H  < 0.10        # max(H) within 10%
+            @test rel_mean_H < 0.10        # mean(H) within 10%
+            @test abs_fg     < 0.05        # mean(f_grnd) within 5 percentage points
+
+            # The PC scratch should record some history.
+            scratch = y_ad.dyn.scratch.pc_scratch[]
+            @test scratch !== nothing
+            @test scratch.n_steps_taken > 0
+            @info "$(pc_method): n_steps_taken=$(scratch.n_steps_taken)  " *
+                  "n_rejections=$(scratch.n_rejections)  " *
+                  "last dt history=$(round.(scratch.dt_history; sigdigits=3))  " *
+                  "last eta history=$(round.(scratch.eta_history; sigdigits=3))"
+        end
     end
-    H_ad  = interior(y_ad.tpo.H_ice)[:, :, 1]
-    fg_ad = interior(y_ad.tpo.f_grnd)[:, :, 1]
-    ux_ad = interior(y_ad.dyn.ux_b)[:, :, 1]
-    @info "Adaptive PC reference @ t=$(y_ad.time):  " *
-          "max(H)=$(round(maximum(H_ad); digits=2))  " *
-          "mean(H)=$(round(mean(H_ad); digits=2))  " *
-          "mean(f_grnd)=$(round(mean(fg_ad); digits=4))  " *
-          "max|ux_b|=$(round(maximum(abs, ux_ad); digits=2))"
-
-    # Sanity.
-    @test all(isfinite, H_ad)
-    @test all(isfinite, ux_ad)
-    # Tolerance allows for FP accumulation across (potentially many)
-    # adaptive sub-steps: with `dt_min = 0.01` and 500 yr to cover,
-    # worst case is ~50000 sub-step adds — accumulated FP error ~1e-9.
-    @test isapprox(y_ad.time, 500.0; atol = 1e-6)
-
-    # Should land in the same neighbourhood as fixed FE.
-    rel_max_H  = abs(maximum(H_ad)  - maximum(H_ref))  / maximum(H_ref)
-    rel_mean_H = abs(mean(H_ad)     - mean(H_ref))     / mean(H_ref)
-    abs_fg     = abs(mean(fg_ad)    - mean(fg_ref))
-    @info "Adaptive vs fixed-FE: " *
-          "rel_max_H=$(round(rel_max_H; digits=4))  " *
-          "rel_mean_H=$(round(rel_mean_H; digits=4))  " *
-          "abs_fg=$(round(abs_fg; digits=4))"
-
-    @test rel_max_H  < 0.10        # max(H) within 10%
-    @test rel_mean_H < 0.10        # mean(H) within 10%
-    @test abs_fg     < 0.05        # mean(f_grnd) within 5 percentage points
-
-    # The PC scratch should record some history.
-    scratch = y_ad.dyn.scratch.pc_scratch[]
-    @test scratch !== nothing
-    @test scratch.n_steps_taken > 0
-    @info "Adaptive PC: n_steps_taken=$(scratch.n_steps_taken)  " *
-          "n_rejections=$(scratch.n_rejections)  " *
-          "last dt history=$(scratch.dt_history)  " *
-          "last eta history=$(round.(scratch.eta_history; sigdigits=3))"
 end
 
 
 @testset "Adaptive PC: rollback path actually fires on cliff IC" begin
     # On the very first step from the MISMIP3D Stnd thicker IC, the
     # SSA solve produces an unphysically large velocity (clipped to
-    # ssa_vel_max = 5000 m/yr). One full FE step at dt=1 dumps ~400m
-    # of ice into the calving cell — a transient the adaptive driver
-    # should detect and reject. We validate that scratch.n_rejections
-    # increments in the first few steps.
+    # `ssa_vel_max = 5000 m/yr` for fixed-FE; smaller for adaptive
+    # because the controller shrinks dt). The adaptive driver should
+    # detect and reject the first naive `dt = 1.0` attempt and retry
+    # with a smaller dt. We validate that scratch.n_rejections > 0
+    # OR scratch took multiple sub-steps with one < 1 yr.
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
-    p = _adaptive_params()
-    y = _build(b, p)
 
-    # Take a single outer step (dt=1). The adaptive driver may
-    # internally reject + retry several times.
+    for pc_method in ["FE-SBE", "HEUN"]
+        @testset "$(pc_method)" begin
+            p = _adaptive_params(; pc_method=pc_method)
+            y = _build(b, p)
+
+            Yelmo.step!(y, 1.0)
+            scratch = y.dyn.scratch.pc_scratch[]
+            @test scratch !== nothing
+            @info "$(pc_method) first outer step: " *
+                  "n_steps_taken=$(scratch.n_steps_taken)  " *
+                  "n_rejections=$(scratch.n_rejections)  " *
+                  "max|ux_b|=$(round(maximum(abs, interior(y.dyn.ux_b)); digits=2)) m/yr"
+
+            @test scratch.n_rejections > 0 || (scratch.n_steps_taken > 1) ||
+                  (!isempty(scratch.dt_history) && minimum(scratch.dt_history) < 1.0)
+        end
+    end
+end
+
+
+@testset "Adaptive PC: FE-SBE is the default pc_method" begin
+    # Verify that opting into `dt_method = 2` without specifying
+    # `pc_method` gets FE-SBE (Yelmo.jl's recommended scheme).
+    b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
+
+    # Build params with dt_method=2 but no explicit pc_method.
+    p_default = YelmoModelParameters("mismip3d_default_pc";
+        yelmo = yelmo_params(dt_method = 2),
+        ydyn  = _adaptive_params().ydyn, yneff = _adaptive_params().yneff,
+        ytill = _adaptive_params().ytill, ymat = _adaptive_params().ymat,
+        ytopo = _adaptive_params().ytopo,
+    )
+    @test p_default.yelmo.pc_method == "FE-SBE"
+
+    # And verify it actually runs (resolver doesn't error).
+    y = _build(b, p_default)
     Yelmo.step!(y, 1.0)
-    scratch = y.dyn.scratch.pc_scratch[]
-    @test scratch !== nothing
-    @info "After first outer step: n_steps_taken=$(scratch.n_steps_taken)  " *
-          "n_rejections=$(scratch.n_rejections)  " *
-          "max|ux_b|=$(round(maximum(abs, interior(y.dyn.ux_b)); digits=2)) m/yr"
-
-    # The first outer step should have caused at least one rejection
-    # OR sub-stepped to a much smaller dt than 1.0 — both prove the
-    # adaptive machinery responded to the cliff transient. (We allow
-    # either since pc_tol tuning may push behaviour into either
-    # regime.)
-    @test scratch.n_rejections > 0 || (scratch.n_steps_taken > 1) ||
-          (!isempty(scratch.dt_history) && minimum(scratch.dt_history) < 1.0)
+    @test y.time ≈ 1.0 atol = 1e-9
+    @test all(isfinite, interior(y.tpo.H_ice))
 end

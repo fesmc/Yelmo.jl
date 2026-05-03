@@ -82,6 +82,25 @@ abstract type PCScheme end
 Heun's method (improved Euler). 2-stage explicit RK, order 2. The
 truncation-error proxy is `tau = 1/(6·dt) · (H_corr − H_pred)`
 matching Fortran `yelmo_timesteps.f90:381`.
+
+**Implementation note (limitation).** The Yelmo.jl `HEUN`
+implementation realises Heun via two consecutive `step_FE` calls
+(predictor + virtual-lookahead) and averages: `H_corr = (H_n + H_**)/2`.
+Stage 2 of this pattern runs the **full** `topo_step!` cascade —
+calving, `resid_tendency!` cleanup, mass-balance kernels — on the
+predictor's intermediate `H_pred` geometry. For the nonlinear
+cascade (calving thresholds, `H_min_*` cleanup, level-set front
+events) this means the corrector's inputs were biased by stage-2's
+calving-on-`H_pred`, and `H_corr = (H_n + H_**)/2` no longer
+reproduces the trapezoidal-rule answer for those nonlinear
+contributions. The default Yelmo.jl benchmarks exercise none of
+those kernels (see `test_mismip3d_stnd*.jl` etc.), so this is benign
+for the current test suite.
+
+For configurations with active LSF calving, finite `H_min_flt` /
+`H_min_grnd`, or `topo_rel != 0`, prefer `FE_SBE` (the default),
+which uses the Fortran-style "both stages start from `H_n`" pattern
+where the topo cascade only sees `H_n`'s geometry.
 """
 struct HEUN <: PCScheme end
 
@@ -89,8 +108,24 @@ struct HEUN <: PCScheme end
     FE_SBE
 
 Forward Euler predictor + Semi-implicit Backward Euler corrector.
-Stub — implementation lands in the Step 2 PR alongside the
-explicit-velocity `topo_step!` refactor.
+Default `pc_method`. Faithful Fortran-style PC pattern matching
+`yelmo_ice.f90:138-377`:
+
+  - Predictor: one full topo cascade from `H_n` advected by `u_n`,
+    yielding `H_pred`.
+  - SSA solve at `H_pred`, yielding `u_pred`.
+  - Corrector: one full topo cascade **from `H_n` again**, but
+    advected by `u_pred`. Yields `H_corr`.
+
+Both stages start from `H_n`, so calving / `resid_tendency!` /
+mass-balance kernels only ever see `H_n`'s geometry — the corrector
+result is consistent with the cascade's nonlinear behaviour at
+`H_n`. Cost: **1 SSA solve per attempt** (vs `HEUN`'s 2). Velocity
+carried forward is `u_pred` (the post-predictor SSA solution),
+matching Fortran's pattern.
+
+Truncation-error proxy: `tau = 1/(2·dt) · (H_corr − H_pred)`
+matching Fortran `yelmo_timesteps.f90:329`.
 """
 struct FE_SBE <: PCScheme end
 
@@ -98,7 +133,9 @@ struct FE_SBE <: PCScheme end
     AB_SAM
 
 Adams-Bashforth predictor + Semi-implicit Adams-Moulton corrector
-(Fortran default). Stub — Step 2 PR.
+(Fortran's `pc_method = "AB-SAM"` default). Stub — implementation
+deferred until we want to plug in dt-history-dependent error
+formulas. The PI42 controller already maintains the dt-history ring.
 """
 struct AB_SAM <: PCScheme end
 
@@ -136,13 +173,11 @@ struct PI42 <: PIController end
 # Resolve a string from the namelist to a concrete scheme instance.
 function _resolve_pc_scheme(name::AbstractString)
     name == "HEUN"   && return HEUN()
-    name == "FE-SBE" && error(
-        "pc_method=\"FE-SBE\" is declared but not implemented in this PR. " *
-        "Use \"HEUN\" for now; FE-SBE lands in the Step 2 PR.")
+    name == "FE-SBE" && return FE_SBE()
     name == "AB-SAM" && error(
-        "pc_method=\"AB-SAM\" is declared but not implemented in this PR. " *
-        "Use \"HEUN\" for now; AB-SAM lands in the Step 2 PR.")
-    error("Unknown pc_method=\"$name\". Supported: \"HEUN\".")
+        "pc_method=\"AB-SAM\" is declared but not implemented. " *
+        "Supported: \"HEUN\", \"FE-SBE\" (default).")
+    error("Unknown pc_method=\"$name\". Supported: \"HEUN\", \"FE-SBE\" (default).")
 end
 
 function _resolve_pc_controller(name::AbstractString)
@@ -227,6 +262,25 @@ function restore!(y, snap::PCSnapshot)
     return y
 end
 
+"""
+    restore_H_only!(y, snap::PCSnapshot) -> y
+
+Roll back `H_ice` and `time` to the snapshotted values, but **leave
+the velocity Fields untouched**. Used by FE-SBE / AB-SAM PC schemes
+to reset the prognostic state between predictor and corrector
+stages while preserving the freshly-solved post-predictor velocity
+`u_pred` for use as the corrector's advection velocity.
+
+Calls `update_diagnostics!` to refresh `f_grnd`, `H_grnd`, `z_srf`,
+mask fields, etc. from the restored `H_ice`.
+"""
+function restore_H_only!(y, snap::PCSnapshot)
+    copyto!(interior(y.tpo.H_ice), snap.H_ice)
+    y.time = snap.time
+    Yelmo.update_diagnostics!(y)
+    return y
+end
+
 
 # ===== Per-model persistent scratch =====
 
@@ -294,8 +348,7 @@ captured `y_n` into `scratch.snap`, and that `y` currently holds that
 same `y_n` state. Returns the truncation-error proxy `eta` (m/yr).
 The model state on return is the corrector result.
 
-Implemented for `HEUN` only in this PR; `FE_SBE` and `AB_SAM` error
-out via the `pc_error_factor` chain.
+Dispatches on `PCScheme`. Concrete methods: `HEUN`, `FE_SBE`.
 """
 function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
@@ -305,11 +358,18 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     copyto!(scratch.H_pred, interior(y.tpo.H_ice))
 
     # Stage 2: full FE step  y_pred  →  y_**
+    # NOTE: this stage's `topo_step!` cascade — calving,
+    # `resid_tendency!` cleanup, mass-balance kernels — operates on
+    # `H_pred`'s geometry, NOT `H_n`'s. For nonlinear cascade kernels
+    # the resulting `H_**` is biased relative to the "all-stages-from-
+    # `H_n`" answer, and `H_corr = (H_n + H_**)/2` is no longer the
+    # trapezoidal-rule update for those kernels. See the `HEUN`
+    # docstring's "Implementation note (limitation)" section. For
+    # configurations where this matters, use `FE_SBE` instead.
     _step_fe!(y, dt)
 
-    # Heun corrector identity: H_corr = (H_n + H_**) / 2.
-    # (Derivation: with k1 = (H_pred − H_n)/dt and k2 = (H_** − H_pred)/dt,
-    # the Heun update H_n + dt/2·(k1 + k2) = (H_n + H_**)/2.)
+    # Heun corrector identity (true for the linear-advection part):
+    # H_corr = (H_n + H_**) / 2.
     H_now = interior(y.tpo.H_ice)
     @inbounds @simd for i in eachindex(scratch.H_corr)
         scratch.H_corr[i] = 0.5 * (snap.H_ice[i] + H_now[i])
@@ -322,15 +382,84 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     Yelmo.update_diagnostics!(y)
 
     # Truncation-error proxy. Velocity carried forward into the next
-    # outer step is `u_**` (from stage 2's dyn solve), matching
-    # Fortran's "carry the predictor-state velocity" behaviour
-    # (yelmo_ice.f90 outer loop — never re-solves dyn at the corrector
-    # state). The Picard loop on the next step's predictor will tug
-    # the velocity back to consistency with the new H_n.
+    # outer step is `u_**` (from stage 2's dyn solve).
     factor = pc_error_factor(HEUN())
     diff_max = 0.0
     @inbounds @simd for i in eachindex(scratch.H_corr)
         d = abs(scratch.H_corr[i] - scratch.H_pred[i])
+        diff_max = max(diff_max, d)
+    end
+    return factor * diff_max / dt
+end
+
+"""
+    pc_step!(::FE_SBE, y, dt, scratch) -> eta::Float64
+
+Faithful Fortran-style FE-SBE predictor-corrector. Both predictor
+and corrector stages operate on `H_n`'s geometry; only the
+advection velocity differs.
+
+Sequence (matches `yelmo_ice.f90:138-377` outer-loop body):
+
+  1. **Predictor**: `topo_step!(y, dt; ux_bar=u_n, uy_bar=u_n)` —
+     a full topo cascade from `H_n` advected by `u_n` (the velocity
+     present in `y.dyn` at attempt start, snapshotted in `scratch.snap`).
+     Result: `H_pred`. Saved into `scratch.H_pred` for the error
+     metric.
+  2. **Velocity update**: `dyn_step!(y, dt)` — solve SSA at `H_pred`,
+     yielding `u_pred`. Now `y.dyn.ux_bar = u_pred`.
+  3. **Restore H, keep velocity**: `restore_H_only!(y, snap)` puts
+     `H_ice` back to `H_n` and resets `time`, but **leaves
+     `y.dyn.ux_bar = u_pred`**. `update_diagnostics!` refreshes the
+     topo derivatives consistent with `H_n`.
+  4. **Corrector**: `topo_step!(y, dt; ux_bar=u_pred, uy_bar=u_pred)` —
+     the same topo cascade run again from `H_n`, but advected by
+     `u_pred`. Result: `H_corr`, time advances to `t_n + dt`.
+
+Velocity carried forward to the next outer step is `u_pred` (the
+post-predictor SSA solution at `H_pred`). Slight O(dt) inconsistency
+with `H_corr`, but the next-step Picard loop converges this away
+quickly. Cost: **1 SSA solve per attempt** (vs `HEUN`'s 2).
+
+Truncation-error proxy: `tau = 1/(2·dt) · |H_corr − H_pred|`,
+matching Fortran `yelmo_timesteps.f90:329`.
+"""
+function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
+    snap = scratch.snap
+
+    # Stage 1 — predictor topo cascade with the snapshotted velocity.
+    # `y.dyn.ux_bar` already holds `u_n` at this point because the
+    # outer driver snapshotted into `scratch.snap` immediately before
+    # calling us, and nothing has touched `y.dyn` since.
+    Yelmo.topo_step!(y, dt)
+    copyto!(scratch.H_pred, interior(y.tpo.H_ice))
+
+    # Stage 2 — solve SSA at `H_pred` to get `u_pred`. Updates
+    # `y.dyn.ux_bar` / `y.dyn.uy_bar` (and `_b` versions) in place.
+    Yelmo.dyn_step!(y, dt)
+
+    # Stage 3 — restore `H_ice` and `time` to `y_n`, **keeping the
+    # post-Stage-2 velocity** `u_pred` in `y.dyn`. `update_diagnostics!`
+    # (called inside `restore_H_only!`) refreshes `f_grnd`, `H_grnd`,
+    # `z_srf`, mask fields, etc. from `H_n`.
+    restore_H_only!(y, snap)
+
+    # Stage 4 — corrector topo cascade from `H_n` advected by `u_pred`.
+    # `topo_step!` reads `y.dyn.ux_bar` / `y.dyn.uy_bar` by default,
+    # which now hold `u_pred`. The full cascade (calving, mass balance,
+    # `resid_tendency!`, …) sees `H_n`'s geometry — the key difference
+    # vs `HEUN`-via-2-FE.
+    Yelmo.topo_step!(y, dt)
+    # `y` is now at `(H_corr, u_pred, t_n + dt)`.
+
+    # Truncation-error proxy. Velocity left in `y.dyn` is `u_pred` for
+    # the next outer step's predictor (matches Fortran's behaviour in
+    # `yelmo_ice.f90` — no re-solve at `H_corr`).
+    factor = pc_error_factor(FE_SBE())
+    H_corr = interior(y.tpo.H_ice)
+    diff_max = 0.0
+    @inbounds @simd for i in eachindex(H_corr)
+        d = abs(H_corr[i] - scratch.H_pred[i])
         diff_max = max(diff_max, d)
     end
     return factor * diff_max / dt

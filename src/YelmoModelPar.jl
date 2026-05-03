@@ -67,7 +67,11 @@ Base.@kwdef struct YelmoParams
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    pc_method        ::String  = "AB-SAM"
+    # Fortran namelist default is "AB-SAM"; Yelmo.jl currently
+    # implements "HEUN" and "FE-SBE" only. Default to "FE-SBE" so
+    # `dt_method = 2` works out of the box (Fortran-namelist users
+    # passing "AB-SAM" will get a clear error from the resolver).
+    pc_method        ::String  = "FE-SBE"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
