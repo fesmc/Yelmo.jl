@@ -219,16 +219,15 @@ end
     # results are clean.
     @test rel_H  < 0.5
     @test abs_fg < 0.5
-    # KNOWN-BROKEN: max|ux_b| differs ~4.5× between Yelmo.jl (~175 m/yr)
-    # and YelmoMirror (~779 m/yr) at t=500 despite matching geometry to
-    # <1% (max H peak agreement 1574.7 vs 1573.7 m, identical
-    # mean(f_grnd)=0.49). Picard converges in 1 iter on Yelmo.jl side
-    # throughout the run — suggests the visc nonlinearity isn't being
-    # iterated (visc_eff_int not refreshed between iters, or
-    # beta_method=4 under-velocity bug, or a residual hotspot analogous
-    # to trough's three from PR #25/26). Flagged for separate follow-up
-    # investigation. See PR description for diagnostic notes.
-    @test_broken rel_ux < 0.5
+    # Phase 5 fixed the previously-broken velocity gap by changing the
+    # `YtopoParams` defaults `H_min_flt`/`H_min_grnd` from 75/5 m to
+    # 0/0. The old defaults zeroed every fresh shelf cell in
+    # `resid_tendency!` before it could thicken, so the front never
+    # advanced beyond one cell and `max|ux_b|` collapsed to the
+    # calving-front-BC value (~175 m/yr) rather than the interior
+    # shelf-flow value YelmoMirror sees (~779 m/yr). Post-fix:
+    # `max|ux_b|` jl ≈ 670 vs ref 779 (rel_ux ≈ 0.14).
+    @test rel_ux < 0.5
 
     # =====================================================================
     # 5. NetCDF dump of Yelmo.jl-side end-state for inspection.
