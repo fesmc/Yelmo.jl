@@ -649,7 +649,24 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # later-included module, so eagerly typing it here would create
     # an awkward forward-reference. Mirror the `ssa_amg_cache` pattern.
     pc_scratch = (pc_scratch = Ref{Any}(nothing),)
-    dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch),))
+
+    # DIVA scratch (src/dyn/velocity_diva.jl). The Picard outer loop
+    # there mirrors SSA's structure but operates on the depth-averaged
+    # `ux_bar / uy_bar` (matrix unknown for the depth-integrated
+    # momentum balance) rather than `ux_b / uy_b`. F1 is 3D Center
+    # (cumulative bed-to-layer integral). beta_eff substitutes for
+    # beta in the matrix-kernel inputs.
+    diva_scratch = (
+        diva_F2                 = CenterField(g),                 # 2D depth-integrated 1/η · (1−ζ)²
+        diva_F1_3D              = CenterField(gt),                # 3D cumulative 1/η · (1−ζ)
+        diva_beta_eff           = CenterField(g),                 # Goldberg-2011 β_eff at aa-cells
+        diva_beta_eff_acx       = XFaceField(g),                  # face-staggered β_eff
+        diva_beta_eff_acy       = YFaceField(g),
+        diva_picard_ux_bar_nm1  = XFaceField(g),                  # Picard "n minus 1" snapshots
+        diva_picard_uy_bar_nm1  = YFaceField(g),                  # for the depth-averaged unknown
+    )
+
+    dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch, diva_scratch),))
 
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
     # boundary conditions on the domain edge. The upwind advection

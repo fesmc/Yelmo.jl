@@ -199,6 +199,13 @@ Base.@kwdef struct YdynParams
     ssa_iter_conv   ::Float64 = 1e-2
     taud_lim        ::Float64 = 2e5
     cb_sia          ::Float64 = 0.0
+    # DIVA no-slip flag: when `true`, DIVA's `calc_beta_eff` uses the
+    # no-slip formula `beta_eff = 1 / F2` (Goldberg 2011 Eq. 42) and
+    # forces basal velocity to zero in `calc_vel_basal_diva!`. When
+    # `false` (default), the standard sliding formulation
+    # `beta_eff = beta / (1 + beta·F2)` is used (Goldberg 2011 Eq. 41).
+    # Mirrors Fortran's `par%no_slip` in `&ydyn`.
+    no_slip         ::Bool    = false
 end
 ydyn_params(; kwargs...) = YdynParams(; kwargs...)
 # ---------------------------------------------------------------------------

@@ -66,6 +66,8 @@ include("diagnostics.jl")
 include("integration.jl")
 include("velocity_sia.jl")
 include("velocity_ssa.jl")
+# DIVA reuses helpers from velocity_ssa.jl — must load AFTER it.
+include("velocity_diva.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
@@ -273,10 +275,28 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         end
         interior(y.dyn.ux_bar) .= interior(y.dyn.ux_i_bar) .+ Uxb
         interior(y.dyn.uy_bar) .= interior(y.dyn.uy_i_bar) .+ Uyb
+    elseif solver == "diva"
+        # DIVA: depth-integrated viscosity approximation. The driver
+        # solves the depth-averaged momentum balance via the SSA matrix
+        # kernel with `beta_eff` substituted for `beta`, then
+        # reconstructs the 3D velocity profile in closed form via the
+        # F1 cumulative integral. Populates `ux_bar / uy_bar`,
+        # `ux_b / uy_b`, `taub_acx / taub_acy`, and the 3D `ux / uy`
+        # plus the shearing component `ux_i / uy_i`.
+        # Mirrors `yelmo_dynamics.f90:455-547` (DIVA branch of
+        # `calc_ydyn_diva`).
+        calc_velocity_diva!(y)
+
+        # `ux_i_bar / uy_i_bar` (depth-averaged shear) are SIA-specific
+        # diagnostics not used by DIVA's matrix solve (which gives
+        # `ux_bar` directly). Zero them to mirror SSA's pattern; the
+        # full 3D shear is in `ux_i / uy_i`.
+        fill!(interior(y.dyn.ux_i_bar), 0.0)
+        fill!(interior(y.dyn.uy_i_bar), 0.0)
     else
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
-              "Milestone 3d supports \"fixed\", \"sia\", \"ssa\", \"hybrid\". " *
-              "DIVA / L1L2 land in milestones 3e–3f.")
+              "Milestone 3e supports \"fixed\", \"sia\", \"ssa\", \"hybrid\", " *
+              "\"diva\". L1L2 lands in milestone 3f.")
     end
 
     # 7. Underflow clip on the velocity fields (matches Fortran's
