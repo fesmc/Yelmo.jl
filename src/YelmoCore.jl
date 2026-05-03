@@ -643,7 +643,13 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_visc_eff_b             = CenterField(g),
         ssa_visc_eff_s             = CenterField(g),
     )
-    dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch),))
+    # Adaptive predictor-corrector scratch (src/timestepping.jl).
+    # `Ref{Any}` so we can lazily allocate a `PCScratch` on the first
+    # call to `step!` with `dt_method != 0` — the type lives in a
+    # later-included module, so eagerly typing it here would create
+    # an awkward forward-reference. Mirror the `ssa_amg_cache` pattern.
+    pc_scratch = (pc_scratch = Ref{Any}(nothing),)
+    dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch),))
 
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
     # boundary conditions on the domain edge. The upwind advection
@@ -902,12 +908,32 @@ function therm_step! end
 # at load time. `YelmoMirror` overrides `step!` in `YelmoMirrorCore` to call
 # the C API instead of the per-phase chain.
 function step!(y::YelmoModel, dt::Float64)
-    topo_step!(y, dt)
-    dyn_step!(y, dt)
-    # mat_step!(y,   dt)   — milestone 4
-    # therm_step!(y, dt)   — milestone 5
-    return y
+    # Backend dispatch on `y.p.yelmo.dt_method`:
+    #   0 = fixed forward Euler (this body, current default).
+    #   2 = adaptive predictor-corrector (delegates to
+    #       `Yelmo._select_step!` from src/timestepping.jl, which
+    #       handles snapshot/restore + PC + PI controller).
+    # When `y.p === nothing`, fall back to fixed FE for backwards
+    # compatibility with simple in-memory benchmark constructions
+    # that don't pass parameters.
+    method = y.p === nothing ? 0 : Int(y.p.yelmo.dt_method)
+    if method == 0
+        topo_step!(y, dt)
+        dyn_step!(y, dt)
+        # mat_step!(y,   dt)   — milestone 4
+        # therm_step!(y, dt)   — milestone 5
+        return y
+    else
+        # `_select_step!` is defined in src/timestepping.jl, which is
+        # included after the topo + dyn modules so it can call them.
+        return _select_step!(y, dt)
+    end
 end
+
+# Forward declaration — body lives in src/timestepping.jl. Defining
+# the symbol here keeps `step!` self-contained even though the
+# adaptive backend is added by a later include.
+function _select_step! end
 
 # ---------------------------------------------------------------------------
 # compare_state — backend-agnostic field-wise diff for regression tests

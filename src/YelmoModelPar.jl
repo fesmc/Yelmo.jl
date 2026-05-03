@@ -59,7 +59,11 @@ Base.@kwdef struct YelmoParams
     zeta_scale       ::String  = "exp"
     zeta_exp         ::Float64 = 2.0
     nz_aa            ::Int     = 10
-    dt_method        ::Int     = 2
+    # Fortran default is `dt_method = 2` (adaptive PC). Yelmo.jl
+    # defaults to `0` (fixed forward Euler) so existing tests
+    # written before adaptive landed keep their original semantics.
+    # Set `dt_method = 2` explicitly to opt into adaptive PC.
+    dt_method        ::Int     = 0
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
