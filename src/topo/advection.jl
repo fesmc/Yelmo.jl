@@ -86,6 +86,18 @@ struct ImplicitAdvectionCache
     x::Vector{Float64}
     work::BicgstabWorkspace
     P::Base.RefValue{Any}
+    # `nz_*` index maps: position in `A.nzval` for the (row=cell(i,j),
+    # col=stencil_neighbour) entry. `0` means the neighbour does not
+    # exist (Bounded-axis edge with no wraparound). Built once at
+    # `init_advection_cache` time so `update_advection_operator!` can
+    # write coefficients in place without (row, col) → nzval lookup.
+    nz_self::Matrix{Int}
+    nz_east::Matrix{Int}
+    nz_west::Matrix{Int}
+    nz_north::Matrix{Int}
+    nz_south::Matrix{Int}
+    periodic_x::Bool
+    periodic_y::Bool
     Nx::Int
     Ny::Int
 end
@@ -108,7 +120,18 @@ function init_advection_cache(grid)
     Nx = size(grid, 1)
     Ny = size(grid, 2)
     topo = topology(grid)
+    periodic_x = topo[1] === Periodic
+    periodic_y = topo[2] === Periodic
     A = _build_5pt_sparsity(Nx, Ny, topo[1], topo[2])
+
+    nz_self  = Matrix{Int}(undef, Nx, Ny)
+    nz_east  = zeros(Int, Nx, Ny)
+    nz_west  = zeros(Int, Nx, Ny)
+    nz_north = zeros(Int, Nx, Ny)
+    nz_south = zeros(Int, Nx, Ny)
+    _fill_nzval_index_maps!(nz_self, nz_east, nz_west, nz_north, nz_south,
+                            A, Nx, Ny, periodic_x, periodic_y)
+
     N = Nx * Ny
     return ImplicitAdvectionCache(
         A,
@@ -116,8 +139,56 @@ function init_advection_cache(grid)
         Vector{Float64}(undef, N),
         BicgstabWorkspace(N, N, Vector{Float64}),
         Ref{Any}(nothing),
+        nz_self, nz_east, nz_west, nz_north, nz_south,
+        periodic_x, periodic_y,
         Nx, Ny,
     )
+end
+
+# Locate (row, col) in `A.nzval`. `A` is CSC, so we scan the column.
+# Returns 0 if the entry is not in the sparsity pattern.
+@inline function _find_nzval_index(A::SparseMatrixCSC, row::Int, col::Int)
+    rng = A.colptr[col]:(A.colptr[col + 1] - 1)
+    @inbounds for k in rng
+        A.rowval[k] == row && return k
+    end
+    return 0
+end
+
+# Fill the per-cell stencil index lookups so `update_advection_operator!`
+# can write coefficients into `A.nzval` in O(1) per entry.
+function _fill_nzval_index_maps!(nz_self, nz_east, nz_west, nz_north, nz_south,
+                                 A::SparseMatrixCSC, Nx::Int, Ny::Int,
+                                 periodic_x::Bool, periodic_y::Bool)
+    for j in 1:Ny, i in 1:Nx
+        n = _row_index(i, j, Nx)
+        nz_self[i, j] = _find_nzval_index(A, n, n)
+
+        # E neighbour
+        i_e = i < Nx ? i + 1 : (periodic_x ? 1 : 0)
+        if i_e != 0
+            nz_east[i, j] = _find_nzval_index(A, n, _row_index(i_e, j, Nx))
+        end
+
+        # W neighbour
+        i_w = i > 1 ? i - 1 : (periodic_x ? Nx : 0)
+        if i_w != 0
+            nz_west[i, j] = _find_nzval_index(A, n, _row_index(i_w, j, Nx))
+        end
+
+        # N neighbour
+        j_n = j < Ny ? j + 1 : (periodic_y ? 1 : 0)
+        if j_n != 0
+            nz_north[i, j] = _find_nzval_index(A, n, _row_index(i, j_n, Nx))
+        end
+
+        # S neighbour
+        j_s = j > 1 ? j - 1 : (periodic_y ? Ny : 0)
+        if j_s != 0
+            nz_south[i, j] = _find_nzval_index(A, n, _row_index(i, j_s, Nx))
+        end
+    end
+    return nothing
 end
 
 # Lexicographic flat index: i,j → row in [1, Nx*Ny].
@@ -305,16 +376,153 @@ function advect_tracer_upwind_implicit!(c, ux, uy, dt::Real,
 end
 
 """
-    update_advection_operator!(cache, ux, uy, dt; mask) -> cache
+    update_advection_operator!(cache, ux, uy, dt, dx, dy; mask) -> cache
 
-Refresh `cache.A` (in place via `nzval`) and refactor `cache.P[]` for
-the current `(ux, uy, dt, mask)`. Called once per outer step before
-any `solve_advection!` calls. Stub in PR-1; landed in PR-2.
+Refresh `cache.A.nzval` in place for the current `(ux, uy, dt,
+mask)`. Sparsity pattern is unchanged. Called once per outer step,
+ahead of any `solve_advection!` calls.
+
+Discretisation matches Fortran Yelmo's `impl-lis`
+(solver_advection.f90:143–531) with `WOVI = 1.0` (pure backward
+Euler):
+
+  - Velocities `ux::XFaceField`, `uy::YFaceField` give cell-face
+    values. Per Yelmo.jl / Oceananigans staggering:
+      ux[i,j]   = west face of cell (i,j)  (= `ux_1` in Fortran)
+      ux[i+1,j] = east face of cell (i,j)  (= `ux_2`)
+      uy[i,j]   = south face of cell (i,j) (= `uy_1`)
+      uy[i,j+1] = north face of cell (i,j) (= `uy_2`)
+    For Periodic axes the +1 neighbour wraps via `mod1`.
+
+  - Upwind switch on each face: positive face velocity ⇒ tracer
+    value comes from the upstream cell; negative ⇒ from the
+    downstream cell. The implicit form folds this into the matrix:
+    diagonal accumulates outflow contributions; off-diagonals carry
+    inflow contributions from upstream neighbours.
+
+  - Boundary cells:
+      • Periodic axis  → wraparound stencil (interior assembly).
+      • Bounded edge   → Dirichlet zero (matrix row = δᵢⱼ, RHS=0).
+
+  - Mask handling (`mask` is an `Int` matrix of size `(Nx, Ny)` or
+    `nothing`):
+      mask[i,j] ==  0 → Dirichlet zero.
+      mask[i,j] == -1 → Dirichlet to the current `cache.b` value
+                        (caller-provided prescribed value).
+                        NOTE: Fortran sets b=0 here, which zeroes
+                        the prescribed value at solve time. We treat
+                        that as a Fortran bug and let the caller
+                        prescribe via the b vector instead.
+      otherwise (default 1) → dynamic / interior assembly.
+    `nothing` ⇒ all cells are dynamic.
+
+This step does NOT touch `cache.b` or `cache.P[]`. The RHS is
+filled per tracer in `solve_advection!`. The preconditioner is
+(re)factored in `solve_advection!` (or a future explicit
+preconditioner-refresh helper).
+
+`dx`, `dy` are the cell sizes in metres.
 """
 function update_advection_operator!(cache::ImplicitAdvectionCache,
-                                    ux, uy, dt::Real;
+                                    ux, uy, dt::Real, dx::Real, dy::Real;
                                     mask = nothing)
-    error("update_advection_operator!: not implemented yet — lands in PR-2.")
+    # Outer wrapper that extracts concrete `interior` arrays then
+    # dispatches to a type-specialised inner kernel. Splitting like
+    # this is the standard Julia idiom for fully zero-allocation hot
+    # loops over Oceananigans `Field`s: the compiler specialises
+    # `_update_advection_operator_kernel!` to the concrete `SubArray`
+    # eltype/parent so scalar `Ux[i,j,1]` reads do not box.
+    _update_advection_operator_kernel!(cache, interior(ux), interior(uy),
+                                       Float64(dt), Float64(dx), Float64(dy),
+                                       mask)
+    return cache
+end
+
+function _update_advection_operator_kernel!(cache::ImplicitAdvectionCache,
+                                            Ux::AbstractArray{Float64, 3},
+                                            Uy::AbstractArray{Float64, 3},
+                                            dt::Float64, dx::Float64, dy::Float64,
+                                            mask)
+    Nx, Ny = cache.Nx, cache.Ny
+    nzval = cache.A.nzval
+
+    # CFL factors. Each upwind contribution is `c{xy} * face_velocity`.
+    cx = dt / dx
+    cy = dt / dy
+
+    # Sparsity is static — only nzval changes. Zero everything first
+    # so off-diagonal entries that disappear under the upwind switch
+    # (e.g. a wind-direction flip) do not retain a stale value.
+    fill!(nzval, 0.0)
+
+    periodic_x = cache.periodic_x
+    periodic_y = cache.periodic_y
+    nz_self  = cache.nz_self
+    nz_east  = cache.nz_east
+    nz_west  = cache.nz_west
+    nz_north = cache.nz_north
+    nz_south = cache.nz_south
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        # Resolve mask. 0 / -1 short-circuit to a Dirichlet identity row.
+        if mask !== nothing
+            m = mask[i, j]
+            if m == 0 || m == -1
+                nzval[nz_self[i, j]] = 1.0
+                continue
+            end
+        end
+
+        # Bounded-edge cells: Dirichlet zero. The east/west/north/south
+        # neighbour entries from `_build_5pt_sparsity` exist (when they
+        # exist at all) but stay at 0 from the `fill!` above.
+        on_x_edge = !periodic_x && (i == 1 || i == Nx)
+        on_y_edge = !periodic_y && (j == 1 || j == Ny)
+        if on_x_edge || on_y_edge
+            nzval[nz_self[i, j]] = 1.0
+            continue
+        end
+
+        # Interior assembly. Resolve face indices for E and N neighbours
+        # (Periodic wraps to 1; Bounded uses i+1 / j+1 — and we know we
+        # are not on an edge by the check above).
+        i_eface = periodic_x && i == Nx ? 1 : i + 1
+        j_nface = periodic_y && j == Ny ? 1 : j + 1
+
+        ux_w = Ux[i,       j, 1]   # west face  (Fortran ux_1)
+        ux_e = Ux[i_eface, j, 1]   # east face  (Fortran ux_2)
+        uy_s = Uy[i, j,       1]   # south face (Fortran uy_1)
+        uy_n = Uy[i, j_nface, 1]   # north face (Fortran uy_2)
+
+        # Diagonal: 1 (mass term) + sum of outflow contributions.
+        # An "outflow" face is one where the upwind value comes from
+        # cell (i,j) itself: ux_w<0 (west pulls out), ux_e>0 (east
+        # pushes out), uy_s<0, uy_n>0.
+        a_diag = 1.0
+        if ux_w < 0.0; a_diag -= cx * ux_w; end          # = +cx*|ux_w|
+        if ux_e > 0.0; a_diag += cx * ux_e; end
+        if uy_s < 0.0; a_diag -= cy * uy_s; end
+        if uy_n > 0.0; a_diag += cy * uy_n; end
+        nzval[nz_self[i, j]] = a_diag
+
+        # Off-diagonals: inflow contributions from upstream neighbours.
+        # Negative entries (the upstream tracer enters this cell with a
+        # negative coefficient on the LHS).
+        if ux_w > 0.0
+            nzval[nz_west[i, j]]  = -cx * ux_w
+        end
+        if uy_s > 0.0
+            nzval[nz_south[i, j]] = -cy * uy_s
+        end
+        if ux_e < 0.0
+            nzval[nz_east[i, j]]  =  cx * ux_e    # ux_e<0 ⇒ negative
+        end
+        if uy_n < 0.0
+            nzval[nz_north[i, j]] =  cy * uy_n
+        end
+    end
+
+    return nothing
 end
 
 """

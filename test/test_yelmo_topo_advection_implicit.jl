@@ -21,6 +21,24 @@ using Test
 using Yelmo
 using Oceananigans
 using SparseArrays: nnz, SparseMatrixCSC
+using LinearAlgebra: diag, I
+
+# Lexicographic flat index — must match `_row_index` inside Yelmo's
+# advection module. Local copy so we don't have to dig into module
+# internals from the test.
+@inline _to_n(i::Int, j::Int, Nx::Int) = i + (j - 1) * Nx
+
+# Count nonzero entries in row `r` of a SparseMatrixCSC by scanning
+# all columns. Linear in nnz, fine for test grids.
+function nnz_in_row(A::SparseMatrixCSC, r::Int)
+    count = 0
+    for c in 1:size(A, 2)
+        for k in A.colptr[c]:(A.colptr[c + 1] - 1)
+            A.rowval[k] == r && (count += 1)
+        end
+    end
+    return count
+end
 
 # Analytical nnz for the 5-point Bounded-Bounded sparsity pattern.
 # At each cell we have (1 diagonal) + (E if i<Nx) + (W if i>1) +
@@ -165,6 +183,227 @@ end
 
     @test_throws ErrorException advect_tracer!(c, u, v, 1.0;
         scheme = :upwind_god_only_knows)
+end
+
+@testset "tpo: update_advection_operator! — uniform +x velocity" begin
+    Nx, Ny = 6, 5
+    dx = dy = 1e3
+    dt = 100.0
+    u0 = 50.0  # m/yr; cx*u0 = (dt/dx)*u0 = 0.1*50 = 5.0 (CFL=5, well past explicit limit)
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+
+    u = XFaceField(grid); fill!(interior(u), u0)
+    v = YFaceField(grid); fill!(interior(v), 0.0)
+
+    cache = init_advection_cache(grid)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+
+    A = cache.A
+    cx = dt / dx
+
+    # Pick an interior cell well away from the edges; check the stencil.
+    i, j = 3, 3
+    n = i + (j - 1) * Nx
+    nW = (i - 1) + (j - 1) * Nx
+    nE = (i + 1) + (j - 1) * Nx
+    nN = i + j * Nx
+    nS = i + (j - 2) * Nx
+
+    # Uniform +x: ux_w = ux_e = u0 > 0, no y. Outflow at east only.
+    @test A[n, n]  ≈ 1.0 + cx * u0     # diag = 1 + cx*ux_e
+    @test A[n, nW] ≈ -cx * u0          # W off-diag = -cx*ux_w (inflow)
+    @test A[n, nE] == 0.0              # E off-diag — not in upwind direction
+    @test A[n, nN] == 0.0
+    @test A[n, nS] == 0.0
+
+    # Row sum check: uniform divergence-free velocity ⇒ row sum = 1.
+    interior_rows = [_to_n(i, j, Nx) for j in 2:(Ny-1), i in 2:(Nx-1)]
+    row_sums = vec(sum(A; dims = 2))
+    @test all(rs -> abs(rs - 1.0) < 1e-12, row_sums[interior_rows])
+
+    # Bounded edges → Dirichlet identity row. Sparsity is static, so
+    # off-diag entries still occupy `nzval` slots; their *values* are
+    # zero. Check via row materialisation.
+    function _row_eq_identity(A, r)
+        row = A[r, :]
+        all(c -> c == r ? row[c] ≈ 1.0 : row[c] == 0.0, 1:size(A, 2))
+    end
+    @test _row_eq_identity(A, 1)
+    @test _row_eq_identity(A, Nx)
+
+    # M-matrix-ish: diag ≥ 0, off-diags ≤ 0.
+    @test all(>=(0), diag(A))
+    Adense = Matrix(A)
+    for r in 1:size(A, 1), c in 1:size(A, 2)
+        r == c && continue
+        @test Adense[r, c] <= 1e-15
+    end
+end
+
+@testset "tpo: update_advection_operator! — sign flip swaps W/E off-diag" begin
+    Nx, Ny = 6, 4
+    dx = dy = 1e3
+    dt = 50.0
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+    cache = init_advection_cache(grid)
+
+    u = XFaceField(grid); v = YFaceField(grid); fill!(interior(v), 0.0)
+
+    # Positive +x flow.
+    fill!(interior(u),  10.0)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+    A_pos = copy(cache.A)
+
+    # Reverse to -x flow; same magnitude.
+    fill!(interior(u), -10.0)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+    A_neg = copy(cache.A)
+
+    # Pick an interior row.
+    i, j = 3, 2
+    n = i + (j - 1) * Nx
+    nW = (i - 1) + (j - 1) * Nx
+    nE = (i + 1) + (j - 1) * Nx
+
+    # +x: W carries the upwind contribution, E is zero.
+    @test A_pos[n, nW] < 0
+    @test A_pos[n, nE] == 0.0
+
+    # -x: E carries the upwind contribution, W is zero.
+    @test A_neg[n, nE] < 0
+    @test A_neg[n, nW] == 0.0
+
+    # Sparsity (nnz) is identical — no entries created or destroyed.
+    @test nnz(A_pos) == nnz(A_neg)
+end
+
+@testset "tpo: update_advection_operator! — periodic-x wraps" begin
+    Nx, Ny = 8, 4
+    dx = dy = 1e3
+    dt = 100.0
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Periodic, Bounded, Bounded),
+    )
+    u = XFaceField(grid); fill!(interior(u), 25.0)
+    v = YFaceField(grid); fill!(interior(v), 0.0)
+
+    cache = init_advection_cache(grid)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+
+    A = cache.A
+    cx = dt / dx
+
+    # Cell (1, 2): wraparound west neighbour is (Nx, 2).
+    i, j = 1, 2
+    n     = i + (j - 1) * Nx
+    nWrap = Nx + (j - 1) * Nx
+    @test A[n, nWrap] ≈ -cx * 25.0
+
+    # Cell (Nx, 2): wraparound east neighbour is (1, 2). With +x flow,
+    # the east face is outflow (diag), so the E entry stays 0.
+    nE_wrap = 1 + (j - 1) * Nx
+    @test A[Nx + (j - 1) * Nx, nE_wrap] == 0.0
+end
+
+@testset "tpo: update_advection_operator! — mask zero / prescribed" begin
+    Nx, Ny = 5, 5
+    dx = dy = 1e3
+    dt = 10.0
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+    u = XFaceField(grid); fill!(interior(u), 5.0)
+    v = YFaceField(grid); fill!(interior(v), 0.0)
+
+    mask = ones(Int, Nx, Ny)
+    mask[3, 3] = 0     # Dirichlet zero
+    mask[3, 4] = -1    # Prescribed (held by RHS at solve time)
+
+    cache = init_advection_cache(grid)
+    update_advection_operator!(cache, u, v, dt, dx, dy; mask = mask)
+
+    A = cache.A
+    n0 = 3 + (3 - 1) * Nx
+    n1 = 3 + (4 - 1) * Nx
+
+    # Identity rows: diag = 1, all off-diags = 0 (structural slots
+    # retained but values zero).
+    for r in (n0, n1)
+        row = A[r, :]
+        @test row[r] == 1.0
+        @test all(c -> c == r || row[c] == 0.0, 1:size(A, 2))
+    end
+end
+
+@testset "tpo: update_advection_operator! — zero allocation" begin
+    Nx, Ny = 32, 24
+    dx = dy = 1e3
+    dt = 5.0
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+    u = XFaceField(grid); fill!(interior(u), 5.0)
+    v = YFaceField(grid); fill!(interior(v), 1.0)
+    cache = init_advection_cache(grid)
+    mask = ones(Int, Nx, Ny)
+
+    # Warmup (compile + first-call effects).
+    update_advection_operator!(cache, u, v, dt, dx, dy; mask = mask)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+
+    # Steady-state allocation: bounded by a small constant independent
+    # of grid size. The matrix is updated in place (zero alloc in the
+    # hot loop, verified by the size-independence below). The residual
+    # ~hundreds of bytes per call comes from the two `interior(u/v)`
+    # calls each constructing a fresh `SubArray` wrapper — O(1)
+    # overhead, not O(Nx·Ny).
+    a1 = @allocated update_advection_operator!(cache, u, v, dt, dx, dy; mask = mask)
+    a2 = @allocated update_advection_operator!(cache, u, v, dt, dx, dy)
+    @test a1 < 1024
+    @test a2 < 1024
+
+    # Independence-from-grid-size sanity check: a 4× larger grid must
+    # not allocate more than the 32×24 case. If this regresses we have
+    # leaked an O(N) alloc into the kernel.
+    Nx2, Ny2 = 128, 96
+    grid2 = RectilinearGrid(CPU();
+        size = (Nx2, Ny2, 1),
+        x = (0, Nx2 * dx),
+        y = (0, Ny2 * dy),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+    u2 = XFaceField(grid2); fill!(interior(u2), 5.0)
+    v2 = YFaceField(grid2); fill!(interior(v2), 1.0)
+    cache2 = init_advection_cache(grid2)
+    update_advection_operator!(cache2, u2, v2, dt, dx, dy)
+    update_advection_operator!(cache2, u2, v2, dt, dx, dy)
+    a3 = @allocated update_advection_operator!(cache2, u2, v2, dt, dx, dy)
+    @test a3 == a2
 end
 
 @testset "tpo: tpo.scratch.adv_cache slot — exists, lazy" begin
