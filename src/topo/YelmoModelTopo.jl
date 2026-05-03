@@ -101,7 +101,20 @@ Advance topography state by `dt` years. Phase order matches Fortran's
     `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
 19. Advance `y.time`.
 """
-function topo_step!(y::YelmoModel, dt::Float64)
+function topo_step!(y::YelmoModel, dt::Float64;
+                    ux_bar::Union{Nothing, AbstractField} = nothing,
+                    uy_bar::Union{Nothing, AbstractField} = nothing,
+                    advance_time::Bool = true)
+    # Optional `ux_bar` / `uy_bar` kwargs let the adaptive PC driver
+    # supply an explicit velocity Field for the advection sub-step
+    # while leaving everything else in the cascade unchanged. Default
+    # `nothing` means "read from `y.dyn`" (legacy behaviour). The
+    # `advance_time` flag is reserved for callers that want to run
+    # the full cascade without bumping `y.time` (also useful in the
+    # PC predictor-then-restore-then-corrector flow).
+    ux_bar_use = ux_bar === nothing ? y.dyn.ux_bar : ux_bar
+    uy_bar_use = uy_bar === nothing ? y.dyn.uy_bar : uy_bar
+
     H_prev = copy(interior(y.tpo.H_ice))
 
     # Snapshot the start-of-step thickness into `H_ice_n` so that
@@ -110,7 +123,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
     interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
-        advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
+        advect_tracer!(y.tpo.H_ice, ux_bar_use, uy_bar_use, dt;
                        cfl_safety = y.p.yelmo.cfl_max)
     end
 
@@ -240,7 +253,7 @@ function topo_step!(y::YelmoModel, dt::Float64)
 
     _update_diagnostics!(y, H_prev, H_after_dyn, dt)
 
-    y.time += dt
+    advance_time && (y.time += dt)
     return y
 end
 
