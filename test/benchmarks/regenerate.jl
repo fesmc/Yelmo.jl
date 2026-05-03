@@ -49,6 +49,14 @@ _default_out_times(::AbstractBenchmark) = [1000.0]
 _default_out_times(::HOMCBenchmark)     = [0.0]
 _default_out_times(::MISMIP3DBenchmark) = [0.0, 500.0]
 
+# MISMIP3D ATT-ramp fixture parameters. Compressed Pattyn-2017 protocol
+# pivoted around the existing Stnd baseline `rf_const = 3.1536e-18`
+# (Pa^-3 yr^-1) — see test/benchmarks/test_mismip3d_stnd_att.jl for
+# discussion. Writes one Mirror fixture at t = ATT_TIMES[end].
+const MISMIP3D_ATT_NAME  = "mismip3d_stnd_att"
+const MISMIP3D_ATT_TIMES = [500.0, 1000.0, 1500.0]
+const MISMIP3D_ATT_RF    = [3.1536e-18, 3.1536e-19, 3.1536e-18]
+
 _spec_name(b::AbstractBenchmark) = YelmoBenchmarks._spec_name(b)
 _spec_name(s::BenchmarkSpec)     = s.name
 
@@ -69,26 +77,60 @@ function _regenerate_one!(spec::BenchmarkSpec; fixtures_dir, overwrite)
     return run_mirror_benchmark!(spec; fixtures_dir, overwrite)
 end
 
+# MISMIP3D ATT ramp: drives YelmoMirror through `MISMIP3D_ATT_TIMES`
+# at the corresponding `MISMIP3D_ATT_RF` rate-factor values, writes
+# one fixture at the final phase end.
+function _regenerate_mismip3d_att!(; fixtures_dir, overwrite)
+    b = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
+    t_end = Int(round(MISMIP3D_ATT_TIMES[end]))
+    path = joinpath(fixtures_dir, "$(MISMIP3D_ATT_NAME)_t$(t_end).nc")
+    if !overwrite && isfile(path)
+        error("regenerate: $(path) exists; pass --overwrite to clobber.")
+    end
+    return YelmoBenchmarks._write_mismip3d_mirror_fixture_att!(
+        b, path, MISMIP3D_ATT_TIMES, MISMIP3D_ATT_RF)
+end
+
 function main(args::Vector{String})
     overwrite = "--overwrite" in args
     only_names = filter(a -> !startswith(a, "--"), args)
 
-    selected = isempty(only_names) ? SPECS :
-               filter(s -> _spec_name(s) in only_names, SPECS)
-    isempty(selected) && error(
-        "regenerate.jl: no specs match $(only_names). " *
-        "Available: $(join((_spec_name(s) for s in SPECS), ", ")).")
+    # Special-case dispatch for the MISMIP3D ATT ramp (not in SPECS
+    # since it requires multi-phase orchestration that the generic
+    # `run_mirror_benchmark!` does not support).
+    do_att = isempty(only_names) || MISMIP3D_ATT_NAME in only_names
+    only_att = !isempty(only_names) && all(==(MISMIP3D_ATT_NAME), only_names)
 
-    println("Regenerating $(length(selected)) benchmark(s) → $FIXTURES_DIR")
-    for spec in selected
-        backend = spec isa AbstractBenchmark ? "analytical" : "mirror"
-        println("\n=== $(_spec_name(spec))  ($backend) ===")
-        paths = _regenerate_one!(spec; fixtures_dir=FIXTURES_DIR, overwrite=overwrite)
+    if !only_att
+        selected = isempty(only_names) ? SPECS :
+                   filter(s -> _spec_name(s) in only_names, SPECS)
+        if isempty(selected) && !do_att
+            avail = join(vcat([_spec_name(s) for s in SPECS], MISMIP3D_ATT_NAME), ", ")
+            error("regenerate.jl: no specs match $(only_names). Available: $(avail).")
+        end
+
+        println("Regenerating $(length(selected)) benchmark(s) → $FIXTURES_DIR")
+        for spec in selected
+            backend = spec isa AbstractBenchmark ? "analytical" : "mirror"
+            println("\n=== $(_spec_name(spec))  ($backend) ===")
+            paths = _regenerate_one!(spec; fixtures_dir=FIXTURES_DIR, overwrite=overwrite)
+            for p in paths
+                sz_kb = round(filesize(p) / 1024; digits=1)
+                println("  wrote $(basename(p))  ($(sz_kb) KB)")
+            end
+        end
+    end
+
+    if do_att
+        println("\n=== $(MISMIP3D_ATT_NAME)  (mirror, multi-phase ATT ramp) ===")
+        paths = _regenerate_mismip3d_att!(fixtures_dir=FIXTURES_DIR,
+                                          overwrite=overwrite)
         for p in paths
             sz_kb = round(filesize(p) / 1024; digits=1)
             println("  wrote $(basename(p))  ($(sz_kb) KB)")
         end
     end
+
     println("\nDone.")
 end
 
