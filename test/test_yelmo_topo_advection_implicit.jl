@@ -152,19 +152,20 @@ end
     @test_throws ErrorException advect_tracer!(c, u, v, 1.0;
         scheme = :upwind_implicit)
 
-    # Cache passed directly → reaches the not-yet-implemented stub.
+    # Cache passed directly → reaches the implementation. With u=v=0
+    # this is a trivial solve (`A = I`) that returns `c` unchanged.
     cache = init_advection_cache(grid)
-    @test_throws ErrorException advect_tracer!(c, u, v, 1.0;
-        scheme = :upwind_implicit, cache = cache)
+    advect_tracer!(c, u, v, 1.0; scheme = :upwind_implicit, cache = cache)
+    @test all(==(1.0), interior(c))
 
     # Lazy `Ref{Any}` cache — first call allocates the
-    # `ImplicitAdvectionCache`, then reaches the same stub.
+    # `ImplicitAdvectionCache`, then runs the solve.
     cache_ref = Ref{Any}(nothing)
-    @test_throws ErrorException advect_tracer!(c, u, v, 1.0;
-        scheme = :upwind_implicit, cache = cache_ref)
+    advect_tracer!(c, u, v, 1.0; scheme = :upwind_implicit, cache = cache_ref)
     @test cache_ref[] isa ImplicitAdvectionCache
     @test cache_ref[].Nx == Nx
     @test cache_ref[].Ny == Ny
+    @test all(==(1.0), interior(c))
 end
 
 @testset "tpo: advect_tracer! — unknown scheme errors" begin
@@ -355,7 +356,13 @@ end
     end
 end
 
-@testset "tpo: update_advection_operator! — zero allocation" begin
+@testset "tpo: update_advection_matrix! — zero-alloc hot loop" begin
+    # `update_advection_matrix!` is the matrix-only kernel — the genuine
+    # hot path. `update_advection_operator!` additionally refactors the
+    # ILU preconditioner, which allocates O(nnz) per call (CPU `ilu`
+    # has no in-place update!). That is the once-per-outer-step cost
+    # and is exercised by the convergence tests below; it is *not* a
+    # hot-loop concern.
     Nx, Ny = 32, 24
     dx = dy = 1e3
     dt = 5.0
@@ -371,24 +378,19 @@ end
     cache = init_advection_cache(grid)
     mask = ones(Int, Nx, Ny)
 
-    # Warmup (compile + first-call effects).
-    update_advection_operator!(cache, u, v, dt, dx, dy; mask = mask)
-    update_advection_operator!(cache, u, v, dt, dx, dy)
+    # Warmup.
+    update_advection_matrix!(cache, u, v, dt, dx, dy; mask = mask)
+    update_advection_matrix!(cache, u, v, dt, dx, dy)
 
-    # Steady-state allocation: bounded by a small constant independent
-    # of grid size. The matrix is updated in place (zero alloc in the
-    # hot loop, verified by the size-independence below). The residual
-    # ~hundreds of bytes per call comes from the two `interior(u/v)`
-    # calls each constructing a fresh `SubArray` wrapper — O(1)
-    # overhead, not O(Nx·Ny).
-    a1 = @allocated update_advection_operator!(cache, u, v, dt, dx, dy; mask = mask)
-    a2 = @allocated update_advection_operator!(cache, u, v, dt, dx, dy)
+    # Bounded by a small constant independent of grid size. The
+    # residual ~hundreds of bytes per call is the two `interior(u/v)`
+    # SubArray wrappers — O(1), not O(Nx·Ny).
+    a1 = @allocated update_advection_matrix!(cache, u, v, dt, dx, dy; mask = mask)
+    a2 = @allocated update_advection_matrix!(cache, u, v, dt, dx, dy)
     @test a1 < 1024
     @test a2 < 1024
 
-    # Independence-from-grid-size sanity check: a 4× larger grid must
-    # not allocate more than the 32×24 case. If this regresses we have
-    # leaked an O(N) alloc into the kernel.
+    # Grid-size independence: 4× more cells must not raise allocation.
     Nx2, Ny2 = 128, 96
     grid2 = RectilinearGrid(CPU();
         size = (Nx2, Ny2, 1),
@@ -400,10 +402,133 @@ end
     u2 = XFaceField(grid2); fill!(interior(u2), 5.0)
     v2 = YFaceField(grid2); fill!(interior(v2), 1.0)
     cache2 = init_advection_cache(grid2)
-    update_advection_operator!(cache2, u2, v2, dt, dx, dy)
-    update_advection_operator!(cache2, u2, v2, dt, dx, dy)
-    a3 = @allocated update_advection_operator!(cache2, u2, v2, dt, dx, dy)
+    update_advection_matrix!(cache2, u2, v2, dt, dx, dy)
+    update_advection_matrix!(cache2, u2, v2, dt, dx, dy)
+    a3 = @allocated update_advection_matrix!(cache2, u2, v2, dt, dx, dy)
     @test a3 == a2
+end
+
+# A small end-to-end Gaussian-pulse problem on a periodic-x channel.
+# Used as a building block for the correctness, conservation, and
+# multi-tracer-amortisation tests below.
+function _make_channel(Nx::Int, Ny::Int, dx::Float64, dy::Float64;
+                       u0::Float64 = 100.0)
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * dx),
+        y = (0, Ny * dy),
+        z = (0, 1),
+        topology = (Periodic, Bounded, Bounded),
+    )
+    u = XFaceField(grid); fill!(interior(u), u0)
+    v = YFaceField(grid); fill!(interior(v), 0.0)
+    return grid, u, v
+end
+
+@testset "tpo: solve_advection! — uniform translation conserves total" begin
+    Nx, Ny = 64, 8
+    dx = dy = 1e3
+    u0 = 50.0
+    dt = 50.0     # CFL = u0*dt/dx = 2.5 (well past explicit stability)
+    grid, u, v = _make_channel(Nx, Ny, dx, dy; u0 = u0)
+
+    # Initial Gaussian centred at x=Nx/3, uniform in y.
+    c = CenterField(grid)
+    Ci = interior(c)
+    σ = 4 * dx
+    x0 = Nx * dx / 3
+    for j in 1:Ny, i in 1:Nx
+        x = (i - 0.5) * dx
+        Ci[i, j, 1] = exp(-((x - x0)^2) / (2 * σ^2))
+    end
+
+    initial_total = sum(interior(c)) * dx * dy
+
+    cache = init_advection_cache(grid)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+
+    # Take a handful of steps. Periodic-x means total mass is exactly
+    # conserved (no flux through Bounded-y walls because uy = 0 keeps
+    # the y-edge identity rows from importing/exporting mass).
+    for step in 1:5
+        solve_advection!(cache, c, dt)
+    end
+
+    final_total = sum(interior(c)) * dx * dy
+    @test isapprox(final_total, initial_total; rtol = 1e-8)
+
+    # The pulse shouldn't have escaped (everything finite, non-negative
+    # to numerical precision, broadly preserving its integral).
+    @test all(isfinite, interior(c))
+    @test minimum(interior(c)) > -1e-10
+end
+
+@testset "tpo: advect_tracer! — implicit translates pulse at u₀" begin
+    # Implicit upwind is more diffusive than explicit upwind — they
+    # diverge in shape. What both schemes must preserve is the *first
+    # moment* (centroid) of a smooth pulse: it should advance at
+    # exactly u₀·t under uniform flow on a periodic axis.
+    Nx, Ny = 80, 8
+    dx = dy = 1e3
+    u0 = 50.0
+    dt = 20.0   # CFL = 1.0 — at the explicit limit; implicit doesn't care
+    n_steps = 4
+
+    grid, u, v = _make_channel(Nx, Ny, dx, dy; u0 = u0)
+
+    c = CenterField(grid)
+    σ = 6 * dx; x0 = Nx * dx / 4
+    for j in 1:Ny, i in 1:Nx
+        x = (i - 0.5) * dx
+        interior(c)[i, j, 1] = exp(-((x - x0)^2) / (2 * σ^2))
+    end
+
+    cache = init_advection_cache(grid)
+    for step in 1:n_steps
+        advect_tracer!(c, u, v, dt; scheme = :upwind_implicit, cache = cache)
+    end
+
+    # Centroid (first moment) of a 1D slice along x. Sample an
+    # *interior* y-row (j=Ny÷2); j=1 and j=Ny are Bounded-y edges
+    # whose Dirichlet identity rows hold their values constant.
+    j_int = Ny ÷ 2
+    Ci = interior(c)[:, j_int, 1]
+    xs = [(i - 0.5) * dx for i in 1:Nx]
+    centroid = sum(xs .* Ci) / sum(Ci)
+    expected = x0 + u0 * (n_steps * dt)
+    @test isapprox(centroid, expected; atol = dx)
+end
+
+@testset "tpo: solve_advection! — multi-tracer amortises operator refresh" begin
+    Nx, Ny = 32, 16
+    dx = dy = 1e3
+    dt = 20.0
+    grid, u, v = _make_channel(Nx, Ny, dx, dy; u0 = 30.0)
+
+    cache = init_advection_cache(grid)
+    update_advection_operator!(cache, u, v, dt, dx, dy)
+
+    # Two tracers sharing the same `(ux, uy, dt, mask)`.
+    c1 = CenterField(grid); fill!(interior(c1), 1.0)
+    c2 = CenterField(grid)
+    interior(c2) .= [sin(2π * (i - 1) / Nx) for i in 1:Nx, j in 1:Ny, k in 1:1]
+
+    # Warmup.
+    solve_advection!(cache, c1, dt)
+    solve_advection!(cache, c2, dt)
+
+    # Per-tracer solve allocates only the BiCGSTAB statistics struct
+    # plus a few constants — bounded by a small grid-size-independent
+    # number. No O(N) allocation: that would mean the workspace is
+    # rebuilt every call.
+    a1 = @allocated solve_advection!(cache, c1, dt)
+    a2 = @allocated solve_advection!(cache, c2, dt)
+    @test a1 < 4096
+    @test a2 < 4096
+
+    # Sanity: c1 (constant) must remain ≈ constant with periodic-x
+    # uniform flow (advection of a constant is the constant).
+    @test maximum(abs.(interior(c1) .- 1.0)) < 1e-6
 end
 
 @testset "tpo: tpo.scratch.adv_cache slot — exists, lazy" begin

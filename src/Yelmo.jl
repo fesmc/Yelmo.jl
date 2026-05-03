@@ -78,7 +78,8 @@ export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 export topo_step!, advect_tracer!
 export advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!
 export ImplicitAdvectionCache, init_advection_cache,
-       update_advection_operator!, solve_advection!
+       update_advection_matrix!, update_advection_operator!,
+       solve_advection!
 export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
 export calc_H_grnd!, determine_grounded_fractions!
 export calc_bmb_total!, calc_fmb_total!, calc_mb_discharge!

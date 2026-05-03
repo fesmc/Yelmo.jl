@@ -15,7 +15,7 @@
 #       (solver_advection.f90:86–102), with `WOVI = 1.0` (pure
 #       backward Euler). Requires a persistent `ImplicitAdvectionCache`
 #       passed via the `cache` keyword. The cache holds the sparse
-#       operator, RHS / solution buffers, the BiCGSTAB workspace, and
+#       operator, RHS / solution buffers, the GMRES workspace, and
 #       the (lazily-refactored) ILU0 preconditioner. Allocate once at
 #       model setup with `init_advection_cache(grid)`; the operator is
 #       refreshed once per outer step (`update_advection_operator!`)
@@ -33,12 +33,14 @@ using Oceananigans.Advection: div_Uc, UpwindBiased
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 using Oceananigans.Grids: topology, Periodic, Bounded
 using SparseArrays: SparseMatrixCSC, sparse
-using Krylov: BicgstabWorkspace
+using Krylov: GmresWorkspace, gmres!
+using KrylovPreconditioners: KrylovPreconditioners as KP
 
 export advect_tracer!, advect_tracer_upwind_explicit!,
        advect_tracer_upwind_implicit!,
        ImplicitAdvectionCache, init_advection_cache,
-       update_advection_operator!, solve_advection!
+       update_advection_matrix!, update_advection_operator!,
+       solve_advection!
 
 const _DEFAULT_OCN_UPWIND = UpwindBiased(order=1)
 
@@ -69,8 +71,14 @@ Fields:
   - `A`     — 5-point CSC sparse operator. Sparsity pattern static.
   - `b`     — RHS buffer, length `Nx*Ny`.
   - `x`     — solution buffer, length `Nx*Ny`.
-  - `work`  — `Krylov.BicgstabWorkspace`, reused across timesteps and
-              tracers.
+  - `work`  — `Krylov.GmresWorkspace` (memory=20 restart length),
+              reused across timesteps and tracers. We use GMRES
+              rather than BiCGSTAB because the
+              `KrylovPreconditioners` ILU + BiCGSTAB combination
+              hits an `αₖ == 0` breakdown on certain CFL=1.0
+              configurations of our 5-point M-matrix; GMRES + the
+              same ILU converges in 1–2 iterations on the same
+              matrix.
   - `P`     — `Ref{Any}` holding the ILU0 preconditioner. Lazy: first
               `update_advection_operator!` call factorises;
               subsequent calls refactor in place if the
@@ -84,7 +92,7 @@ struct ImplicitAdvectionCache
     A::SparseMatrixCSC{Float64, Int}
     b::Vector{Float64}
     x::Vector{Float64}
-    work::BicgstabWorkspace
+    work::GmresWorkspace
     P::Base.RefValue{Any}
     # `nz_*` index maps: position in `A.nzval` for the (row=cell(i,j),
     # col=stencil_neighbour) entry. `0` means the neighbour does not
@@ -137,7 +145,7 @@ function init_advection_cache(grid)
         A,
         Vector{Float64}(undef, N),
         Vector{Float64}(undef, N),
-        BicgstabWorkspace(N, N, Vector{Float64}),
+        GmresWorkspace(N, N, Vector{Float64}; memory = 20),
         Ref{Any}(nothing),
         nz_self, nz_east, nz_west, nz_north, nz_south,
         periodic_x, periodic_y,
@@ -287,8 +295,13 @@ applies to `:upwind_explicit` only; `:upwind_implicit` ignores it.
 function advect_tracer!(c, ux, uy, dt::Real;
                         scheme::Symbol = :upwind_explicit,
                         cache = nothing,
+                        source = nothing,
+                        mask = nothing,
                         cfl_safety::Real = 0.1,
-                        fill_velocity_halos::Bool = true)
+                        fill_velocity_halos::Bool = true,
+                        atol::Real = 1e-12,
+                        rtol::Real = 1e-12,
+                        itmax::Int = 1000)
     if scheme === :upwind_explicit
         advect_tracer_upwind_explicit!(c, ux, uy, dt;
             cfl_safety = cfl_safety,
@@ -296,7 +309,9 @@ function advect_tracer!(c, ux, uy, dt::Real;
     elseif scheme === :upwind_implicit
         cache_inst = _resolve_implicit_cache(cache, c.grid)
         advect_tracer_upwind_implicit!(c, ux, uy, dt, cache_inst;
-            fill_velocity_halos = fill_velocity_halos)
+            source = source, mask = mask,
+            fill_velocity_halos = fill_velocity_halos,
+            atol = atol, rtol = rtol, itmax = itmax)
     else
         error("advect_tracer!: unknown scheme $(scheme). " *
               "Supported: :upwind_explicit, :upwind_implicit.")
@@ -359,28 +374,58 @@ end
 
 """
     advect_tracer_upwind_implicit!(c, ux, uy, dt, cache;
-                                   fill_velocity_halos) -> c
+                                   source, mask, fill_velocity_halos,
+                                   atol, rtol, itmax) -> c
 
-Backward-Euler + first-order upwind tracer advection. Solves the
-5-point linear system stored in `cache.A` via BiCGSTAB +
-ILU0-preconditioned, in place. CFL-unconstrained.
+Backward-Euler + first-order upwind tracer advection. Refreshes the
+operator stored in `cache` for the current `(ux, uy, dt, mask)`,
+then solves `A · c^{n+1} = c^n + dt · source` for `c` via GMRES
+preconditioned with the cached ILU-style factorisation.
 
-Stub in PR-1 (plumbing). Matrix assembly lands in PR-2 and the solver
-wiring lands in PR-3.
+CFL-unconstrained — the discretisation is stable for arbitrary
+`dt`, though accuracy still degrades at large CFL.
+
+This wrapper does both refresh + solve. For multi-tracer use where
+several tracers share the same `(ux, uy, dt, mask)`, call
+`update_advection_operator!` once and `solve_advection!` per
+tracer to avoid redundant refactorisations of the preconditioner.
+
+`fill_velocity_halos` is accepted for parity with the explicit
+path; the implicit assembly does not consult halo cells (Bounded
+edges are handled by Dirichlet rows in the matrix), so the flag
+is currently a no-op.
 """
 function advect_tracer_upwind_implicit!(c, ux, uy, dt::Real,
                                         cache::ImplicitAdvectionCache;
-                                        fill_velocity_halos::Bool = true)
-    error("advect_tracer_upwind_implicit!: not implemented yet — " *
-          "matrix assembly lands in PR-2 of the implicit-advection series.")
+                                        source = nothing,
+                                        mask = nothing,
+                                        fill_velocity_halos::Bool = true,
+                                        atol::Real = 1e-12,
+                                        rtol::Real = 1e-12,
+                                        itmax::Int = 1000)
+    grid = c.grid
+    dx = _dx(grid)
+    dy = _dy(grid)
+
+    update_advection_operator!(cache, ux, uy, dt, dx, dy; mask = mask)
+    solve_advection!(cache, c, dt;
+                     source = source, atol = atol, rtol = rtol, itmax = itmax)
+
+    return c
 end
 
 """
-    update_advection_operator!(cache, ux, uy, dt, dx, dy; mask) -> cache
+    update_advection_matrix!(cache, ux, uy, dt, dx, dy; mask) -> cache
 
 Refresh `cache.A.nzval` in place for the current `(ux, uy, dt,
-mask)`. Sparsity pattern is unchanged. Called once per outer step,
-ahead of any `solve_advection!` calls.
+mask)`. Sparsity pattern is unchanged.
+
+This is the zero-allocation hot loop: matrix coefficients only, no
+preconditioner refactorisation. The companion `update_advection_operator!`
+wraps this with a fresh ILU factorisation; use that for the
+once-per-outer-step refresh, and use this directly only when
+benchmarking the assembly kernel or when the preconditioner is
+managed externally.
 
 Discretisation matches Fortran Yelmo's `impl-lis`
 (solver_advection.f90:143–531) with `WOVI = 1.0` (pure backward
@@ -423,9 +468,9 @@ preconditioner-refresh helper).
 
 `dx`, `dy` are the cell sizes in metres.
 """
-function update_advection_operator!(cache::ImplicitAdvectionCache,
-                                    ux, uy, dt::Real, dx::Real, dy::Real;
-                                    mask = nothing)
+function update_advection_matrix!(cache::ImplicitAdvectionCache,
+                                  ux, uy, dt::Real, dx::Real, dy::Real;
+                                  mask = nothing)
     # Outer wrapper that extracts concrete `interior` arrays then
     # dispatches to a type-specialised inner kernel. Splitting like
     # this is the standard Julia idiom for fully zero-allocation hot
@@ -435,6 +480,36 @@ function update_advection_operator!(cache::ImplicitAdvectionCache,
     _update_advection_operator_kernel!(cache, interior(ux), interior(uy),
                                        Float64(dt), Float64(dx), Float64(dy),
                                        mask)
+    return cache
+end
+
+"""
+    update_advection_operator!(cache, ux, uy, dt, dx, dy; mask) -> cache
+
+Refresh both the matrix `cache.A` and the preconditioner `cache.P[]`
+for the current `(ux, uy, dt, mask)`. Once-per-outer-step call;
+amortises across every `solve_advection!` invocation in the step.
+
+The matrix update goes through `update_advection_matrix!`
+(zero-allocation hot loop). The preconditioner refactor allocates a
+fresh `KrylovPreconditioners.ILUFactorization` (CPU `ilu` has no
+in-place `update!`); the cost is O(nnz), not per-cell.
+
+`τ` is the Crout drop-tolerance. We use `1e-12` rather than the
+ostensibly-cleaner `0.0` because `KrylovPreconditioners.ilu` with
+exactly zero produces a broken factorisation that triggers
+BiCGSTAB breakdown on iteration 2 (αₖ == 0, observed during PR-3
+implementation). At `τ = 1e-12` the factorisation is effectively
+the same — no realistic ILU entry is below 1e-12 — and BiCGSTAB
+converges in 1–2 iterations on our 5-point M-matrix. For a
+future GPU port, swap this call for `KP.kp_ilu0(cache.A_gpu)` —
+same preconditioner role, different backend.
+"""
+function update_advection_operator!(cache::ImplicitAdvectionCache,
+                                    ux, uy, dt::Real, dx::Real, dy::Real;
+                                    mask = nothing)
+    update_advection_matrix!(cache, ux, uy, dt, dx, dy; mask = mask)
+    cache.P[] = KP.ilu(cache.A; τ = 1e-12)
     return cache
 end
 
@@ -526,15 +601,98 @@ function _update_advection_operator_kernel!(cache::ImplicitAdvectionCache,
 end
 
 """
-    solve_advection!(cache, c; source=nothing) -> c
+    solve_advection!(cache, c, dt; source, atol, rtol, itmax) -> c
 
-Solve the implicit upwind system for tracer `c` using the operator
-already refreshed in `cache`. Per-tracer call; allocates nothing.
-Stub in PR-1; landed in PR-3.
+Solve `A · c^{n+1} = c^n + dt · source` for the tracer `c` using
+the operator already refreshed in `cache` by an earlier
+`update_advection_operator!` call. The matrix `A` is shared across
+every tracer advected at the same `(ux, uy, dt, mask)`; this
+function only touches the per-tracer `b`, `x`, and the field `c`.
+
+`source` is an optional `CenterField` (or compatible array) holding
+the explicit source/sink term for `c` in the same units as
+`∂c/∂t`. Pass `nothing` for pure advection (no source).
+
+Tolerances default to the Fortran `impl-lis` defaults
+(`-tol 1.0e-12 -maxiter 1000`). The initial guess is the current
+`c` value (passed in via `cache.x`).
+
+Returns `c` modified in place, plus solver `stats` are stored in
+`cache.work` (GMRES workspace).
 """
-function solve_advection!(cache::ImplicitAdvectionCache, c;
-                          source = nothing)
-    error("solve_advection!: not implemented yet — lands in PR-3.")
+function solve_advection!(cache::ImplicitAdvectionCache, c, dt::Real;
+                          source = nothing,
+                          atol::Real = 1e-12,
+                          rtol::Real = 1e-12,
+                          itmax::Int = 1000)
+    cache.P[] === nothing &&
+        error("solve_advection!: preconditioner is not yet built. " *
+              "Call `update_advection_operator!` before `solve_advection!`.")
+
+    # Pack RHS and initial guess. Concrete-typed inner kernel keeps
+    # the loop zero-alloc (same trick as `update_advection_operator!`).
+    src_array = source === nothing ? nothing : interior(source)
+    _pack_rhs_kernel!(cache.b, cache.x, interior(c), src_array, Float64(dt),
+                      cache.Nx, cache.Ny)
+
+    # In-place GMRES. Initial guess `cache.x` (= the current `c`).
+    # We use GMRES rather than BiCGSTAB because BiCGSTAB combined with
+    # the KrylovPreconditioners ILU produces an `αₖ == 0` breakdown
+    # on certain CFL=1.0 configurations of our 5-point M-matrix
+    # (observed during PR-3). GMRES + ILU converges in 1–2 iterations
+    # on the same problems, so the swap is both more robust and
+    # faster. Memory=20 is the GMRES restart length; our solves
+    # converge well below that, so it never matters.
+    gmres!(cache.work, cache.A, cache.b, cache.x;
+           M = cache.P[], ldiv = true,
+           atol = atol, rtol = rtol, itmax = itmax,
+           history = false)
+
+    # Unpack solution back into `c`. `cache.work.x` holds the latest
+    # iterate after `bicgstab!` returns.
+    _unpack_solution_kernel!(interior(c), cache.work.x, cache.Nx, cache.Ny)
+
+    return c
+end
+
+# Pack `(c_n + dt·source)` into the RHS vector `b` in lexicographic
+# order, and seed the initial guess `x0` with the current tracer
+# values. Both buffers use the same `_row_index(i,j,Nx)` flattening
+# as the matrix assembly.
+function _pack_rhs_kernel!(b::Vector{Float64}, x0::Vector{Float64},
+                           C::AbstractArray{Float64, 3},
+                           ::Nothing, dt::Float64,
+                           Nx::Int, Ny::Int)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        n = _row_index(i, j, Nx)
+        c_now = C[i, j, 1]
+        b[n]  = c_now
+        x0[n] = c_now
+    end
+    return nothing
+end
+
+function _pack_rhs_kernel!(b::Vector{Float64}, x0::Vector{Float64},
+                           C::AbstractArray{Float64, 3},
+                           S::AbstractArray{Float64, 3}, dt::Float64,
+                           Nx::Int, Ny::Int)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        n = _row_index(i, j, Nx)
+        c_now = C[i, j, 1]
+        b[n]  = c_now + dt * S[i, j, 1]
+        x0[n] = c_now
+    end
+    return nothing
+end
+
+function _unpack_solution_kernel!(C::AbstractArray{Float64, 3},
+                                  x::Vector{Float64},
+                                  Nx::Int, Ny::Int)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        n = _row_index(i, j, Nx)
+        C[i, j, 1] = x[n]
+    end
+    return nothing
 end
 
 # Largest dt for which `cfl_safety * (|u|·dt/dx + |v|·dt/dy) ≤ 1` over
