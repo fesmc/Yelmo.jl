@@ -42,10 +42,12 @@ import ..YelmoCore: mat_step!
 export mat_step!,
        calc_viscosity_glen!, calc_visc_int!,
        calc_rate_factor!, calc_rate_factor_eismint!,
-       scale_rate_factor_water!
+       scale_rate_factor_water!,
+       define_enhancement_factor_2D!, define_enhancement_factor_3D!
 
 include("viscosity.jl")
 include("rate_factor.jl")
+include("enhancement.jl")
 
 """
     mat_step!(y::YelmoModel, dt) -> y
