@@ -278,10 +278,13 @@ end
 
 # ===== PC step (per scheme) =====
 
-# Plain forward-Euler step: one (topo, dyn) pair. Used by Heun as its
-# stage primitive and by the `dt_method = 0` branch of the dispatcher.
+# Plain forward-Euler step: one (topo, mat, dyn) chain. Used by Heun as
+# its stage primitive and by the `dt_method = 0` branch of the
+# dispatcher. Phase order matches Fortran `yelmo_ice.f90:1314-1346`
+# (`calc_ymat` ahead of `calc_ydyn`).
 function _step_fe!(y, dt::Float64)
     Yelmo.topo_step!(y, dt)
+    Yelmo.mat_step!(y, dt)
     Yelmo.dyn_step!(y, dt)
     return y
 end

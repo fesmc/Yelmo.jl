@@ -930,7 +930,9 @@ function mat_step!   end
 function therm_step! end
 
 # `step!(::YelmoModel, dt)` orchestrates the per-component physics chain in
-# a fixed phase order (tpo → dyn → mat → therm). Methods for the
+# a fixed phase order (tpo → mat → dyn → therm). Phase order matches Fortran
+# `yelmo_ice.f90:1314-1346` where `calc_ymat` runs ahead of `calc_ydyn` so
+# the velocity solve sees a freshly-updated `ATT`. Methods for the
 # `<comp>_step!` calls below are added by the corresponding phase modules
 # at load time. `YelmoMirror` overrides `step!` in `YelmoMirrorCore` to call
 # the C API instead of the per-phase chain.
@@ -946,8 +948,8 @@ function step!(y::YelmoModel, dt::Float64)
     method = y.p === nothing ? 0 : Int(y.p.yelmo.dt_method)
     if method == 0
         topo_step!(y, dt)
+        mat_step!(y, dt)
         dyn_step!(y, dt)
-        # mat_step!(y,   dt)   — milestone 4
         # therm_step!(y, dt)   — milestone 5
         return y
     else
