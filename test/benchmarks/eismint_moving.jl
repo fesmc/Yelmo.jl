@@ -162,15 +162,18 @@ end
 function _eismint_moving_analytical_state(b::EISMINT1MovingBenchmark)
     Nx, Ny = length(b.xc), length(b.yc)
 
-    # IC: zero ice, flat terrestrial bed at +1000 m. EISMINT-1 is a
-    # purely continental setup — the absolute bed elevation doesn't
-    # affect SIA dynamics (only slopes matter), but keeping `z_bed`
-    # safely above `z_sl = 0` ensures `f_grnd = 1` from step 1, which
-    # `mbal_tendency!` requires before it will apply positive smb to
-    # ice-free cells (`mass_balance.jl:106-108`).
+    # IC: zero ice, flat bed at z = 0, sea level dropped to -1000 m.
+    # EISMINT-1 is a purely continental setup. The Fortran reference
+    # keeps z_bed = 0 (flat) and relies on the experiment specification
+    # to put cells safely outside the flotation regime; we mirror that
+    # by lowering z_sl rather than raising z_bed. Required because
+    # Yelmo.jl's `mbal_tendency!` (mass_balance.jl:106-108) zeroes
+    # positive smb tendency on cells where `f_grnd == 0 AND H_ice == 0`,
+    # and with `z_bed = z_sl = 0` every IC cell has `H_grnd = 0` and the
+    # dome never seeds.
     H_ice = zeros(Nx, Ny)
-    z_bed = fill(1000.0, Nx, Ny)
-    z_sl  = zeros(Nx, Ny)
+    z_bed = zeros(Nx, Ny)
+    z_sl  = fill(-1000.0, Nx, Ny)
 
     # Radial smb pattern (constant in time per the Fortran "moving" branch).
     smb_ref = [eismint_moving_smb(b, b.xc[i], b.yc[j]) for i in 1:Nx, j in 1:Ny]
