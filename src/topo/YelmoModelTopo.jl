@@ -262,11 +262,12 @@ without advancing time. Refreshes `f_ice` first (so the rest of the
 diagnostic chain sees a consistent ice cover), then runs the same
 diagnostic body that fires at the end of `topo_step!`.
 
-`dHidt` and `dHidt_dyn` come out as zero since `dt = 0`. Useful to
-materialise diagnostics after `load_state!` for restart files that
-omit some derived fields, and as a regression check that the Julia
-diagnostic chain reproduces what the Fortran reference wrote into a
-restart.
+`dHidt` and `dHidt_dyn` are preserved (not recomputed) since there is
+no time step over which to differentiate. Useful to materialise
+diagnostics after `load_state!` for restart files that omit some
+derived fields, and as a regression check that the Julia diagnostic
+chain reproduces what the Fortran reference wrote into a restart —
+including consumers like `calc_uz_3D_jac!` that read `dHidt`.
 """
 function update_diagnostics!(y::YelmoModel)
     calc_f_ice!(y)
@@ -331,19 +332,27 @@ function _update_diagnostics!(y::YelmoModel,
     H_ice     = interior(y.tpo.H_ice)
     z_srf     = interior(y.tpo.z_srf)
     z_base    = interior(y.tpo.z_base)
-    dHidt     = interior(y.tpo.dHidt)
-    dHidt_dyn = interior(y.tpo.dHidt_dyn)
-
-    inv_dt = dt > 0 ? 1.0 / dt : 0.0
 
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
         # `z_base` follows the Fortran convention `z_srf - H_ice` so the
         # value is meaningful for both grounded (= z_bed) and floating
         # (= z_sl - rho_ice/rho_sw·H_ice) regimes.
         z_base[i, j, 1] = z_srf[i, j, 1] - H_ice[i, j, 1]
+    end
 
-        dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
-        dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
+    # Time-derivative tracking. Only recompute when there is a real
+    # step to differentiate over. The `update_diagnostics!(y)` entry
+    # point passes `dt = 0` (post-load refresh, no time advance); in
+    # that case preserve the loaded values so consumers like
+    # `calc_uz_3D_jac!` see the restart's `dHidt`.
+    if dt > 0
+        dHidt     = interior(y.tpo.dHidt)
+        dHidt_dyn = interior(y.tpo.dHidt_dyn)
+        inv_dt = 1.0 / dt
+        @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
+            dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
+            dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
+        end
     end
 
     # Margin-aware horizontal gradients on staggered ac-faces.
