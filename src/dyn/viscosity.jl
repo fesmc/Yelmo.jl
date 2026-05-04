@@ -413,6 +413,11 @@ function calc_visc_eff_int!(visc_eff_int, visc_eff,
                             visc_eff_b, visc_eff_s,
                             H_ice, f_ice,
                             zeta_aa::AbstractVector{<:Real})
+    # Wrapper: lift Field views, materialise zeta as concrete
+    # `Vector{Float64}`, dispatch to the kernel below. The kernel calls
+    # `vert_int_trapz_boundary!` (the shared YelmoIntegration helper)
+    # with concrete typed args so its inner `Float64(zeta_c[k])`
+    # coercions become no-ops.
     Vi = interior(visc_eff_int)
     V  = interior(visc_eff)
     Vb = interior(visc_eff_b)
@@ -425,10 +430,17 @@ function calc_visc_eff_int!(visc_eff_int, visc_eff,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_int!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
+    zeta = collect(Float64, zeta_aa)
+    _calc_visc_eff_int_kernel!(Vi, V, Vb, Vs, H, fi, zeta, Nx, Ny)
+    return visc_eff_int
+end
+
+function _calc_visc_eff_int_kernel!(Vi, V, Vb, Vs, H, fi,
+        zeta::Vector{Float64}, Nx::Int, Ny::Int)
     # Pure ∫₀¹ visc dζ via the shared trapezoidal-with-boundary helper.
     # Output is dimensionless ∫ over zeta — units of visc · dζ = Pa·yr.
     # The H multiplication and ice-mask / floor are applied below.
-    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
+    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi[i, j, 1] == 1.0
@@ -443,7 +455,7 @@ function calc_visc_eff_int!(visc_eff_int, visc_eff,
             Vi[i, j, 1] = _VISC_MIN
         end
     end
-    return visc_eff_int
+    return nothing
 end
 
 """
