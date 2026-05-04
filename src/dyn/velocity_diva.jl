@@ -234,14 +234,19 @@ function calc_beta_eff!(beta_eff, beta, F2; no_slip::Bool = false)
     B  = interior(beta)
     F  = interior(F2)
 
+    # Explicit (i, j, k) iteration to avoid `eachindex` over a SubArray
+    # returning `CartesianIndex{3}` per loop step (heap allocation).
+    # Same fix pattern as `picard_relax_*` (#53) and the SSA
+    # convergence helpers in this PR.
+    Nx, Ny, Nz = size(Be, 1), size(Be, 2), size(Be, 3)
     if no_slip
-        @inbounds for k in eachindex(Be)
-            f = F[k]
-            Be[k] = f > 0.0 ? 1.0 / f : B[k]   # margin / ice-free fallback
+        @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            f = F[i, j, k]
+            Be[i, j, k] = f > 0.0 ? 1.0 / f : B[i, j, k]   # margin / ice-free fallback
         end
     else
-        @inbounds for k in eachindex(Be)
-            Be[k] = B[k] / (1.0 + B[k] * F[k])
+        @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
+            Be[i, j, k] = B[i, j, k] / (1.0 + B[i, j, k] * F[i, j, k])
         end
     end
     return beta_eff
@@ -645,20 +650,22 @@ function calc_velocity_diva!(y)
         # Step 9b — NaN-scrub + ssa_vel_max clamp (same safety net as SSA).
         ssa_vel_max = p_ydyn.ssa_vel_max
         nan_seen = false
-        @inbounds for k in eachindex(Uxbar)
-            v = Uxbar[k]
+        Nxx, Nxy, Nxz = size(Uxbar, 1), size(Uxbar, 2), size(Uxbar, 3)
+        @inbounds for kk in 1:Nxz, jj in 1:Nxy, ii in 1:Nxx
+            v = Uxbar[ii, jj, kk]
             if isnan(v)
-                Uxbar[k] = 0.0; nan_seen = true
+                Uxbar[ii, jj, kk] = 0.0; nan_seen = true
             else
-                Uxbar[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+                Uxbar[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
             end
         end
-        @inbounds for k in eachindex(Uybar)
-            v = Uybar[k]
+        Nyx, Nyy, Nyz = size(Uybar, 1), size(Uybar, 2), size(Uybar, 3)
+        @inbounds for kk in 1:Nyz, jj in 1:Nyy, ii in 1:Nyx
+            v = Uybar[ii, jj, kk]
             if isnan(v)
-                Uybar[k] = 0.0; nan_seen = true
+                Uybar[ii, jj, kk] = 0.0; nan_seen = true
             else
-                Uybar[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+                Uybar[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
             end
         end
         if nan_seen

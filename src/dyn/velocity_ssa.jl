@@ -1263,24 +1263,31 @@ fail the `vel_tol` threshold automatically).
 """
 function picard_calc_convergence_l2(ux::AbstractArray, ux_nm1::AbstractArray,
                                     uy::AbstractArray, uy_nm1::AbstractArray)
+    # `eachindex(ux)` over a SubArray returns CartesianIndices{3} which
+    # yields `CartesianIndex{3}` per loop step — heap-allocated. Use
+    # explicit (i, j, k) iteration instead.
     res1 = 0.0
     res2 = 0.0
-    @inbounds @simd for k in eachindex(ux)
-        if abs(ux[k]) > _SSA_PICARD_VEL_TOL
-            tx = ux[k] - ux_nm1[k]
+    Nxx, Nxy, Nxz = size(ux, 1), size(ux, 2), size(ux, 3)
+    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
+        u = ux[i, j, k]
+        if abs(u) > _SSA_PICARD_VEL_TOL
+            tx = u - ux_nm1[i, j, k]
             abs(tx) < _SSA_PICARD_TOL_UF && (tx = 0.0)
             res1 += tx * tx
-            tp = ux_nm1[k]
+            tp = ux_nm1[i, j, k]
             abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
             res2 += tp * tp
         end
     end
-    @inbounds @simd for k in eachindex(uy)
-        if abs(uy[k]) > _SSA_PICARD_VEL_TOL
-            ty = uy[k] - uy_nm1[k]
+    Nyx, Nyy, Nyz = size(uy, 1), size(uy, 2), size(uy, 3)
+    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
+        u = uy[i, j, k]
+        if abs(u) > _SSA_PICARD_VEL_TOL
+            ty = u - uy_nm1[i, j, k]
             abs(ty) < _SSA_PICARD_TOL_UF && (ty = 0.0)
             res1 += ty * ty
-            tp = uy_nm1[k]
+            tp = uy_nm1[i, j, k]
             abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
             res2 += tp * tp
         end
@@ -1311,20 +1318,24 @@ function picard_calc_convergence_l1rel_matrix!(err_x::AbstractArray,
                                                uy_nm1::AbstractArray)
     tol = 1e-5
     vel_tol = 1e-2   # Fortran ssa_vel_tolerance (line 1896)
-    @inbounds @simd for k in eachindex(err_x)
-        if abs(ux[k]) > vel_tol
-            err_x[k] = 2.0 * abs(ux[k] - ux_nm1[k]) /
-                       abs(ux[k] + ux_nm1[k] + tol)
+    Nxx, Nxy, Nxz = size(err_x, 1), size(err_x, 2), size(err_x, 3)
+    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
+        u    = ux[i, j, k]
+        unm1 = ux_nm1[i, j, k]
+        if abs(u) > vel_tol
+            err_x[i, j, k] = 2.0 * abs(u - unm1) / abs(u + unm1 + tol)
         else
-            err_x[k] = 0.0
+            err_x[i, j, k] = 0.0
         end
     end
-    @inbounds @simd for k in eachindex(err_y)
-        if abs(uy[k]) > vel_tol
-            err_y[k] = 2.0 * abs(uy[k] - uy_nm1[k]) /
-                       abs(uy[k] + uy_nm1[k] + tol)
+    Nyx, Nyy, Nyz = size(err_y, 1), size(err_y, 2), size(err_y, 3)
+    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
+        u    = uy[i, j, k]
+        unm1 = uy_nm1[i, j, k]
+        if abs(u) > vel_tol
+            err_y[i, j, k] = 2.0 * abs(u - unm1) / abs(u + unm1 + tol)
         else
-            err_y[k] = 0.0
+            err_y[i, j, k] = 0.0
         end
     end
     return err_x, err_y
@@ -1389,13 +1400,15 @@ function calc_basal_stress!(taub_acx, taub_acy, beta_acx, beta_acy, ux_b, uy_b)
     Ux = interior(ux_b)
     Uy = interior(uy_b)
     tol = 1e-5
-    @inbounds @simd for k in eachindex(Tx)
-        v = Bx[k] * Ux[k]
-        Tx[k] = abs(v) < tol ? 0.0 : v
+    Nxx, Nxy, Nxz = size(Tx, 1), size(Tx, 2), size(Tx, 3)
+    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
+        v = Bx[i, j, k] * Ux[i, j, k]
+        Tx[i, j, k] = abs(v) < tol ? 0.0 : v
     end
-    @inbounds @simd for k in eachindex(Ty)
-        v = By[k] * Uy[k]
-        Ty[k] = abs(v) < tol ? 0.0 : v
+    Nyx, Nyy, Nyz = size(Ty, 1), size(Ty, 2), size(Ty, 3)
+    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
+        v = By[i, j, k] * Uy[i, j, k]
+        Ty[i, j, k] = abs(v) < tol ? 0.0 : v
     end
     return taub_acx, taub_acy
 end
@@ -1631,22 +1644,24 @@ function calc_velocity_ssa!(y)
         # well-posed. Sign is preserved by the symmetric clamp.
         ssa_vel_max = p_ydyn.ssa_vel_max
         nan_seen = false
-        @inbounds for k in eachindex(Ux)
-            v = Ux[k]
+        Nxx, Nxy, Nxz = size(Ux, 1), size(Ux, 2), size(Ux, 3)
+        @inbounds for kk in 1:Nxz, jj in 1:Nxy, ii in 1:Nxx
+            v = Ux[ii, jj, kk]
             if isnan(v)
-                Ux[k] = 0.0
+                Ux[ii, jj, kk] = 0.0
                 nan_seen = true
             else
-                Ux[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+                Ux[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
             end
         end
-        @inbounds for k in eachindex(Uy)
-            v = Uy[k]
+        Nyx, Nyy, Nyz = size(Uy, 1), size(Uy, 2), size(Uy, 3)
+        @inbounds for kk in 1:Nyz, jj in 1:Nyy, ii in 1:Nyx
+            v = Uy[ii, jj, kk]
             if isnan(v)
-                Uy[k] = 0.0
+                Uy[ii, jj, kk] = 0.0
                 nan_seen = true
             else
-                Uy[k] = clamp(v, -ssa_vel_max, +ssa_vel_max)
+                Uy[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
             end
         end
         if nan_seen

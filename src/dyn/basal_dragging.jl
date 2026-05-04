@@ -1011,6 +1011,10 @@ function stagger_beta!(beta_acx, beta_acy, beta,
                        f_grnd, f_grnd_acx, f_grnd_acy;
                        beta_gl_stag::Int,
                        beta_min::Real)
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric beta_min floor below. The dispatched helpers
+    # (`_stagger_beta_*`) already accept `Tx_top, Ty_top` as runtime
+    # values; making them parametric is a separate, larger refactor.
     bx_int = interior(beta_acx)
     by_int = interior(beta_acy)
     b_int  = interior(beta)
@@ -1055,9 +1059,18 @@ function stagger_beta!(beta_acx, beta_acy, beta,
         end
     end
 
-    # Fortran line 637-638: beta_min floor on positive face values.
-    bm = Float64(beta_min)
     Nx, Ny = size(b_int, 1), size(b_int, 2)
+    _stagger_beta_min_floor_kernel!(bx_int, by_int, Float64(beta_min),
+                                     Tx_top, Ty_top, Nx, Ny)
+
+    return beta_acx, beta_acy
+end
+
+# Compute kernel for the post-stagger `beta_min` floor — parametric
+# topology so `_ip1_modular` / `_jp1_modular` fold at compile time.
+function _stagger_beta_min_floor_kernel!(bx_int, by_int, bm::Float64,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1f = _ip1_modular(i, Nx, Tx_top)
         jp1f = _jp1_modular(j, Ny, Ty_top)
@@ -1068,6 +1081,5 @@ function stagger_beta!(beta_acx, beta_acy, beta,
             by_int[i, jp1f, 1] = bm
         end
     end
-
-    return beta_acx, beta_acy
+    return nothing
 end
