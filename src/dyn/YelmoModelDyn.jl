@@ -47,6 +47,7 @@ export dyn_step!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
+       calc_jacobian_vel_3D_uxyterms!,
        set_ssa_masks!, _assemble_ssa_matrix!,
        Solver, SSASolver,
        _solve_ssa_linear!,
@@ -61,6 +62,11 @@ include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")
 include("basal_dragging.jl")
+# `deformation.jl` provides `_calc_strain_rate_horizontal_2D!` (used by
+# `viscosity.jl`'s `calc_visc_eff_3D_nodes!`) plus the velocity-Jacobian
+# kernels (`calc_jacobian_vel_3D_uxyterms!`, `_uzterms` to come). Must
+# load BEFORE viscosity.jl.
+include("deformation.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
 include("integration.jl")
