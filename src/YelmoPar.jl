@@ -197,7 +197,9 @@ yneff_params(; kwargs...) = YneffParams(; kwargs...)
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YmatParams
     flow_law            ::String  = "glen"
-    rf_method           ::Int     = 1
+    # `rf_method = -1` ("external") matches `YelmoModelPar.YmatParams`
+    # default — see that file for the rationale (therm not yet ported).
+    rf_method           ::Int     = -1
     rf_const            ::Float64 = 1e-18
     rf_use_eismint2     ::Bool    = false
     rf_with_water       ::Bool    = false

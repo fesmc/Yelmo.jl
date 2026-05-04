@@ -12,11 +12,12 @@ include("YelmoCore.jl")
 include("YelmoMirrorCoreFields.jl")
 include("topo/YelmoModelTopo.jl")
 include("dyn/YelmoModelDyn.jl")
+include("mat/YelmoModelMat.jl")
 # Adaptive timestepping (predictor-corrector): must be loaded AFTER
-# topo + dyn modules since it calls `topo_step!`, `dyn_step!`, and
-# `update_diagnostics!`. Methods land into the top-level `Yelmo`
-# namespace; `step!` (defined in YelmoCore.jl) dispatches into them
-# at runtime via `_select_step!`.
+# topo + dyn + mat modules since it calls `topo_step!`, `mat_step!`,
+# `dyn_step!`, and `update_diagnostics!`. Methods land into the
+# top-level `Yelmo` namespace; `step!` (defined in YelmoCore.jl)
+# dispatches into them at runtime via `_select_step!`.
 include("timestepping.jl")
 include("YelmoIO.jl")
 
@@ -30,6 +31,7 @@ using .YelmoCore
 using .YelmoMirrorCore
 using .YelmoModelTopo
 using .YelmoModelDyn
+using .YelmoModelMat
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -123,6 +125,14 @@ export set_ssa_masks!
 export picard_relax_visc!, picard_relax_vel!
 export picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!
 export set_inactive_margins!, calc_basal_stress!
+
+# YelmoModelMat
+export mat_step!
+export calc_viscosity_glen!, calc_visc_int!, depth_average!
+export calc_rate_factor!, calc_rate_factor_eismint!
+export scale_rate_factor_water!
+export define_enhancement_factor_2D!, define_enhancement_factor_3D!
+export calc_stress_tensor_2D!, calc_2D_eigen_values_pt
 
 # YelmoIO
 export init_output
