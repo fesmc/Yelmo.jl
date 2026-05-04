@@ -516,6 +516,9 @@ function calc_jacobian_vel_3D_uzterms!(
         zeta_ac::AbstractVector{<:Real},
         dx::Real, dy::Real,
     )
+    # Wrapper: same template as PRs #45 / #47 / #48 — extract Field
+    # views, materialise zeta into a concrete `Vector{Float64}`, look
+    # up topology, and dispatch into the parametric kernel below.
 
     Dzx = interior(jvel_dzx); Dzy = interior(jvel_dzy); Dzz = interior(jvel_dzz)
     UZ  = interior(uz)
@@ -530,10 +533,24 @@ function calc_jacobian_vel_3D_uzterms!(
 
     Tx = topology(jvel_dzz.grid, 1)
     Ty = topology(jvel_dzz.grid, 2)
+    zeta = collect(Float64, zeta_ac)
+
+    return _calc_jacobian_vel_3D_uzterms_kernel!(
+        Dzx, Dzy, Dzz, UZ, H, fi, DZSX, DZSY, DZBX, DZBY,
+        zeta, Float64(dx), Float64(dy),
+        Tx, Ty, Nx, Ny, Nz_ac)
+end
+
+# Compute kernel for `calc_jacobian_vel_3D_uzterms!`. Parametric
+# topology, concrete typed scalars, plain arrays. ParallelStencil-shape.
+function _calc_jacobian_vel_3D_uzterms_kernel!(
+        Dzx, Dzy, Dzz, UZ, H, fi,
+        DZSX, DZSY, DZBX, DZBY,
+        zeta_ac::Vector{Float64}, dx_f::Float64, dy_f::Float64,
+        ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int, Nz_ac::Int,
+    ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
 
     fill!(Dzx, 0.0); fill!(Dzy, 0.0); fill!(Dzz, 0.0)
-
-    dx_f = Float64(dx); dy_f = Float64(dy)
 
     # ===== Step 1: vertical derivative `dzz` (Fortran lines 918-991) =====
     @inbounds for j in 1:Ny, i in 1:Nx
