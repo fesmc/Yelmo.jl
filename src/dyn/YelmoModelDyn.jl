@@ -48,6 +48,7 @@ export dyn_step!,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
        calc_jacobian_vel_3D_uxyterms!,
+       calc_uz_3D_jac!, calc_uz_3D!, calc_uz_3D_aa!,
        set_ssa_masks!, _assemble_ssa_matrix!,
        Solver, SSASolver,
        _solve_ssa_linear!,
@@ -74,6 +75,10 @@ include("velocity_sia.jl")
 include("velocity_ssa.jl")
 # DIVA reuses helpers from velocity_ssa.jl — must load AFTER it.
 include("velocity_diva.jl")
+# Vertical velocity (uz, uz_star). Production routine `calc_uz_3D_jac!`
+# (uz_method = 3) plus error stubs for uz_method ∈ {1, 2}. Uses
+# `gq2d_interp_to_node` from quadrature.jl.
+include("velocity_uz.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
