@@ -1111,22 +1111,32 @@ function picard_relax_visc!(visc_eff, visc_eff_nm1, rel::Real)
     Vnm1 = interior(visc_eff_nm1)
     size(V) == size(Vnm1) || error(
         "picard_relax_visc!: shape mismatch ($(size(V)) vs $(size(Vnm1))).")
-    r  = Float64(rel)
-    rm = 1.0 - r
-    @inbounds @simd for k in eachindex(V)
-        v_prev = Vnm1[k]
-        v_now  = V[k]
+    _picard_relax_visc_kernel!(V, Vnm1, Float64(rel))
+    return visc_eff
+end
+
+# Compute kernel — explicit (i, j, k) iteration with concrete `Float64`
+# rel. The original `eachindex(V)` over a SubArray with non-trivial
+# strides (Oceananigans' `interior(...)` stride tuple) yields
+# `CartesianIndex{3}` per iteration, allocating one heap object each
+# time; the explicit loop avoids that.
+function _picard_relax_visc_kernel!(V, Vnm1, rel::Float64)
+    rm = 1.0 - rel
+    Nx = size(V, 1); Ny = size(V, 2); Nz = size(V, 3)
+    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        v_prev = Vnm1[i, j, k]
+        v_now  = V[i, j, k]
         # Guard against log(0): if either is zero, fall back to linear
         # mixing (preserves the Fortran behavior where visc_min floor
         # ensures positive values, but be defensive in case the caller
         # passed an unfilled array on the first iteration).
         if v_prev > 0.0 && v_now > 0.0
-            V[k] = exp(rm * log(v_prev) + r * log(v_now))
+            V[i, j, k] = exp(rm * log(v_prev) + rel * log(v_now))
         else
-            V[k] = rm * v_prev + r * v_now
+            V[i, j, k] = rm * v_prev + rel * v_now
         end
     end
-    return visc_eff
+    return nothing
 end
 
 """
@@ -1145,14 +1155,24 @@ function picard_relax_vel!(ux_n, uy_n, ux_nm1, uy_nm1, rel::Real)
     Uy    = interior(uy_n)
     Uxnm1 = interior(ux_nm1)
     Uynm1 = interior(uy_nm1)
-    r = Float64(rel)
-    @inbounds @simd for k in eachindex(Ux)
-        Ux[k] = Uxnm1[k] + r * (Ux[k] - Uxnm1[k])
-    end
-    @inbounds @simd for k in eachindex(Uy)
-        Uy[k] = Uynm1[k] + r * (Uy[k] - Uynm1[k])
-    end
+    _picard_relax_vel_kernel!(Ux, Uy, Uxnm1, Uynm1, Float64(rel))
     return ux_n, uy_n
+end
+
+# Compute kernel — same eachindex-vs-CartesianIndex fix as
+# `picard_relax_visc!` above. Explicit (i, j, k) iteration avoids the
+# heap-allocated `CartesianIndex{3}` per loop step on Oceananigans
+# `interior(...)` SubArrays.
+function _picard_relax_vel_kernel!(Ux, Uy, Uxnm1, Uynm1, rel::Float64)
+    Nxx, Nxy, Nxz = size(Ux, 1), size(Ux, 2), size(Ux, 3)
+    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
+        Ux[i, j, k] = Uxnm1[i, j, k] + rel * (Ux[i, j, k] - Uxnm1[i, j, k])
+    end
+    Nyx, Nyy, Nyz = size(Uy, 1), size(Uy, 2), size(Uy, 3)
+    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
+        Uy[i, j, k] = Uynm1[i, j, k] + rel * (Uy[i, j, k] - Uynm1[i, j, k])
+    end
+    return nothing
 end
 
 """

@@ -41,7 +41,7 @@
 using SparseArrays: sparse
 using Krylov: BicgstabWorkspace, bicgstab!
 using Oceananigans.Fields: interior, XFaceField, YFaceField, CenterField, Field
-using Oceananigans.Grids: Bounded, Periodic, Face, Center, znodes, topology
+using Oceananigans.Grids: Bounded, Periodic, Face, Center, znodes, topology, AbstractTopology
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 # Pull SSA helpers we reuse verbatim.
@@ -87,6 +87,9 @@ Port of Fortran `velocity_diva.f90:916-961 calc_F_integral`.
 function calc_F_integral_2D!(F_int, visc_eff, H_ice, f_ice,
                              zeta_aa::AbstractVector{<:Real};
                              n::Real = 2.0)
+    # Wrapper: same template as the dyn 3D / DIVA viscosity series.
+    # Lift Field views, materialise zeta as concrete `Vector{Float64}`,
+    # dispatch into the typed-scalar kernel below.
     Fi = interior(F_int)
     V  = interior(visc_eff)
     H  = interior(H_ice)
@@ -97,8 +100,14 @@ function calc_F_integral_2D!(F_int, visc_eff, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_F_integral_2D!: visc_eff Nz=$(Nz) but zeta_aa has length $(length(zeta_aa)).")
 
-    n_pow = Float64(n)
+    zeta = collect(Float64, zeta_aa)
+    _calc_F_integral_2D_kernel!(Fi, V, H, fi, zeta, Float64(n), Nx, Ny, Nz)
+    return F_int
+end
 
+function _calc_F_integral_2D_kernel!(Fi, V, H, fi,
+        zeta::Vector{Float64}, n_pow::Float64,
+        Nx::Int, Ny::Int, Nz::Int)
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi[i, j, 1] != 1.0
             Fi[i, j, 1] = 0.0
@@ -109,30 +118,27 @@ function calc_F_integral_2D!(F_int, visc_eff, H_ice, f_ice,
         # Trapezoidal integration over [0, 1] including bed/surface
         # endpoints. Bed endpoint (ζ=0) approximated with V[i,j,1]
         # (nearest Center); surface endpoint (ζ=1) with V[i,j,end].
-        # Integrand at endpoint zeta:
-        #   integ(zeta) = (H_eff / η(zeta)) · (1 − zeta)^n
         z_prev = 0.0
-        eta_prev = V[i, j, 1]                                   # nearest-Center bed
+        eta_prev = V[i, j, 1]
         integ_prev = (H_eff / eta_prev) * (1.0 - z_prev) ^ n_pow
 
         acc = 0.0
-        @inbounds for k in 1:Nz
-            z_k   = zeta_aa[k]
+        for k in 1:Nz
+            z_k   = zeta[k]
             eta_k = V[i, j, k]
             integ_k = (H_eff / eta_k) * (1.0 - z_k) ^ n_pow
             acc += 0.5 * (integ_prev + integ_k) * (z_k - z_prev)
             z_prev = z_k
             integ_prev = integ_k
         end
-        # Surface endpoint (ζ=1) approximated with topmost Center η.
         z_k = 1.0
-        eta_k = V[i, j, end]
+        eta_k = V[i, j, Nz]
         integ_k = (H_eff / eta_k) * (1.0 - z_k) ^ n_pow         # = 0 for n > 0
         acc += 0.5 * (integ_prev + integ_k) * (z_k - z_prev)
 
         Fi[i, j, 1] = acc
     end
-    return F_int
+    return nothing
 end
 
 
@@ -164,6 +170,13 @@ function calc_F1_integral_3D!(F1, visc_eff, H_ice, f_ice,
     (size(F, 3) == Nz && length(zeta_aa) == Nz) || error(
         "calc_F1_integral_3D!: shape mismatch F1=$(size(F))  visc=$(size(V))  zeta=$(length(zeta_aa)).")
 
+    zeta = collect(Float64, zeta_aa)
+    _calc_F1_integral_3D_kernel!(F, V, H, fi, zeta, Nx, Ny, Nz)
+    return F1
+end
+
+function _calc_F1_integral_3D_kernel!(F, V, H, fi,
+        zeta::Vector{Float64}, Nx::Int, Ny::Int, Nz::Int)
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi[i, j, 1] != 1.0
             for k in 1:Nz
@@ -180,7 +193,7 @@ function calc_F1_integral_3D!(F1, visc_eff, H_ice, f_ice,
 
         acc = 0.0
         for k in 1:Nz
-            z_k = zeta_aa[k]
+            z_k = zeta[k]
             eta_k = V[i, j, k]
             integ_k = (H_eff / eta_k) * (1.0 - z_k)
             acc += 0.5 * (integ_prev + integ_k) * (z_k - z_prev)
@@ -189,7 +202,7 @@ function calc_F1_integral_3D!(F1, visc_eff, H_ice, f_ice,
             integ_prev = integ_k
         end
     end
-    return F1
+    return nothing
 end
 
 
@@ -367,6 +380,8 @@ Port of Fortran `velocity_diva.f90:414-491 calc_vel_horizontal_3D`.
 """
 function calc_vel_horizontal_3D!(ux, uy, ux_b, uy_b,
                                  taub_acx, taub_acy, F1_3D, f_ice)
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric kernel below. Same template as the dyn 3D series.
     Ux = interior(ux)
     Uy = interior(uy)
     Uxb = interior(ux_b)
@@ -380,6 +395,15 @@ function calc_vel_horizontal_3D!(ux, uy, ux_b, uy_b,
     Nz     = size(F, 3)
     Tx_top = topology(ux.grid, 1)
     Ty_top = topology(uy.grid, 2)
+
+    _calc_vel_horizontal_3D_kernel!(Ux, Uy, Uxb, Uyb, Tx, Ty, F, Fi,
+                                    Tx_top, Ty_top, Nx, Ny, Nz)
+    return ux, uy
+end
+
+function _calc_vel_horizontal_3D_kernel!(Ux, Uy, Uxb, Uyb, Tx, Ty, F, Fi,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
     @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
         ip1  = _neighbor_ip1(i, Nx, Tx_top)
@@ -404,7 +428,7 @@ function calc_vel_horizontal_3D!(ux, uy, ux_b, uy_b,
         @views Uy[:, 1, :] .= Uy[:, 2, :]
     end
 
-    return ux, uy
+    return nothing
 end
 
 
