@@ -132,6 +132,7 @@ export calc_viscosity_glen!, calc_visc_int!
 export calc_rate_factor!, calc_rate_factor_eismint!
 export scale_rate_factor_water!
 export define_enhancement_factor_2D!, define_enhancement_factor_3D!
+export calc_stress_tensor_2D!, calc_2D_eigen_values_pt
 
 # YelmoIO
 export init_output

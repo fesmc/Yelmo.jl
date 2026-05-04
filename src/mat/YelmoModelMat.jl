@@ -43,11 +43,13 @@ export mat_step!,
        calc_viscosity_glen!, calc_visc_int!,
        calc_rate_factor!, calc_rate_factor_eismint!,
        scale_rate_factor_water!,
-       define_enhancement_factor_2D!, define_enhancement_factor_3D!
+       define_enhancement_factor_2D!, define_enhancement_factor_3D!,
+       calc_stress_tensor_2D!, calc_2D_eigen_values_pt
 
 include("viscosity.jl")
 include("rate_factor.jl")
 include("enhancement.jl")
+include("stress.jl")
 
 """
     mat_step!(y::YelmoModel, dt) -> y
