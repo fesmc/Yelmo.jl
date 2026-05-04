@@ -36,6 +36,7 @@ using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
 using ..YelmoSolvers: Solver, SSASolver
+using ..YelmoIntegration: vert_int_trapz_boundary!
 
 import ..YelmoCore: dyn_step!
 
@@ -74,7 +75,6 @@ include("basal_dragging.jl")
 include("deformation.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
-include("integration.jl")
 include("velocity_sia.jl")
 include("velocity_ssa.jl")
 # DIVA reuses helpers from velocity_ssa.jl — must load AFTER it.

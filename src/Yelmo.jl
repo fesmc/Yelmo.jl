@@ -5,6 +5,7 @@ include("YelmoMeta.jl")
 include("YelmoConst.jl")
 include("YelmoPar.jl")
 include("dyn/solvers.jl")
+include("integration.jl")
 include("YelmoModelPar.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
@@ -23,6 +24,7 @@ using .YelmoMeta
 using .YelmoConst
 using .YelmoPar
 using .YelmoSolvers
+using .YelmoIntegration
 using .YelmoModelPar
 using .YelmoCore
 using .YelmoMirrorCore
@@ -52,6 +54,9 @@ export compare
 
 # YelmoSolvers
 export Solver, SSASolver
+
+# YelmoIntegration
+export vert_int_trapz_boundary!
 
 # YelmoModelPar
 export YelmoModelParameters
