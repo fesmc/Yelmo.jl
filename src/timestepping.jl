@@ -66,8 +66,13 @@ using Oceananigans.Fields: interior
 # adaptive-PC method. YelmoCore.step! calls into this dispatcher when
 # `dt_method != 0`. Importing the symbol here means the method we
 # add at the bottom of this file lands on the same generic function
-# YelmoCore is referencing.
-import .YelmoCore: _select_step!
+# YelmoCore is referencing. Same trick for `_step_fe!`: forward-declared
+# in YelmoCore so `step!` (FE branch) can refer to it; body added below.
+import .YelmoCore: _select_step!, _step_fe!
+
+# Pull in the timing macro so the per-phase wraps below land on the
+# same generic that YelmoCore.step! sees.
+using .YelmoTiming: @timed_section
 
 export PCScheme, HEUN, FE_SBE, AB_SAM
 export PIController, PI42
@@ -285,9 +290,9 @@ end
 # `mat.ATT`, then `calc_ymat` computes a fresh `ATT` from the
 # just-solved velocity field for the next step.
 function _step_fe!(y, dt::Float64)
-    Yelmo.topo_step!(y, dt)
-    Yelmo.dyn_step!(y, dt)
-    Yelmo.mat_step!(y, dt)
+    @timed_section y :topo Yelmo.topo_step!(y, dt)
+    @timed_section y :dyn  Yelmo.dyn_step!(y, dt)
+    @timed_section y :mat  Yelmo.mat_step!(y, dt)
     return y
 end
 
@@ -306,11 +311,11 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
 
     # Stage 1: full FE step  y_n  →  y_pred
-    _step_fe!(y, dt)
+    @timed_section y :pc_predictor _step_fe!(y, dt)
     copyto!(scratch.H_pred, interior(y.tpo.H_ice))
 
     # Stage 2: full FE step  y_pred  →  y_**
-    _step_fe!(y, dt)
+    @timed_section y :pc_corrector _step_fe!(y, dt)
 
     # Heun corrector identity: H_corr = (H_n + H_**) / 2.
     # (Derivation: with k1 = (H_pred − H_n)/dt and k2 = (H_** − H_pred)/dt,

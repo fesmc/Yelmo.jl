@@ -75,6 +75,11 @@ Base.@kwdef struct YelmoParams
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
+    # Per-section wall-clock timing scaffold (`y.timer`). Off by
+    # default; turning it on populates `y.timer` via `@timed_section`
+    # call sites at a small per-call overhead. See `src/timing.jl`
+    # and `docs/src/usage/timing.md`.
+    timing           ::Bool    = false
 end
 yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
 # ---------------------------------------------------------------------------

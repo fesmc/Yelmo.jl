@@ -16,6 +16,7 @@ using ..YelmoConst: YelmoConstants,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
 using ..YelmoModelPar: YelmoModelParameters
+using ..YelmoTiming: YelmoTimer, @timed_section
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
@@ -539,6 +540,11 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     mat::M
     thrm::TH
     tpo::TP
+    # Per-section wall-clock accumulator populated by `@timed_section`.
+    # Always present; `timer.enabled` controls whether call sites
+    # actually measure (set via `yelmo_params(timing = true)`).
+    # See `src/timing.jl`.
+    timer::YelmoTimer
 end
 
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
@@ -704,6 +710,11 @@ all six). `strict=true` (default) errors if a variable in a loaded group
 is missing from the restart; `strict=false` silently skips missing
 variables, leaving the corresponding field at its default-allocated value.
 """
+# Read the `yelmo.timing` flag from a YelmoModelParameters, defaulting
+# to `false` when no parameter object is available. Used by both
+# `YelmoModel` constructors to initialise the per-model `YelmoTimer`.
+_resolve_timing_enabled(p) = p === nothing ? false : p.yelmo.timing
+
 function YelmoModel(restart_file::String, time::Float64;
                     alias::String = "ymodel1",
                     rundir::String = "./",
@@ -725,7 +736,9 @@ function YelmoModel(restart_file::String, time::Float64;
     v_meta = _load_yelmo_variable_meta()
     bnd, dta, dyn, mat, thrm, tpo = _alloc_yelmo_groups(g, gt, gr, v_meta)
 
-    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo)
+    timer = YelmoTimer(enabled = _resolve_timing_enabled(p))
+
+    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, timer)
 
     # Default mask_ice to all-dynamic before load_state!. If the restart
     # file carries `mask_ice`, load_state! overwrites this; otherwise the
@@ -950,17 +963,21 @@ function step!(y::YelmoModel, dt::Float64)
     # that don't pass parameters.
     method = y.p === nothing ? 0 : Int(y.p.yelmo.dt_method)
     if method == 0
-        topo_step!(y, dt)
-        dyn_step!(y, dt)
-        mat_step!(y, dt)
-        # therm_step!(y, dt)   — milestone 5
-        return y
+        # Per-section timing wraps live inside `_step_fe!` (defined in
+        # src/timestepping.jl) so both the fixed-FE and the adaptive PC
+        # paths share the same instrumented call sites.
+        return _step_fe!(y, dt)
     else
         # `_select_step!` is defined in src/timestepping.jl, which is
         # included after the topo + dyn modules so it can call them.
         return _select_step!(y, dt)
     end
 end
+
+# Forward declaration: body lives in src/timestepping.jl. Defining the
+# symbol here lets `step!` reference it before timestepping.jl is
+# included.
+function _step_fe! end
 
 # Forward declaration — body lives in src/timestepping.jl. Defining
 # the symbol here keeps `step!` self-contained even though the
