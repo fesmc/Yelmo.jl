@@ -95,6 +95,9 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                               zeta_aa::AbstractVector{<:Real},
                               dx::Real, dy::Real,
                               n_glen::Real, eps_0::Real)
+    # Wrapper: extract Field views, materialise zeta, look up topology,
+    # dispatch to the parametric kernel below. Same wrapper-+-parametric-
+    # kernel template as the Lever-2 dyn 3D refactors.
     V       = interior(visc_eff)
     ux_int  = interior(ux)
     uy_int  = interior(uy)
@@ -106,18 +109,30 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_aa!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
-    # Topology-dispatched neighbour helpers — under Periodic the i±1 /
-    # j±1 indices wrap modularly; under Bounded they clamp. Mirrors the
-    # Fortran `get_neighbor_indices_bc_codes` (`yelmo_tools.f90`) which
-    # dispatches on BC. The Yelmo face-array slot `[i+1, j, 1]` for
-    # Fortran `ux(i, j)` similarly wraps under Periodic via
-    # `_ip1_modular`.
     Tx_top = topology(visc_eff.grid, 1)
     Ty_top = topology(visc_eff.grid, 2)
 
-    p1 = (1.0 - Float64(n_glen)) / (2.0 * Float64(n_glen))
-    p2 = -1.0 / Float64(n_glen)
-    eps_0_sq = Float64(eps_0)^2
+    _calc_visc_eff_3D_aa_kernel!(
+        V, ux_int, uy_int, ATT_int, fi_int,
+        Float64(dx), Float64(dy),
+        Float64(n_glen), Float64(eps_0),
+        Tx_top, Ty_top, Nx, Ny, Nz)
+
+    return visc_eff
+end
+
+# Compute kernel: parametric topology, plain arrays, typed scalars.
+# Inner-loop hot path is allocation-free.
+function _calc_visc_eff_3D_aa_kernel!(
+        V, ux_int, uy_int, ATT_int, fi_int,
+        dx_f::Float64, dy_f::Float64,
+        n_glen_f::Float64, eps_0_f::Float64,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
+
+    p1 = (1.0 - n_glen_f) / (2.0 * n_glen_f)
+    p2 = -1.0 / n_glen_f
+    eps_0_sq = eps_0_f^2
 
     fill!(V, _VISC_MIN)
 
@@ -136,15 +151,15 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
             # Fortran lines 594-603. Face-slot indices are `_ip1_modular` /
             # `_jp1_modular`, which under Bounded resolve to k+1 (the Yelmo
             # face-array convention) and under Periodic wrap modularly.
-            dudx_aa = (ux_int[ux_i, j, 1] - ux_int[ux_im1, j, 1]) / Float64(dx)
-            dvdy_aa = (uy_int[i, uy_j, 1] - uy_int[i, uy_jm1, 1]) / Float64(dy)
+            dudx_aa = (ux_int[ux_i, j, 1] - ux_int[ux_im1, j, 1]) / dx_f
+            dvdy_aa = (uy_int[i, uy_j, 1] - uy_int[i, uy_jm1, 1]) / dy_f
 
-            dudy_aa_1 = (ux_int[ux_i,   jp1, 1] - ux_int[ux_i,   jm1, 1]) / (2 * Float64(dy))
-            dudy_aa_2 = (ux_int[ux_im1, jp1, 1] - ux_int[ux_im1, jm1, 1]) / (2 * Float64(dy))
+            dudy_aa_1 = (ux_int[ux_i,   jp1, 1] - ux_int[ux_i,   jm1, 1]) / (2 * dy_f)
+            dudy_aa_2 = (ux_int[ux_im1, jp1, 1] - ux_int[ux_im1, jm1, 1]) / (2 * dy_f)
             dudy_aa   = 0.5 * (dudy_aa_1 + dudy_aa_2)
 
-            dvdx_aa_1 = (uy_int[ip1, uy_j,   1] - uy_int[im1, uy_j,   1]) / (2 * Float64(dx))
-            dvdx_aa_2 = (uy_int[ip1, uy_jm1, 1] - uy_int[im1, uy_jm1, 1]) / (2 * Float64(dx))
+            dvdx_aa_1 = (uy_int[ip1, uy_j,   1] - uy_int[im1, uy_j,   1]) / (2 * dx_f)
+            dvdx_aa_2 = (uy_int[ip1, uy_jm1, 1] - uy_int[im1, uy_jm1, 1]) / (2 * dx_f)
             dvdx_aa   = 0.5 * (dvdx_aa_1 + dvdx_aa_2)
 
             eps_sq_aa = dudx_aa^2 + dvdy_aa^2 + dudx_aa * dvdy_aa +
@@ -162,7 +177,7 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
             end
         end
     end
-    return visc_eff
+    return nothing
 end
 
 """
@@ -204,6 +219,11 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                                  zeta_aa::AbstractVector{<:Real},
                                  dx::Real, dy::Real,
                                  n_glen::Real, eps_0::Real)
+    # Wrapper: extract Field views, allocate the per-call strain-rate
+    # scratch matrices, look up topology, and dispatch into the
+    # parametric kernel below. Allocation in the wrapper is tiny
+    # (~30 KB for 4×Nx×Ny Float64 matrices); the kernel hot path is
+    # alloc-free.
     V       = interior(visc_eff)
     ux_int  = interior(ux)
     uy_int  = interior(uy)
@@ -215,15 +235,8 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_nodes!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
-    # Topology-dispatched neighbour helpers — under Periodic the i±1 /
-    # j±1 indices wrap modularly; under Bounded they clamp. Mirrors the
-    # Fortran `get_neighbor_indices_bc_codes` (`yelmo_tools.f90`).
     Tx_top = topology(visc_eff.grid, 1)
     Ty_top = topology(visc_eff.grid, 2)
-
-    p1 = (1.0 - Float64(n_glen)) / (2.0 * Float64(n_glen))
-    p2 = -1.0 / Float64(n_glen)
-    eps_0_sq = Float64(eps_0)^2
 
     # Fortran lines 421-429: compute strain rates once per call (the
     # `_nodes` variant uses the same dudx/dudy/dvdx/dvdy across all
@@ -236,6 +249,29 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                                      ux_int, uy_int, fi_int,
                                      Float64(dx), Float64(dy),
                                      Tx_top, Ty_top)
+
+    _calc_visc_eff_3D_nodes_kernel!(
+        V, ATT_int, fi_int, dudx, dudy, dvdx, dvdy,
+        Float64(n_glen), Float64(eps_0),
+        Tx_top, Ty_top, Nx, Ny, Nz)
+
+    return visc_eff
+end
+
+# Compute kernel for `calc_visc_eff_3D_nodes!`. Parametric topology,
+# plain arrays, typed scalars. The Gauss-quadrature `xr/yr/wt/wt_tot`
+# are pulled inside the kernel since they're constant tuples.
+function _calc_visc_eff_3D_nodes_kernel!(
+        V, ATT_int, fi_int,
+        dudx::Matrix{Float64}, dudy::Matrix{Float64},
+        dvdx::Matrix{Float64}, dvdy::Matrix{Float64},
+        n_glen_f::Float64, eps_0_f::Float64,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
+
+    p1 = (1.0 - n_glen_f) / (2.0 * n_glen_f)
+    p2 = -1.0 / n_glen_f
+    eps_0_sq = eps_0_f^2
 
     xr, yr, wt, wt_tot = gq2d_nodes(2)
     fill!(V, _VISC_MIN)
@@ -331,7 +367,7 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
         # `_nodes` variant doesn't override visc with 0 on ice-free
         # cells (unlike `_aa`); see Fortran line 433 vs 619-624.
     end
-    return visc_eff
+    return nothing
 end
 
 """
