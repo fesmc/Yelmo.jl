@@ -212,6 +212,14 @@ function calc_jacobian_vel_3D_uxyterms!(
         dx::Real, dy::Real,
     )
 
+    # Wrapper: lift Oceananigans Field views to concretely-typed
+    # array-like inputs and dispatch to the parametric kernel below.
+    # The kernel takes the topology types as `Type` parameters, so all
+    # `_neighbor_*` / `_*p1_modular` calls inside the hot loops resolve
+    # at compile time. The wrapper is the only place that touches Field
+    # objects; the kernel sees plain arrays + scalars + topology types,
+    # which is the shape ParallelStencil can wrap with `@parallel` once
+    # we adopt it.
     Dxx = interior(jvel_dxx); Dxy = interior(jvel_dxy); Dxz = interior(jvel_dxz)
     Dyx = interior(jvel_dyx); Dyy = interior(jvel_dyy); Dyz = interior(jvel_dyz)
     UX  = interior(ux);  UY  = interior(uy)
@@ -225,13 +233,42 @@ function calc_jacobian_vel_3D_uxyterms!(
         "calc_jacobian_vel_3D_uxyterms!: Nz mismatch — zeta_aa has length $(Nz) " *
         "but jvel_dxx has 3rd-dim size $(size(Dxx, 3))")
 
+    # `topology(grid, 1)` returns a topology subtype (e.g. `Bounded`,
+    # `Periodic`). We materialise it as a `Type{Tx}` parameter on the
+    # kernel so `_neighbor_*` and `_*p1_modular` dispatch fold away at
+    # compile time. `zeta_aa` is materialised as `Vector{Float64}` for
+    # the same reason — `znodes(...)` returns an `OffsetVector{Float64,
+    # StepRangeLen}` whose abstract `<:Real` constraint inhibits some
+    # of the inner-loop specialisation.
     Tx = topology(jvel_dxx.grid, 1)
     Ty = topology(jvel_dxx.grid, 2)
+    zeta = collect(Float64, zeta_aa)
+
+    return _calc_jacobian_vel_3D_uxyterms_kernel!(
+        Dxx, Dxy, Dxz, Dyx, Dyy, Dyz,
+        UX, UY, H, fi,
+        DZSX, DZSY, DZBX, DZBY,
+        zeta, Float64(dx), Float64(dy),
+        Tx, Ty, Nx, Ny, Nz)
+end
+
+# Compute kernel for `calc_jacobian_vel_3D_uxyterms!`. Takes raw
+# array-like inputs (the wrapper passes `interior(field)` views, which
+# are `SubArray{Float64,3,Array{Float64,3}}`), concrete-typed scalars,
+# and the x/y topology subtypes as type parameters. This is the
+# stencil-kernel shape — flat loops, no Field objects, no
+# AbstractVector/Real abstract types — which is what we'll later wrap
+# with ParallelStencil's `@parallel` for CPU-thread / GPU dispatch.
+function _calc_jacobian_vel_3D_uxyterms_kernel!(
+        Dxx, Dxy, Dxz, Dyx, Dyy, Dyz,
+        UX, UY, H, fi,
+        DZSX, DZSY, DZBX, DZBY,
+        zeta::Vector{Float64}, dx_f::Float64, dy_f::Float64,
+        ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
 
     fill!(Dxx, 0.0); fill!(Dxy, 0.0); fill!(Dxz, 0.0)
     fill!(Dyx, 0.0); fill!(Dyy, 0.0); fill!(Dyz, 0.0)
-
-    dx_f = Float64(dx); dy_f = Float64(dy)
 
     # ===== Step 1: vertical derivatives `dxz`, `dyz` ========================
     # Fortran lines 587-702. 3-point Lagrange for unequal vertical layers.
@@ -264,23 +301,23 @@ function calc_jacobian_vel_3D_uxyterms!(
         if H_now_acx > 0.0
             # k=1: forward 3-point Lagrange (Fortran lines 658-661).
             k = 1
-            h1 = H_now_acx * (zeta_aa[k+1] - zeta_aa[k])
-            h2 = H_now_acx * (zeta_aa[k+2] - zeta_aa[k+1])
+            h1 = H_now_acx * (zeta[k+1] - zeta[k])
+            h2 = H_now_acx * (zeta[k+2] - zeta[k+1])
             Dxz[i, j, k] = -(2*h1 + h2)/(h1*(h1 + h2)) * UX[ux_i, j, k]   +
                             (h1 + h2)/(h1*h2)         * UX[ux_i, j, k+1] -
                             h1/(h2*(h1 + h2))         * UX[ux_i, j, k+2]
             # 2..Nz-1: centered 3-point Lagrange (Fortran lines 664-668).
             for k in 2:Nz-1
-                h1 = H_now_acx * (zeta_aa[k]   - zeta_aa[k-1])
-                h2 = H_now_acx * (zeta_aa[k+1] - zeta_aa[k])
+                h1 = H_now_acx * (zeta[k]   - zeta[k-1])
+                h2 = H_now_acx * (zeta[k+1] - zeta[k])
                 Dxz[i, j, k] = -h2/(h1*(h1 + h2))    * UX[ux_i, j, k-1] -
                                 (h1 - h2)/(h1*h2)   * UX[ux_i, j, k]   +
                                 h1/(h2*(h1 + h2))    * UX[ux_i, j, k+1]
             end
             # k=Nz: backward 3-point Lagrange (Fortran lines 670-674).
             k = Nz
-            h1 = H_now_acx * (zeta_aa[k-1] - zeta_aa[k-2])
-            h2 = H_now_acx * (zeta_aa[k]   - zeta_aa[k-1])
+            h1 = H_now_acx * (zeta[k-1] - zeta[k-2])
+            h2 = H_now_acx * (zeta[k]   - zeta[k-1])
             Dxz[i, j, k] = h2/(h1*(h1 + h2))      * UX[ux_i, j, k-2] -
                             (h1 + h2)/(h1*h2)    * UX[ux_i, j, k-1] +
                             (h1 + 2*h2)/(h2*(h1 + h2)) * UX[ux_i, j, k]
@@ -288,21 +325,21 @@ function calc_jacobian_vel_3D_uxyterms!(
 
         if H_now_acy > 0.0
             k = 1
-            h1 = H_now_acy * (zeta_aa[k+1] - zeta_aa[k])
-            h2 = H_now_acy * (zeta_aa[k+2] - zeta_aa[k+1])
+            h1 = H_now_acy * (zeta[k+1] - zeta[k])
+            h2 = H_now_acy * (zeta[k+2] - zeta[k+1])
             Dyz[i, j, k] = -(2*h1 + h2)/(h1*(h1 + h2)) * UY[i, uy_j, k]   +
                             (h1 + h2)/(h1*h2)         * UY[i, uy_j, k+1] -
                             h1/(h2*(h1 + h2))         * UY[i, uy_j, k+2]
             for k in 2:Nz-1
-                h1 = H_now_acy * (zeta_aa[k]   - zeta_aa[k-1])
-                h2 = H_now_acy * (zeta_aa[k+1] - zeta_aa[k])
+                h1 = H_now_acy * (zeta[k]   - zeta[k-1])
+                h2 = H_now_acy * (zeta[k+1] - zeta[k])
                 Dyz[i, j, k] = -h2/(h1*(h1 + h2))    * UY[i, uy_j, k-1] -
                                 (h1 - h2)/(h1*h2)   * UY[i, uy_j, k]   +
                                 h1/(h2*(h1 + h2))    * UY[i, uy_j, k+1]
             end
             k = Nz
-            h1 = H_now_acy * (zeta_aa[k-1] - zeta_aa[k-2])
-            h2 = H_now_acy * (zeta_aa[k]   - zeta_aa[k-1])
+            h1 = H_now_acy * (zeta[k-1] - zeta[k-2])
+            h2 = H_now_acy * (zeta[k]   - zeta[k-1])
             Dyz[i, j, k] = h2/(h1*(h1 + h2))      * UY[i, uy_j, k-2] -
                             (h1 + h2)/(h1*h2)    * UY[i, uy_j, k-1] +
                             (h1 + 2*h2)/(h2*(h1 + h2)) * UY[i, uy_j, k]
@@ -323,7 +360,7 @@ function calc_jacobian_vel_3D_uxyterms!(
         uy_jp1 = _jp1_modular(jp1, Ny, Ty)
 
         for k in 1:Nz
-            zk = zeta_aa[k]
+            zk = zeta[k]
 
             # ---- Centered second-order FD (Fortran lines 719-723) ----
             Dxx[i, j, k] = (UX[ux_ip1, j, k] - UX[ux_im1, j, k]) / (2 * dx_f)
