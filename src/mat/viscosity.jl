@@ -37,12 +37,12 @@
 using Oceananigans.Fields: interior
 
 # `vert_int_trapz_boundary!` is the same trapezoidal-with-explicit-
-# boundary helper used by dyn's `calc_visc_eff_int!`. It currently
-# lives inside `YelmoModelDyn`; a follow-up task will lift it to a
-# top-level `YelmoIntegration` module.
-using ..YelmoModelDyn: vert_int_trapz_boundary!
+# boundary helper used by dyn's `calc_visc_eff_int!`. Lives in the
+# top-level `YelmoIntegration` module (`src/integration.jl`) so both
+# `mat` and `dyn` consume it as a peer.
+using ..YelmoIntegration: vert_int_trapz_boundary!
 
-export calc_viscosity_glen!, calc_visc_int!
+export calc_viscosity_glen!, calc_visc_int!, depth_average!
 
 
 """
@@ -154,4 +154,30 @@ function calc_visc_int!(visc_int, visc, H_ice, f_ice,
         end
     end
     return visc_int
+end
+
+
+"""
+    depth_average!(out2D, var3D, zeta_aa) -> out2D
+
+Pure depth-average `∫₀¹ var(ζ) dζ` of a 3D Center-staggered field
+into a 2D Center-staggered field. Uses the same constant-extrapolation
+boundary convention as `calc_visc_int!` (the bed value is taken as
+`var3D[k=1]` and the surface as `var3D[k=Nz]`).
+
+Used by `mat_step!` to populate `mat.enh_bar`, `mat.ATT_bar`, and
+`mat.visc_bar` from their respective 3D fields. Fortran analog:
+`calc_vertical_integrated_2D` from `yelmo/src/yelmo_tools.f90`.
+"""
+function depth_average!(out2D, var3D, zeta_aa::AbstractVector{<:Real})
+    Vi = interior(out2D)
+    V  = interior(var3D)
+    Nz = size(V, 3)
+    Nz == length(zeta_aa) || error(
+        "depth_average!: var3D has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
+
+    Vb = @view V[:, :, 1:1]
+    Vs = @view V[:, :, Nz:Nz]
+    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
+    return out2D
 end

@@ -247,7 +247,13 @@ yneff_params(; kwargs...) = YneffParams(; kwargs...)
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YmatParams
     flow_law            ::String  = "glen"
-    rf_method           ::Int     = 1
+    # `rf_method = -1` ("external") is the Yelmo.jl default while therm
+    # is unported: `mat_step!` leaves `mat.ATT` at its loaded /
+    # externally-filled value. Switch to `0` (constant `rf_const`) or
+    # `1` (Arrhenius — needs therm) explicitly per simulation. Common
+    # Fortran namelist values are 0 (EISMINT-moving) and 1 (production
+    # runs).
+    rf_method           ::Int     = -1
     rf_const            ::Float64 = 1e-18
     rf_use_eismint2     ::Bool    = false
     rf_with_water       ::Bool    = false
