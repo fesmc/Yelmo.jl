@@ -156,6 +156,8 @@ function lsf_update!(lsf,
                      u_bar, v_bar,
                      cr_acx, cr_acy,
                      dt::Real;
+                     scheme::Symbol = :upwind_explicit,
+                     cache = nothing,
                      cfl_safety::Real = 0.1)
     grid = lsf.grid
     w_acx = XFaceField(grid)
@@ -180,7 +182,8 @@ function lsf_update!(lsf,
     extrapolate_ocn_acx!(w_acx; reference = u_bar)
     extrapolate_ocn_acy!(w_acy; reference = v_bar)
 
-    advect_tracer!(lsf, w_acx, w_acy, dt; cfl_safety = cfl_safety)
+    advect_tracer!(lsf, w_acx, w_acy, dt;
+                   scheme = scheme, cache = cache, cfl_safety = cfl_safety)
 
     # Saturate to [-1, 1] to keep the field bounded under upwind
     # diffusion. Redistancing is what restores the slope; this is just

@@ -40,9 +40,43 @@ export advect_tracer!, advect_tracer_upwind_explicit!,
        advect_tracer_upwind_implicit!,
        ImplicitAdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
-       solve_advection!
+       solve_advection!,
+       parse_advection_scheme
 
 const _DEFAULT_OCN_UPWIND = UpwindBiased(order=1)
+
+"""
+    parse_advection_scheme(solver::AbstractString) -> Symbol
+
+Map a `YtopoParams.solver` namelist string to the Yelmo.jl
+advection-scheme symbol used by `advect_tracer!`.
+
+Both the short Yelmo.jl names and the Fortran-Yelmo namelist
+conventions resolve to the same scheme so a single namelist can
+drive either backend (Yelmo.jl directly, or YelmoMirror through
+the Fortran code path):
+
+  - `"impl"`, `"impl-lis"` → `:upwind_implicit`
+  - `"expl"`, `"expl-upwind"` → `:upwind_explicit`
+  - `"none"` → `:none` (advection skipped — see `topo_step!`)
+
+Other Fortran namelist values (`"expl"`, `"impl-upwind"`,
+`"expl-sico"`, `"impl-sico"`, `"impl-sico-lis"`) are recognised by
+YelmoMirror but not yet implemented in Yelmo.jl; they error here.
+"""
+function parse_advection_scheme(solver::AbstractString)
+    s = String(solver)
+    s == "impl"        && return :upwind_implicit
+    s == "impl-lis"    && return :upwind_implicit
+    s == "expl"        && return :upwind_explicit
+    s == "expl-upwind" && return :upwind_explicit
+    s == "none"        && return :none
+    error("parse_advection_scheme: solver=\"$s\" is not implemented in Yelmo.jl. " *
+          "Supported: \"impl\" / \"impl-lis\", \"expl\" / \"expl-upwind\", \"none\". " *
+          "Other Fortran-Yelmo namelist values (\"impl-upwind\", \"expl-sico\", " *
+          "\"impl-sico\", \"impl-sico-lis\") are valid for YelmoMirror but not yet " *
+          "ported to native Yelmo.jl.")
+end
 
 """
     ImplicitAdvectionCache

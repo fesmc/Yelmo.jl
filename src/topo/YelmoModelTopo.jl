@@ -114,8 +114,13 @@ function topo_step!(y::YelmoModel, dt::Float64)
     interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
-        advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
-                       cfl_safety = y.p.yelmo.cfl_max)
+        scheme = parse_advection_scheme(y.p.ytopo.solver)
+        if scheme !== :none
+            advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
+                           scheme = scheme,
+                           cache  = y.tpo.scratch.adv_cache,
+                           cfl_safety = y.p.yelmo.cfl_max)
+        end
     end
 
     _apply_mask_ice_pass!(y, H_prev)
