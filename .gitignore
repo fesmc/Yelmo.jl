@@ -1,3 +1,4 @@
+*.DS_Store
 yelmo
 Manifest.toml
 plots
@@ -5,3 +6,4 @@ plots
 .claude/worktrees
 docs/build
 logs
+test/run01
