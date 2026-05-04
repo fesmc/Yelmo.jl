@@ -60,107 +60,11 @@ export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
 
 const _VISC_MIN = 1e5      # [Pa·yr] safety floor (Fortran line 386 / 651)
 
-# --- calc_strain_rate_horizontal_2D port (deformation.f90:1667) ---
-#
-# Compute aa-cell horizontal strain-rate derivatives `(dudx, dudy,
-# dvdx, dvdy)` from acx/acy face velocities. Uses centered second-order
-# finite differences in the interior, with one-sided second-order
-# corrections at ice margins (`f_ice(i,j) == 1` adjacent to
-# `f_ice(neigh) < 1`).
-#
-# The cross-term margin corrections (dudy / dvdx) are intentionally NOT
-# applied — Fortran line 1760-1761: "do not treat cross terms as
-# symmetry breaks down. Better to keep it clean."
-function _calc_strain_rate_horizontal_2D!(dudx::AbstractArray, dudy::AbstractArray,
-                                          dvdx::AbstractArray, dvdy::AbstractArray,
-                                          ux_int::AbstractArray, uy_int::AbstractArray,
-                                          fi_int::AbstractArray,
-                                          dx::Float64, dy::Float64,
-                                          Tx::Type{<:AbstractTopology},
-                                          Ty::Type{<:AbstractTopology})
-    Nx, Ny = size(dudx, 1), size(dudx, 2)
-
-    fill!(dudx, 0.0); fill!(dudy, 0.0)
-    fill!(dvdx, 0.0); fill!(dvdy, 0.0)
-
-    @inbounds for j in 1:Ny, i in 1:Nx
-        im1 = _neighbor_im1(i, Nx, Tx)
-        ip1 = _neighbor_ip1(i, Nx, Tx)
-        jm1 = _neighbor_jm1(j, Ny, Ty)
-        jp1 = _neighbor_jp1(j, Ny, Ty)
-
-        # Yelmo ux idx for Fortran ux(k, j) at array slot
-        # `_ip1_modular(k, Nx, Tx)` (i+1 under Bounded; mod1(i+1, Nx)
-        # under Periodic). Same for uy on the y-axis with `_jp1_modular`.
-        ux_i   = _ip1_modular(i,   Nx, Tx)
-        ux_im1 = _ip1_modular(im1, Nx, Tx)
-        ux_ip1 = _ip1_modular(ip1, Nx, Tx)
-        uy_j   = _jp1_modular(j,   Ny, Ty)
-        uy_jm1 = _jp1_modular(jm1, Ny, Ty)
-        uy_jp1 = _jp1_modular(jp1, Ny, Ty)
-
-        # Centered, second-order.
-        dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_im1, j, 1]) / (2 * dx)
-        dudy[i, j] = (ux_int[ux_i,   jp1, 1] - ux_int[ux_i, jm1, 1]) / (2 * dy)
-        dvdx[i, j] = (uy_int[ip1, uy_j, 1]   - uy_int[im1, uy_j, 1]) / (2 * dx)
-        dvdy[i, j] = (uy_int[i,   uy_jp1, 1] - uy_int[i,   uy_jm1, 1]) / (2 * dy)
-
-        # Margin one-sided corrections (Fortran line 1716 onward; the
-        # `if (.TRUE.) then` block is always active). Margin-guard
-        # semantics under Periodic (im1>1 / ip1<Nx tests for one-cell-
-        # from-boundary detection) are not reworked here — HOM-C is
-        # full-ice and doesn't exercise this branch. Revisit when
-        # calving lands.
-        # dudx (Fortran line 1721-1739).
-        if fi_int[i, j, 1] == 1.0 && fi_int[ip1, j, 1] < 1.0
-            if fi_int[im1, j, 1] == 1.0 && im1 > 1
-                im2 = im1 - 1
-                ux_im2 = _ip1_modular(im2, Nx, Tx)
-                dudx[i, j] = (1 * ux_int[ux_im2, j, 1] - 4 * ux_int[ux_im1, j, 1] +
-                              3 * ux_int[ux_i,   j, 1]) / (2 * dx)
-            else
-                dudx[i, j] = (ux_int[ux_i, j, 1] - ux_int[ux_im1, j, 1]) / dx
-            end
-        elseif fi_int[i, j, 1] < 1.0 && fi_int[ip1, j, 1] == 1.0
-            if ip1 < Nx
-                ip2 = ip1 + 1
-                if fi_int[ip2, j, 1] == 1.0
-                    ux_ip2 = _ip1_modular(ip2, Nx, Tx)
-                    dudx[i, j] = -(1 * ux_int[ux_ip2, j, 1] - 4 * ux_int[ux_ip1, j, 1] +
-                                   3 * ux_int[ux_i,   j, 1]) / (2 * dx)
-                else
-                    dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_i, j, 1]) / dx
-                end
-            else
-                dudx[i, j] = (ux_int[ux_ip1, j, 1] - ux_int[ux_i, j, 1]) / dx
-            end
-        end
-
-        # dvdy (Fortran line 1742-1758).
-        if fi_int[i, j, 1] == 1.0 && fi_int[i, jp1, 1] < 1.0
-            if fi_int[i, jm1, 1] == 1.0 && jm1 > 1
-                jm2 = jm1 - 1
-                uy_jm2 = _jp1_modular(jm2, Ny, Ty)
-                dvdy[i, j] = (1 * uy_int[i, uy_jm2, 1] - 4 * uy_int[i, uy_jm1, 1] +
-                              3 * uy_int[i, uy_j,   1]) / (2 * dy)
-            else
-                dvdy[i, j] = (uy_int[i, uy_j, 1] - uy_int[i, uy_jm1, 1]) / dy
-            end
-        elseif fi_int[i, j, 1] < 1.0 && fi_int[i, jp1, 1] == 1.0
-            if jp1 < Ny
-                jp2 = jp1 + 1
-                if fi_int[i, jp2, 1] == 1.0
-                    uy_jp2 = _jp1_modular(jp2, Ny, Ty)
-                    dvdy[i, j] = -(1 * uy_int[i, uy_jp2, 1] - 4 * uy_int[i, uy_jp1, 1] +
-                                   3 * uy_int[i, uy_j,   1]) / (2 * dy)
-                else
-                    dvdy[i, j] = (uy_int[i, uy_jp1, 1] - uy_int[i, uy_j, 1]) / dy
-                end
-            end
-        end
-    end
-    return nothing
-end
+# `_calc_strain_rate_horizontal_2D!` (port of deformation.f90:1667) was
+# moved to `src/dyn/deformation.jl` along with the velocity-Jacobian
+# kernels. The function is still in the YelmoModelDyn module scope here
+# (deformation.jl is included before viscosity.jl), so the call site in
+# `calc_visc_eff_3D_nodes!` below works unchanged.
 
 """
     calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,

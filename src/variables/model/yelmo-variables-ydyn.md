@@ -68,3 +68,19 @@
 | 64 | jvel_dzx          | xc, yc, zeta_ac  | 1/yr        | Velocity Jacobian component duzdx             |
 | 65 | jvel_dzy          | xc, yc, zeta_ac  | 1/yr        | Velocity Jacobian component duzdy             |
 | 66 | jvel_dzz          | xc, yc, zeta_ac  | 1/yr        | Velocity Jacobian component duzdz             |
+| 67 | strn_dxx          | xc, yc, zeta     | 1/yr        | Strain rate tensor component dxx              |
+| 68 | strn_dyy          | xc, yc, zeta     | 1/yr        | Strain rate tensor component dyy              |
+| 69 | strn_dxy          | xc, yc, zeta     | 1/yr        | Strain rate tensor component dxy              |
+| 70 | strn_dxz          | xc, yc, zeta     | 1/yr        | Strain rate tensor component dxz              |
+| 71 | strn_dyz          | xc, yc, zeta     | 1/yr        | Strain rate tensor component dyz              |
+| 72 | strn_de           | xc, yc, zeta     | 1/yr        | Effective strain rate                         |
+| 73 | strn_div          | xc, yc, zeta     | 1/yr        | Horizontal divergence                         |
+| 74 | strn_f_shear      | xc, yc, zeta     |             | Strain rate shear fraction                    |
+| 75 | strn2D_dxx        | xc, yc           | 1/yr        | 2D strain rate tensor component dxx           |
+| 76 | strn2D_dyy        | xc, yc           | 1/yr        | 2D strain rate tensor component dyy           |
+| 77 | strn2D_dxy        | xc, yc           | 1/yr        | 2D strain rate tensor component dxy           |
+| 78 | strn2D_dxz        | xc, yc           | 1/yr        | 2D strain rate tensor component dxz           |
+| 79 | strn2D_dyz        | xc, yc           | 1/yr        | 2D strain rate tensor component dyz           |
+| 80 | strn2D_de         | xc, yc           | 1/yr        | 2D effective strain rate                      |
+| 81 | strn2D_div        | xc, yc           | 1/yr        | 2D horizontal divergence                      |
+| 82 | strn2D_f_shear    | xc, yc           |             | 2D strain rate shear fraction                 |

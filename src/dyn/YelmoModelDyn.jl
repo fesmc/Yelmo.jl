@@ -16,10 +16,12 @@ solver dispatch with the Option C vertical-stagger convention +
 SSA Picard solver (Krylov+AMG inner linear solve) + hybrid SIA+SSA.
 Solver dispatch handles `solver = "fixed"` (no velocity update),
 `solver = "sia"` (Option C SIA wrapper, `calc_velocity_sia!`),
-`solver = "ssa"` (Picard iteration via `calc_velocity_ssa!`), and
-`solver = "hybrid"` (SIA shear + SSA basal sliding); DIVA / L1L2
-arrive in subsequent milestones (3e–3f). Velocity Jacobian, vertical
-velocity `uz`, and strain-rate tensor land in milestone 3h.
+`solver = "ssa"` (Picard iteration via `calc_velocity_ssa!`),
+`solver = "hybrid"` (SIA shear + SSA basal sliding), and
+`solver = "diva"` (depth-integrated viscosity approximation). L1L2
+will not be ported. Post-solver phases include the velocity Jacobian
+(`jvel.{dx*, dy*, dz*}`), vertical velocity (`uz`, `uz_star`), and
+the symmetrised strain-rate tensor (`strn`, `strn2D`) — milestone 3h.
 
 Vertical convention: 3D fields (`ux`, `ux_i`, `ATT`, `tau_xz`, …)
 are at Oceananigans `Center()` vertical staggering — interior layer
@@ -47,6 +49,10 @@ export dyn_step!,
        gq2d_nodes,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
+       calc_jacobian_vel_3D_uxyterms!,
+       calc_jacobian_vel_3D_uzterms!,
+       calc_strain_rate_tensor_jac_quad3D!,
+       calc_uz_3D_jac!, calc_uz_3D!, calc_uz_3D_aa!,
        set_ssa_masks!, _assemble_ssa_matrix!,
        Solver, SSASolver,
        _solve_ssa_linear!,
@@ -61,6 +67,11 @@ include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")
 include("basal_dragging.jl")
+# `deformation.jl` provides `_calc_strain_rate_horizontal_2D!` (used by
+# `viscosity.jl`'s `calc_visc_eff_3D_nodes!`) plus the velocity-Jacobian
+# kernels (`calc_jacobian_vel_3D_uxyterms!`, `_uzterms` to come). Must
+# load BEFORE viscosity.jl.
+include("deformation.jl")
 include("viscosity.jl")
 include("diagnostics.jl")
 include("integration.jl")
@@ -68,6 +79,10 @@ include("velocity_sia.jl")
 include("velocity_ssa.jl")
 # DIVA reuses helpers from velocity_ssa.jl — must load AFTER it.
 include("velocity_diva.jl")
+# Vertical velocity (uz, uz_star). Production routine `calc_uz_3D_jac!`
+# (uz_method = 3) plus error stubs for uz_method ∈ {1, 2}. Uses
+# `gq2d_interp_to_node` from quadrature.jl.
+include("velocity_uz.jl")
 
 # Cell-spacing helpers — local copies of the topo-module pattern.
 # Stretched grids are not yet supported; flag explicitly so an
@@ -108,7 +123,8 @@ Fortran's `calc_ydyn` body (`yelmo_dynamics.f90:48`):
 7. Underflow clip on `ux`/`uy`/`ux_bar`/`uy_bar` (milestone 3a,
    deferred).
 8. Velocity Jacobian + vertical velocity `uz` + strain-rate tensor
-   (milestone 3h, deferred).
+   (milestone 3h: `calc_jacobian_vel_3D_uxyterms!`, `calc_uz_3D_jac!`,
+   `calc_jacobian_vel_3D_uzterms!`, `calc_strain_rate_tensor_jac_quad3D!`).
 9. Diagnostics: ice flux, stress and velocity magnitudes, surface /
    basal velocity slices, basal-to-surface ratio `f_vbvs`, time
    derivative `duxydt` (milestone 3a, deferred).
@@ -295,8 +311,8 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         fill!(interior(y.dyn.uy_i_bar), 0.0)
     else
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
-              "Milestone 3e supports \"fixed\", \"sia\", \"ssa\", \"hybrid\", " *
-              "\"diva\". L1L2 lands in milestone 3f.")
+              "Supported solvers: \"fixed\", \"sia\", \"ssa\", \"hybrid\", \"diva\". " *
+              "L1L2 will not be ported in Yelmo.jl.")
     end
 
     # 7. Underflow clip on the velocity fields (matches Fortran's
@@ -306,10 +322,73 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     _clip_underflow!(y.dyn.ux_bar)
     _clip_underflow!(y.dyn.uy_bar)
 
-    # 9. Post-solver diagnostics (steps 8 / Jacobian + uz + strain rate
-    #    are deferred to milestone 3h).
+    # ---- 8. Velocity Jacobian + vertical velocity + strain-rate tensor ----
+    # Phase order matches Fortran `yelmo_dynamics.f90:218-258`:
+    #
+    #   8a. `calc_jacobian_vel_3D_uxyterms!`  — populates `jvel.dx*` /
+    #       `jvel.dy*` from the freshly-clipped `ux`/`uy`. Sigma-coordinate
+    #       corrections fold in `dzbdx`/`dzsdx` etc.
+    #   8b. `calc_uz_3D_jac!`                 — vertical velocity and
+    #       thermodynamic-corrected `uz_star` from continuity (uz_method=3
+    #       is the only ported option).
+    #   8c. `calc_jacobian_vel_3D_uzterms!`   — completes `jvel.dz*` from
+    #       the fresh `uz`.
+    #   8d. `calc_strain_rate_tensor_jac_quad3D!` — assembles the
+    #       symmetrised strain-rate tensor `strn` (3D) plus depth-averaged
+    #       `strn2D` from `jvel`.
+    zeta_aa = znodes(y.gt, Center())
+    zeta_ac = znodes(y.gt, Face())
     dx_g = _dx(y.g)
     dy_g = _dy(y.g)
+
+    calc_jacobian_vel_3D_uxyterms!(
+        y.dyn.jvel_dxx, y.dyn.jvel_dxy, y.dyn.jvel_dxz,
+        y.dyn.jvel_dyx, y.dyn.jvel_dyy, y.dyn.jvel_dyz,
+        y.dyn.ux, y.dyn.uy,
+        y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+        y.tpo.dzsdx, y.tpo.dzsdy, y.tpo.dzbdx, y.tpo.dzbdy,
+        zeta_aa, dx_g, dy_g)
+
+    # uz_method dispatch — only `3` (default) is ported.
+    uz_method = y.p.ydyn.uz_method
+    if uz_method == 3
+        calc_uz_3D_jac!(
+            y.dyn.uz, y.dyn.uz_star,
+            y.dyn.ux, y.dyn.uy,
+            y.dyn.jvel_dxx, y.dyn.jvel_dyy,
+            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+            y.bnd.smb_ref, y.tpo.bmb,
+            y.tpo.dHidt, y.tpo.dzsdt,
+            y.tpo.dzsdx, y.tpo.dzsdy, y.tpo.dzbdx, y.tpo.dzbdy,
+            zeta_aa, zeta_ac, dx_g, dy_g, y.p.ytopo.use_bmb)
+    elseif uz_method == 1
+        calc_uz_3D_aa!()   # raises informative error
+    elseif uz_method == 2
+        calc_uz_3D!()      # raises informative error
+    else
+        error("dyn_step!: ydyn.uz_method = $uz_method not recognised " *
+              "(supported: 3 = \"uz_jac\").")
+    end
+
+    calc_jacobian_vel_3D_uzterms!(
+        y.dyn.jvel_dzx, y.dyn.jvel_dzy, y.dyn.jvel_dzz,
+        y.dyn.uz,
+        y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+        y.tpo.dzsdx, y.tpo.dzsdy, y.tpo.dzbdx, y.tpo.dzbdy,
+        zeta_ac, dx_g, dy_g)
+
+    calc_strain_rate_tensor_jac_quad3D!(
+        y.dyn.strn_dxx, y.dyn.strn_dyy, y.dyn.strn_dxy, y.dyn.strn_dxz, y.dyn.strn_dyz,
+        y.dyn.strn_de,  y.dyn.strn_div, y.dyn.strn_f_shear,
+        y.dyn.strn2D_dxx, y.dyn.strn2D_dyy, y.dyn.strn2D_dxy, y.dyn.strn2D_dxz, y.dyn.strn2D_dyz,
+        y.dyn.strn2D_de,  y.dyn.strn2D_div, y.dyn.strn2D_f_shear,
+        y.dyn.jvel_dxx, y.dyn.jvel_dxy, y.dyn.jvel_dxz,
+        y.dyn.jvel_dyx, y.dyn.jvel_dyy, y.dyn.jvel_dyz,
+        y.dyn.jvel_dzx, y.dyn.jvel_dzy,
+        y.tpo.f_ice_dyn, y.tpo.f_grnd,
+        zeta_aa, y.p.ymat.de_max)
+
+    # 9. Post-solver diagnostics.
 
     # Ice flux on ac-staggered faces.
     calc_ice_flux!(y.dyn.qq_acx, y.dyn.qq_acy,
