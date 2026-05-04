@@ -45,7 +45,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded, Periodic
+using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using SparseArrays: SparseMatrixCSC, sparse
@@ -417,22 +417,17 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                dx::Real, dy::Real, beta_min::Real;
                                boundaries::Symbol=:bounded,
                                lateral_bc::AbstractString="floating")
+    # Wrapper: do halo fills + lift Field views to plain SubArrays +
+    # look up topology, then dispatch to the parametric kernel below.
+    # Same wrapper-+-parametric-kernel template as the dyn 3D series
+    # and the DIVA viscosity / helpers PRs (#45 / #47 / #48 / #49 /
+    # #50 / #51 / #52 / #53). The kernel sees concrete `Float64`
+    # scalars and topology subtypes as `Type` parameters, which lets
+    # the per-row `_ip1_modular` / `_jp1_modular` calls fold at
+    # compile time and the inner Field-read loops become alloc-free.
 
     # ---- Topology checks. ----
-    # Only Bounded / Periodic supported on each horizontal axis. The
-    # kernel handles all four combinations correctly because:
-    #   - Face-slot reads (ux, uy, beta, mask, taud, taul on faces; Nab
-    #     on FaceFaceCenter) use `_ip1_modular` / `_jp1_modular` which
-    #     dispatch to `mod1(i+1, Nx)` under Periodic-x and `i+1` under
-    #     Bounded-x.
-    #   - Cell-centre reads (Naa, Hi, Fi) use wrapped integer indices
-    #     `ip1`, `im1` that always wrap (Periodic-correct; Bounded
-    #     branches gate on `i == 1` / `i == Nx` to bypass the wrapped
-    #     reads when boundary rows fire instead of inner-SSA).
-    #   - Boundary-row branches at i == 1 / Nx / j == 1 / Ny guard with
-    #     `bcs[k] !== :periodic`, so under fully-periodic boundaries
-    #     they fall through to the inner-SSA stencil with the
-    #     wrapped-int neighbours.
+    # Only Bounded / Periodic supported on each horizontal axis.
     Tx_top = topology(visc_eff_int.grid, 1)
     Ty_top = topology(visc_eff_int.grid, 2)
     (Tx_top === Bounded || Tx_top === Periodic) || error(
@@ -443,12 +438,6 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
         "(got $(Ty_top)).")
 
     # Fill halos on every input the kernel reads with i±1 / j±1 stencils.
-    # Note: the kernel does NOT use halo reads for the column-index
-    # arithmetic — it computes `im1`, `ip1`, etc. as wrapped/clamped
-    # integers. The halo fills here are only for fields read through
-    # the standard halo path (none in PR-A.2 — kept here as a hook
-    # for symmetry with the SIA wrapper). Each input is filled to keep
-    # callers honest about boundary state.
     fill_halo_regions!(visc_eff_int)
     fill_halo_regions!(visc_ab)
     fill_halo_regions!(beta_acx)
@@ -483,6 +472,30 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
 
     Nx = size(Hi, 1)
     Ny = size(Hi, 2)
+
+    return _assemble_ssa_matrix_kernel!(
+        I_idx, J_idx, vals, b_vec, nnz_ref,
+        Ux, Uy, Bx, By, Naa, Nab, Mx, My, MF, Hi, Fi, Tdx, Tdy, Tlx, Tly,
+        Float64(dx), Float64(dy), Float64(beta_min),
+        Tx_top, Ty_top, Nx, Ny;
+        boundaries = boundaries, lateral_bc = lateral_bc)
+end
+
+# Compute kernel — concrete-typed scalars, parametric topology, plain
+# arrays. ParallelStencil-shape: all per-row work over flat arrays.
+function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
+                                       J_idx::Vector{Int},
+                                       vals::Vector{Float64},
+                                       b_vec::Vector{Float64},
+                                       nnz_ref::Ref{Int},
+                                       Ux, Uy, Bx, By, Naa, Nab, Mx, My, MF,
+                                       Hi, Fi, Tdx, Tdy, Tlx, Tly,
+                                       dx::Float64, dy::Float64, beta_min::Float64,
+                                       ::Type{Tx_top}, ::Type{Ty_top},
+                                       Nx::Int, Ny::Int;
+                                       boundaries::Symbol=:bounded,
+                                       lateral_bc::AbstractString="floating",
+        ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
     bcs = _ssa_resolve_bcs(boundaries)
 
