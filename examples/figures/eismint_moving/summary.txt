@@ -1,0 +1,10 @@
+EISMINT-1 moving 25-kyr benchmark — comparison summary
+============================================================
+Yelmo.jl wall-clock:  205.6 s
+Fortran  wall-clock:  28.8 s
+Speed ratio (Yelmo.jl / Fortran): 7.14×
+
+Yelmo.jl  max(H)         = 2930.07 m
+Mirror    max(H)         = 2925.64 m
+Yelmo.jl  max(uxy_bar)   = 58.23 m/yr
+Mirror    max(uxy_bar)   = 72.88 m/yr

@@ -35,6 +35,7 @@ const SPECS = Any[
     TroughBenchmark(:F17; dx_km=8.0),
     HOMCBenchmark(:C; L_km=80.0, dx_km=2.0),
     MISMIP3DBenchmark(:Stnd; dx_km=16.0),
+    EISMINT1MovingBenchmark(),    # 50 km, 25 kyr Mirror fixture (≈3-5 min)
     # Future BenchmarkSpec entries get pushed here.
 ]
 
@@ -45,9 +46,10 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 # emits BOTH the analytical IC (t=0) and the YelmoMirror reference
 # (t=500) so the lockstep test can compare against a Fortran-driven
 # end-state while the standalone trajectory test still seeds from t=0.
-_default_out_times(::AbstractBenchmark) = [1000.0]
-_default_out_times(::HOMCBenchmark)     = [0.0]
-_default_out_times(::MISMIP3DBenchmark) = [0.0, 500.0]
+_default_out_times(::AbstractBenchmark)         = [1000.0]
+_default_out_times(::HOMCBenchmark)             = [0.0]
+_default_out_times(::MISMIP3DBenchmark)         = [0.0, 500.0]
+_default_out_times(::EISMINT1MovingBenchmark)   = [25000.0]
 
 # MISMIP3D ATT-ramp fixture parameters. Compressed Pattyn-2017 protocol
 # pivoted around the existing Stnd baseline `rf_const = 3.1536e-18`
