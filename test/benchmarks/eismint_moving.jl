@@ -306,12 +306,70 @@ function write_fixture!(b::EISMINT1MovingBenchmark, path::AbstractString;
     return [path]
 end
 
-# Stub — YelmoMirror path lands in C5b alongside the lockstep test.
+# YelmoMirror fixture writer: drive Fortran from the EISMINT-moving
+# IC + namelist to `t_out` (e.g. 25_000 yr), write the restart to
+# `path`, then append performance metadata as NetCDF attributes so the
+# lockstep test can compare wall-clock against the Yelmo.jl run.
 function _write_eismint_moving_mirror_fixture!(b::EISMINT1MovingBenchmark,
                                                  path::AbstractString,
                                                  t_out::Float64)
-    error("_write_eismint_moving_mirror_fixture!: YelmoMirror branch not yet " *
-          "implemented (lands with the lockstep test in C5b).")
+    isfile(b.namelist_path) || error(
+        "EISMINT1MovingBenchmark.write_fixture!: namelist not found at " *
+        "$(b.namelist_path).")
+
+    spec = BenchmarkSpec(
+        name           = _spec_name(b),
+        namelist_path  = b.namelist_path,
+        grid           = (xc = b.xc, yc = b.yc, grid_name = "EISMINT"),
+        time_init      = 0.0,
+        end_time       = t_out,
+        output_times   = [t_out],
+        # Fortran outer-loop dt; matches `&ctrl dtt = 100.0` in the
+        # spec namelist. The internal adaptive PC sub-steps inside.
+        dt             = 100.0,
+        setup_initial_state! = (ymirror, t) ->
+            _setup_eismint_moving_initial_state!(ymirror, b, t),
+    )
+
+    fixtures_dir = dirname(path)
+    mkpath(fixtures_dir)
+    isfile(path) && rm(path)
+
+    # Time the YelmoMirror trajectory.
+    wall_clock_start = time()
+    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+                                  overwrite = true)
+    wall_clock_s = time() - wall_clock_start
+
+    src = paths[1]
+    if src != path
+        mv(src, path; force = true)
+        paths = [path]
+    end
+
+    # Append performance metadata to the fixture so the lockstep test
+    # can read Mirror wall-clock back without rerunning Fortran. CPU
+    # info is best-effort (Sys.cpu_info() returns vendor-specific
+    # strings; we keep just what's portable).
+    cpu_info = try
+        first(Sys.cpu_info()).model
+    catch
+        "unknown"
+    end
+    NCDataset(path, "a") do ds
+        ds.attrib["mirror_wallclock_seconds"] = wall_clock_s
+        ds.attrib["mirror_t_init"]            = 0.0
+        ds.attrib["mirror_t_end"]             = t_out
+        ds.attrib["mirror_dt_outer_yr"]       = spec.dt
+        ds.attrib["mirror_n_outer_steps"]     = Int(round(t_out / spec.dt))
+        ds.attrib["mirror_julia_version"]     = string(VERSION)
+        ds.attrib["mirror_cpu_model"]         = cpu_info
+        ds.attrib["mirror_n_julia_threads"]   = Threads.nthreads()
+    end
+
+    @info "EISMINT-moving Mirror fixture written" path t_out_yr=t_out wall_clock_s
+
+    return paths
 end
 
 # ----------------------------------------------------------------------
