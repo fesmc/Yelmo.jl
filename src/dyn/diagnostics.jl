@@ -25,7 +25,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded, Periodic
+using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 export calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
@@ -128,27 +128,54 @@ the same horizontal grid as `umag`.
 Port of `yelmo_tools.f90:248 calc_magnitude_from_staggered`.
 """
 function calc_magnitude_from_staggered!(umag, u, v, f_ice)
+    # Wrapper: fill halos on the staggered face fields, lift Field
+    # views to plain SubArrays, look up topology, dispatch into the
+    # parametric kernel below. Same wrapper-+-parametric-kernel template
+    # as the dyn 3D series (#45 / #47 / #48 / #49 / #50) and the DIVA
+    # viscosity refactor (#51).
     fill_halo_regions!(u)
     fill_halo_regions!(v)
 
-    M = interior(umag)
+    M  = interior(umag)
+    Ux = interior(u)
+    Uy = interior(v)
+    Fi = interior(f_ice)
     Nx = size(M, 1)
     Ny = size(M, 2)
     Nz = size(M, 3)
 
+    Tx_top = topology(umag.grid, 1)
+    Ty_top = topology(umag.grid, 2)
+
+    _calc_magnitude_from_staggered_kernel!(M, Ux, Uy, Fi,
+                                           Tx_top, Ty_top, Nx, Ny, Nz)
+    return umag
+end
+
+# Compute kernel — parametric topology, plain arrays, no Field accesses.
+# Under Bounded the i+1 / j+1 face slots are in-bounds (face fields
+# have Nx+1 / Ny+1 columns), under Periodic they wrap modularly via
+# `_ip1_modular` / `_jp1_modular`.
+function _calc_magnitude_from_staggered_kernel!(
+        M, Ux, Uy, Fi,
+        ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
+
     fill!(M, 0.0)
 
     @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
-        if f_ice[i, j, 1] == 1.0
-            unow = 0.5 * (u[i,   j,   k] + u[i+1, j,   k])
-            vnow = 0.5 * (v[i,   j,   k] + v[i,   j+1, k])
+        if Fi[i, j, 1] == 1.0
+            ip1 = _ip1_modular(i, Nx, Tx)
+            jp1 = _jp1_modular(j, Ny, Ty)
+            unow = 0.5 * (Ux[i,   j,   k] + Ux[ip1, j,   k])
+            vnow = 0.5 * (Uy[i,   j,   k] + Uy[i,   jp1, k])
             abs(unow) < TOL_UNDERFLOW && (unow = 0.0)
             abs(vnow) < TOL_UNDERFLOW && (vnow = 0.0)
             mag = sqrt(unow * unow + vnow * vnow)
             M[i, j, k] = abs(mag) < TOL_UNDERFLOW ? 0.0 : mag
         end
     end
-    return umag
+    return nothing
 end
 
 """
