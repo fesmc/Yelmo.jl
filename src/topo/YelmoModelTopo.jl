@@ -26,6 +26,10 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel,
 import ..YelmoCore: topo_step!
 
 export topo_step!, advect_tracer!,
+       advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!,
+       ImplicitAdvectionCache, init_advection_cache,
+       update_advection_matrix!, update_advection_operator!,
+       solve_advection!,
        apply_tendency!, mbal_tendency!, resid_tendency!,
        calc_f_ice!,
        calc_H_grnd!, determine_grounded_fractions!,
@@ -110,8 +114,13 @@ function topo_step!(y::YelmoModel, dt::Float64)
     interior(y.tpo.H_ice_n) .= H_prev
 
     if !y.p.ytopo.topo_fixed
-        advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
-                       cfl_safety = y.p.yelmo.cfl_max)
+        scheme = parse_advection_scheme(y.p.ytopo.solver)
+        if scheme !== :none
+            advect_tracer!(y.tpo.H_ice, y.dyn.ux_bar, y.dyn.uy_bar, dt;
+                           scheme = scheme,
+                           cache  = y.tpo.scratch.adv_cache,
+                           cfl_safety = y.p.yelmo.cfl_max)
+        end
     end
 
     _apply_mask_ice_pass!(y, H_prev)

@@ -118,11 +118,20 @@ function calving_step!(y::YelmoModel, dt::Float64)
                          y.tpo.f_grnd_acx, y.tpo.f_grnd_acy,
                          y.bnd.z_bed, y.bnd.z_sl)
 
-    # 6. Advect lsf at w = u_bar + cr.
-    lsf_update!(y.tpo.lsf,
-                y.dyn.ux_bar, y.dyn.uy_bar,
-                y.tpo.cr_acx, y.tpo.cr_acy, dt;
-                cfl_safety = y.p.yelmo.cfl_max)
+    # 6. Advect lsf at w = u_bar + cr. Reuses the H_ice advection
+    # cache: the level-set is advected at a *different* velocity
+    # (`w = u_bar + cr`) than H_ice (`u_bar`), so the cached operator
+    # gets refreshed twice per step regardless. Sharing the workspace
+    # storage still saves the per-cache allocation.
+    scheme = parse_advection_scheme(y.p.ytopo.solver)
+    if scheme !== :none
+        lsf_update!(y.tpo.lsf,
+                    y.dyn.ux_bar, y.dyn.uy_bar,
+                    y.tpo.cr_acx, y.tpo.cr_acy, dt;
+                    scheme = scheme,
+                    cache  = y.tpo.scratch.adv_cache,
+                    cfl_safety = y.p.yelmo.cfl_max)
+    end
 
     # 7. Above-SL pin.
     L  = interior(y.tpo.lsf)

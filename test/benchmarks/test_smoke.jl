@@ -120,6 +120,9 @@ const _NX   = length(_SPEC.xc)   # 31
         for grp in (:tpo, :bnd)
             nt = getfield(y, grp)
             for k in keys(nt)
+                # Skip the `:scratch` substruct (per-component solver
+                # scratch, not Fields). Same pattern as YelmoIO uses.
+                k === :scratch && continue
                 arr = interior(getfield(nt, k))
                 @test !any(isnan, arr)
                 @test !any(isinf, arr)
