@@ -3,6 +3,11 @@ module Yelmo
 # Sub-modules
 include("YelmoMeta.jl")
 include("YelmoConst.jl")
+# `timing.jl` defines `YelmoTimer` + `@timed_section` and lives at the
+# top of `Yelmo`. Loaded BEFORE `YelmoCore.jl` so the `YelmoModel`
+# struct can carry a `timer::YelmoTimer` field, and BEFORE the per-phase
+# modules so they can use `@timed_section` at their call sites.
+include("timing.jl")
 include("YelmoPar.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
@@ -23,6 +28,7 @@ include("YelmoIO.jl")
 
 using .YelmoMeta
 using .YelmoConst
+using .YelmoTiming
 using .YelmoPar
 using .YelmoSolvers
 using .YelmoIntegration
@@ -142,5 +148,8 @@ export write_output!
 # Adaptive timestepping (timestepping.jl)
 export PCScheme, HEUN, FE_SBE, AB_SAM
 export PIController, PI42
+
+# Timing scaffold (timing.jl)
+export YelmoTimer, @timed_section, reset_timings!, print_timings
 
 end # module

@@ -188,9 +188,10 @@ function Yelmo.YelmoModel(b::AbstractBenchmark, t::Real;
     # Default-positional struct constructor (NOT the `restart_file` /
     # `b::AbstractBenchmark` keyword overloads; we want the raw field
     # constructor exposed by the mutable struct definition itself).
+    timer = Yelmo.YelmoTimer(enabled = p.yelmo.timing)
     y = Yelmo.YelmoCore.YelmoModel(alias, rundir, Float64(t), p, c,
                                    g, gt, gr, v_meta,
-                                   bnd, dta, dyn, mat, thrm, tpo)
+                                   bnd, dta, dyn, mat, thrm, tpo, timer)
 
     # Default mask_ice to all-dynamic (the file-based loader does the
     # same before calling load_state!).

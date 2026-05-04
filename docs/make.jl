@@ -9,6 +9,7 @@ makedocs(
         Yelmo,
         Yelmo.YelmoMeta,
         Yelmo.YelmoConst,
+        Yelmo.YelmoTiming,
         Yelmo.YelmoPar,
         Yelmo.YelmoModelPar,
         Yelmo.YelmoCore,
@@ -35,6 +36,7 @@ makedocs(
             "Stepping the model"  => "usage/stepping.md",
             "Output and NetCDF"   => "usage/io.md",
             "Comparing states"    => "usage/comparing.md",
+            "Timing"              => "usage/timing.md",
         ],
         "Physics" => [
             "Overview"             => "physics/index.md",

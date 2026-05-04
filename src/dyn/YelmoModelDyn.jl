@@ -37,6 +37,7 @@ using Oceananigans.BoundaryConditions: fill_halo_regions!
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
 using ..YelmoSolvers: Solver, SSASolver
 using ..YelmoIntegration: vert_int_trapz_boundary!
+using ..YelmoTiming: @timed_section
 
 import ..YelmoCore: dyn_step!
 
@@ -208,7 +209,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         # NOT in this vector and are handled explicitly inside the
         # wrapper / kernel.
         zeta_c = znodes(y.gt, Center())
-        calc_velocity_sia!(y.dyn.ux_i, y.dyn.uy_i,
+        @timed_section y :dyn_sia calc_velocity_sia!(y.dyn.ux_i, y.dyn.uy_i,
                            y.dyn.ux_i_bar, y.dyn.uy_i_bar,
                            y.dyn.scratch.ux_i_s, y.dyn.scratch.uy_i_s,
                            y.dyn.scratch.sia_tau_xz,
@@ -341,7 +342,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     dx_g = _dx(y.g)
     dy_g = _dy(y.g)
 
-    calc_jacobian_vel_3D_uxyterms!(
+    @timed_section y :dyn_jacobian_uxy calc_jacobian_vel_3D_uxyterms!(
         y.dyn.jvel_dxx, y.dyn.jvel_dxy, y.dyn.jvel_dxz,
         y.dyn.jvel_dyx, y.dyn.jvel_dyy, y.dyn.jvel_dyz,
         y.dyn.ux, y.dyn.uy,
@@ -352,7 +353,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     # uz_method dispatch — only `3` (default) is ported.
     uz_method = y.p.ydyn.uz_method
     if uz_method == 3
-        calc_uz_3D_jac!(
+        @timed_section y :dyn_uz calc_uz_3D_jac!(
             y.dyn.uz, y.dyn.uz_star,
             y.dyn.ux, y.dyn.uy,
             y.dyn.jvel_dxx, y.dyn.jvel_dyy,
@@ -370,14 +371,14 @@ function dyn_step!(y::YelmoModel, dt::Float64)
               "(supported: 3 = \"uz_jac\").")
     end
 
-    calc_jacobian_vel_3D_uzterms!(
+    @timed_section y :dyn_jacobian_uz calc_jacobian_vel_3D_uzterms!(
         y.dyn.jvel_dzx, y.dyn.jvel_dzy, y.dyn.jvel_dzz,
         y.dyn.uz,
         y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
         y.tpo.dzsdx, y.tpo.dzsdy, y.tpo.dzbdx, y.tpo.dzbdy,
         zeta_ac, dx_g, dy_g)
 
-    calc_strain_rate_tensor_jac_quad3D!(
+    @timed_section y :dyn_strain calc_strain_rate_tensor_jac_quad3D!(
         y.dyn.strn_dxx, y.dyn.strn_dyy, y.dyn.strn_dxy, y.dyn.strn_dxz, y.dyn.strn_dyz,
         y.dyn.strn_de,  y.dyn.strn_div, y.dyn.strn_f_shear,
         y.dyn.strn2D_dxx, y.dyn.strn2D_dyy, y.dyn.strn2D_dxy, y.dyn.strn2D_dxz, y.dyn.strn2D_dyz,
