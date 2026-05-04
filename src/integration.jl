@@ -1,11 +1,14 @@
 # ----------------------------------------------------------------------
-# Shared depth-integration utilities for the dyn module.
+# Shared depth-integration utilities for Yelmo.jl. Lives at the top
+# level (not inside any sub-module) so that both `dyn` and `mat` (and
+# any future consumer) can depend on it without an inter-module
+# layering smell. Mirrors the `YelmoSolvers` pattern in `dyn/solvers.jl`.
 #
 #   - `vert_int_trapz_boundary!` — trapezoidal ∫₀¹ var(ζ) dζ over a 3D
 #     field that is `Center()`-staggered in the vertical, with explicit
 #     2D bed (zeta = 0) and surface (zeta = 1) boundary values. Used by
 #     both the SIA wrapper (depth-average velocity) and the SSA viscosity
-#     pipeline (`calc_visc_eff_int!`).
+#     pipeline (`calc_visc_eff_int!`), and by the upcoming `mat` module.
 #
 # The helper is unit-agnostic: it returns the pure depth integral over
 # zeta (no thickness multiplication, no floor). Callers that need
@@ -17,11 +20,18 @@
 # the bed and surface boundary values explicitly to cover the full
 # [0, 1] interval. Otherwise the `[0, zeta_c[1]]` and `[zeta_c[Nz], 1]`
 # end-strips are silently dropped (e.g. for Nz = 4 with uniform spacing,
-# the integrator covers only `(Nz - 1) / Nz = 0.75` of the column —
-# the bug fixed in commit 2 of this PR).
+# the integrator covers only `(Nz - 1) / Nz = 0.75` of the column).
 # ----------------------------------------------------------------------
 
+module YelmoIntegration
+
 export vert_int_trapz_boundary!
+
+# Local copy of the underflow tolerance — same value as
+# `YelmoModelDyn`'s `TOL_UNDERFLOW` (`src/dyn/diagnostics.jl`). Mirrors
+# the existing local-const pattern in `velocity_uz.jl` /
+# `velocity_ssa.jl`.
+const TOL_UNDERFLOW = 1e-15
 
 """
     vert_int_trapz_boundary!(out2D, var3D, var_bed, var_surf, zeta_c)
@@ -89,3 +99,5 @@ quantity in physical units multiply by `H_ice` themselves (e.g. SSA's
     end
     return out2D
 end
+
+end # module YelmoIntegration
