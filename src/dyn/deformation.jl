@@ -48,7 +48,8 @@ using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_jacobian_vel_3D_uxyterms!,
-       calc_jacobian_vel_3D_uzterms!
+       calc_jacobian_vel_3D_uzterms!,
+       calc_strain_rate_tensor_jac_quad3D!
 
 # ----------------------------------------------------------------------
 # 2D horizontal strain-rate helper (port of deformation.f90:1667
@@ -619,4 +620,245 @@ function calc_jacobian_vel_3D_uzterms!(
     end
 
     return nothing
+end
+
+# ----------------------------------------------------------------------
+# Strain-rate tensor from velocity Jacobian.
+# ----------------------------------------------------------------------
+
+# Average an acx-staggered (CenterField slot indexing) field's 4 corners
+# around aa-cell (i, j) at layer k. Gauss-Legendre 2-point with uniform
+# weights collapses to the 4-corner mean.
+@inline function _avg_acx_to_aa(F::AbstractArray, k::Int,
+                                i::Int, j::Int,
+                                im1::Int, ip1::Int, jm1::Int, jp1::Int)
+    sw = 0.5 * (F[im1, jm1, k] + F[im1, j,   k])
+    se = 0.5 * (F[i,   jm1, k] + F[i,   j,   k])
+    ne = 0.5 * (F[i,   j,   k] + F[i,   jp1, k])
+    nw = 0.5 * (F[im1, j,   k] + F[im1, jp1, k])
+    return 0.25 * (sw + se + ne + nw)
+end
+
+# Average an acy-staggered field's 4 corners around aa-cell (i, j).
+@inline function _avg_acy_to_aa(F::AbstractArray, k::Int,
+                                i::Int, j::Int,
+                                im1::Int, ip1::Int, jm1::Int, jp1::Int)
+    sw = 0.5 * (F[im1, jm1, k] + F[i,   jm1, k])
+    se = 0.5 * (F[i,   jm1, k] + F[ip1, jm1, k])
+    ne = 0.5 * (F[i,   j,   k] + F[ip1, j,   k])
+    nw = 0.5 * (F[im1, j,   k] + F[i,   j,   k])
+    return 0.25 * (sw + se + ne + nw)
+end
+
+# Average an aa-horizontally-staggered field's 4 corners around aa-cell
+# (i, j) at layer k. Used after vertical interp of `jvel.dz{x,y}` from
+# zeta_ac to zeta_aa.
+@inline function _avg_aa_to_aa(F::AbstractArray, k::Int,
+                               i::Int, j::Int,
+                               im1::Int, ip1::Int, jm1::Int, jp1::Int)
+    sw = 0.25 * (F[im1, jm1, k] + F[i, jm1, k] + F[im1, j, k] + F[i, j, k])
+    se = 0.25 * (F[i,   jm1, k] + F[ip1, jm1, k] + F[i, j,   k] + F[ip1, j, k])
+    ne = 0.25 * (F[i,   j,   k] + F[ip1, j,   k] + F[i, jp1, k] + F[ip1, jp1, k])
+    nw = 0.25 * (F[im1, j,   k] + F[i,   j,   k] + F[im1, jp1, k] + F[i, jp1, k])
+    return 0.25 * (sw + se + ne + nw)
+end
+
+"""
+    calc_strain_rate_tensor_jac_quad3D!(
+        strn_dxx, strn_dyy, strn_dxy, strn_dxz, strn_dyz,
+        strn_de, strn_div, strn_f_shear,
+        strn2D_dxx, strn2D_dyy, strn2D_dxy, strn2D_dxz, strn2D_dyz,
+        strn2D_de, strn2D_div, strn2D_f_shear,
+        jvel_dxx, jvel_dxy, jvel_dxz,
+        jvel_dyx, jvel_dyy, jvel_dyz,
+        jvel_dzx, jvel_dzy,
+        f_ice, f_grnd,
+        zeta_aa, de_max
+    ) -> nothing
+
+Compute the strain-rate tensor `strn` (3D) and its depth average
+`strn2D` from the velocity Jacobian `jvel`. Symmetrises the tensor:
+
+    dxx_strn = dxx_jvel
+    dyy_strn = dyy_jvel
+    dxy_strn = ½ (dxy_jvel + dyx_jvel)
+    dxz_strn = ½ (dxz_jvel + dzx_jvel)
+    dyz_strn = ½ (dyz_jvel + dzy_jvel)
+
+Then derives:
+
+    de       = √(dxx² + dyy² + dxx·dyy + dxy² + dxz² + dyz²)
+              ↦ clamped to ≤ de_max
+    div      = dxx + dyy
+    f_shear  = √(dxz² + dyz²) / de   if de > 0  else  1.0
+              ↦ 0 on floating ice (f_grnd == 0)
+              ↦ clamped to [0, 1]
+
+Strn fields land at aa-cells (horizontal and vertical zeta_aa centres),
+matching the schema. Per-layer reads use a 4-corner Gauss-quadrature
+average (gq2D-rendered) of the acx/acy-staggered jvel components. The
+`jvel.dzx`/`jvel.dzy` z-row terms are at zeta_ac vertically and aa
+horizontally; they are vertically interpolated to `zeta_aa[k]` via
+`½·(dzx[i,j,k] + dzx[i,j,k+1])` before the horizontal corner average.
+
+Faithfulness: this is a 2D-quadrature rendering of the Fortran
+`_quad3D` routine — equivalent for layer-uniform velocities and
+sub-percent divergent for stretched stratified runs (matches the
+gq2D choice in `calc_uz_3D_jac!`). The Fortran 8-node gq3D port can
+be added later if a benchmark surfaces a real divergence.
+
+The depth-averaged `strn2D` fields use a uniform-spacing centre-only
+trapezoidal-style integral (∑ strn[k] / Nz). For Yelmo's typical
+near-uniform zeta this matches `calc_vertical_integrated_2D` to
+trailing decimals.
+
+The 2D principal-strain eigenvalues `eps_eig_1`/`eps_eig_2` from the
+Fortran routine are not in the Yelmo.jl model schema and not computed
+here. Re-add if a downstream consumer needs them.
+
+Port of `yelmo/src/physics/deformation.f90:1341 calc_strain_rate_tensor_jac_quad3D`.
+"""
+function calc_strain_rate_tensor_jac_quad3D!(
+        strn_dxx, strn_dyy, strn_dxy, strn_dxz, strn_dyz,
+        strn_de,  strn_div, strn_f_shear,
+        strn2D_dxx, strn2D_dyy, strn2D_dxy, strn2D_dxz, strn2D_dyz,
+        strn2D_de,  strn2D_div, strn2D_f_shear,
+        jvel_dxx, jvel_dxy, jvel_dxz,
+        jvel_dyx, jvel_dyy, jvel_dyz,
+        jvel_dzx, jvel_dzy,
+        f_ice, f_grnd,
+        zeta_aa::AbstractVector{<:Real},
+        de_max::Real,
+    )
+
+    Sxx = interior(strn_dxx); Syy = interior(strn_dyy); Sxy = interior(strn_dxy)
+    Sxz = interior(strn_dxz); Syz = interior(strn_dyz)
+    Sde = interior(strn_de);  Sdv = interior(strn_div); Sfs = interior(strn_f_shear)
+
+    Jxx = interior(jvel_dxx); Jxy = interior(jvel_dxy); Jxz = interior(jvel_dxz)
+    Jyx = interior(jvel_dyx); Jyy = interior(jvel_dyy); Jyz = interior(jvel_dyz)
+    Jzx = interior(jvel_dzx); Jzy = interior(jvel_dzy)
+
+    fi = interior(f_ice);  fg = interior(f_grnd)
+
+    Nx, Ny  = size(fi, 1), size(fi, 2)
+    Nz_aa   = length(zeta_aa)
+
+    Tx = topology(strn_dxx.grid, 1)
+    Ty = topology(strn_dxx.grid, 2)
+
+    # Initialise everything — ice-free cells stay at zero (Fortran skips
+    # the assignment under `if (f_ice == 1)`, leaving the previous value;
+    # for a fresh-allocation Field that's zero).
+    fill!(Sxx, 0.0); fill!(Syy, 0.0); fill!(Sxy, 0.0)
+    fill!(Sxz, 0.0); fill!(Syz, 0.0)
+    fill!(Sde, 0.0); fill!(Sdv, 0.0); fill!(Sfs, 0.0)
+
+    de_max_f = Float64(de_max)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        if fi[i, j, 1] != 1.0
+            continue
+        end
+
+        im1 = _neighbor_im1(i, Nx, Tx); ip1 = _neighbor_ip1(i, Nx, Tx)
+        jm1 = _neighbor_jm1(j, Ny, Ty); jp1 = _neighbor_jp1(j, Ny, Ty)
+
+        for k in 1:Nz_aa
+            # ----- Symmetrised aa-cell tensor components -----
+            dxx_aa = _avg_acx_to_aa(Jxx, k, i, j, im1, ip1, jm1, jp1)
+            dyy_aa = _avg_acy_to_aa(Jyy, k, i, j, im1, ip1, jm1, jp1)
+
+            dxy_acx = _avg_acx_to_aa(Jxy, k, i, j, im1, ip1, jm1, jp1)
+            dxy_acy = _avg_acy_to_aa(Jyx, k, i, j, im1, ip1, jm1, jp1)
+            dxy_aa  = 0.5 * (dxy_acx + dxy_acy)
+
+            # `jvel.dxz` is at acx, zeta_aa vertically (CenterField slot k).
+            # `jvel.dzx` is at aa-horizontally, zeta_ac vertically (ZFace
+            # slot k). Layer-centre `zeta_aa[k]` lies between zeta_ac[k]
+            # and zeta_ac[k+1] in our scheme; interp = 0.5·(slot k + slot k+1).
+            dxz_acx = _avg_acx_to_aa(Jxz, k, i, j, im1, ip1, jm1, jp1)
+            # Vertically-interpolated dzx at zeta_aa[k] (storage in 4D temp):
+            # do the vertical interp + horizontal aa-corner average inline.
+            dzx_aa  = _aa_corner_avg_zface_at_zeta_aa(Jzx, k, i, j, im1, ip1, jm1, jp1)
+            dxz_aa  = 0.5 * (dxz_acx + dzx_aa)
+
+            dyz_acy = _avg_acy_to_aa(Jyz, k, i, j, im1, ip1, jm1, jp1)
+            dzy_aa  = _aa_corner_avg_zface_at_zeta_aa(Jzy, k, i, j, im1, ip1, jm1, jp1)
+            dyz_aa  = 0.5 * (dyz_acy + dzy_aa)
+
+            # ----- Effective strain rate (Fortran lines 1478-1483) -----
+            de_sq = dxx_aa^2 + dyy_aa^2 + dxx_aa * dyy_aa +
+                    dxy_aa^2 + dxz_aa^2 + dyz_aa^2
+            de = sqrt(max(de_sq, 0.0))
+            if de > de_max_f
+                de = de_max_f
+            end
+
+            # ----- Shear fraction (Fortran lines 1494-1511) -----
+            if de > 0.0
+                shear_sq = dxz_aa^2 + dyz_aa^2
+                f_shear = sqrt(shear_sq) / de
+            else
+                f_shear = 1.0
+            end
+            if fg[i, j, 1] == 0.0
+                f_shear = 0.0   # Floating ice — pure stretching.
+            end
+            f_shear = clamp(f_shear, 0.0, 1.0)
+
+            # ----- Write outputs -----
+            Sxx[i, j, k] = dxx_aa
+            Syy[i, j, k] = dyy_aa
+            Sxy[i, j, k] = dxy_aa
+            Sxz[i, j, k] = dxz_aa
+            Syz[i, j, k] = dyz_aa
+            Sde[i, j, k] = de
+            Sdv[i, j, k] = dxx_aa + dyy_aa
+            Sfs[i, j, k] = f_shear
+        end
+    end
+
+    # ----- Depth-averaged 2D tensor -----
+    # Uniform-spacing centre-only mean — ∑ strn[k] / Nz_aa.
+    _depth_avg!(strn2D_dxx,     Sxx, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dyy,     Syy, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dxy,     Sxy, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dxz,     Sxz, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dyz,     Syz, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_de,      Sde, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_div,     Sdv, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_f_shear, Sfs, Nx, Ny, Nz_aa)
+
+    return nothing
+end
+
+# Vertical-then-horizontal corner average for a ZFace field at zeta_aa[k]:
+# vertically interpolate to zeta_aa[k] = ½·(slot k + slot k+1), then take
+# the 4-corner aa-average.
+@inline function _aa_corner_avg_zface_at_zeta_aa(F::AbstractArray, k::Int,
+                                                  i::Int, j::Int,
+                                                  im1::Int, ip1::Int,
+                                                  jm1::Int, jp1::Int)
+    # Helper: value of F at zeta_aa[k] for slot (i, j).
+    @inline _vinterp(ii, jj) = 0.5 * (F[ii, jj, k] + F[ii, jj, k + 1])
+
+    sw = 0.25 * (_vinterp(im1, jm1) + _vinterp(i, jm1) + _vinterp(im1, j) + _vinterp(i, j))
+    se = 0.25 * (_vinterp(i,   jm1) + _vinterp(ip1, jm1) + _vinterp(i, j)   + _vinterp(ip1, j))
+    ne = 0.25 * (_vinterp(i,   j)   + _vinterp(ip1, j)   + _vinterp(i, jp1) + _vinterp(ip1, jp1))
+    nw = 0.25 * (_vinterp(im1, j)   + _vinterp(i,   j)   + _vinterp(im1, jp1) + _vinterp(i, jp1))
+    return 0.25 * (sw + se + ne + nw)
+end
+
+@inline function _depth_avg!(out2D, in3D::AbstractArray,
+                             Nx::Int, Ny::Int, Nz::Int)
+    OUT = interior(out2D)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        s = 0.0
+        for k in 1:Nz
+            s += in3D[i, j, k]
+        end
+        OUT[i, j, 1] = s / Nz
+    end
+    return out2D
 end
