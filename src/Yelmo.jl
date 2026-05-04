@@ -111,6 +111,7 @@ export gq2d_nodes
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!
 export stagger_visc_aa_ab!
 export calc_jacobian_vel_3D_uxyterms!
+export calc_jacobian_vel_3D_uzterms!
 export calc_uz_3D_jac!, calc_uz_3D!, calc_uz_3D_aa!
 export set_ssa_masks!
 export picard_relax_visc!, picard_relax_vel!

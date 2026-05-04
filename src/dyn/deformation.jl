@@ -47,7 +47,8 @@
 using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
-export calc_jacobian_vel_3D_uxyterms!
+export calc_jacobian_vel_3D_uxyterms!,
+       calc_jacobian_vel_3D_uzterms!
 
 # ----------------------------------------------------------------------
 # 2D horizontal strain-rate helper (port of deformation.f90:1667
@@ -413,6 +414,207 @@ function calc_jacobian_vel_3D_uxyterms!(
             Dxy[i, j, k] += c_y_acx * Dxz[i, j, k]
             Dyx[i, j, k] += c_x_acy * Dyz[i, j, k]
             Dyy[i, j, k] += c_y     * Dyz[i, j, k]
+        end
+    end
+
+    return nothing
+end
+
+# ----------------------------------------------------------------------
+# Velocity Jacobian — z-row terms.
+# ----------------------------------------------------------------------
+"""
+    calc_jacobian_vel_3D_uzterms!(
+        jvel_dzx, jvel_dzy, jvel_dzz,
+        uz,
+        H_ice, f_ice,
+        dzsdx, dzsdy, dzbdx, dzbdy,
+        zeta_ac, dx, dy
+    ) -> nothing
+
+Populate the z-row Jacobian components from the vertical-velocity
+field. Writes:
+
+  - `dzz` — `∂uz/∂z` at aa-cells horizontally, `zeta_ac` faces
+    vertically. ZFaceField slot `[i, j, k]` is the value at aa-cell
+    `(i, j)` and zeta_ac level k.
+  - `dzx`, `dzy` — `∂uz/∂x`, `∂uz/∂y` at the same stagger.
+
+Two phases:
+
+  1. `dzz` via 3-point Lagrange formula for unequal layer spacing
+     (Singh & Bhadauria), with forward stencil at the bed face,
+     centered in the interior, and a simple downwind formula
+     `(uz[k] − uz[k−1]) / (H·Δζ_ac)` at the surface (the Fortran's
+     3-point downwind formula was found "broken" — the active code
+     uses the simple downwind, see `deformation.f90:983-984`).
+  2. `dzx`, `dzy` via centered second-order FD of `uz` horizontally
+     with one-sided second-order fixes at ice-front cells. Sigma-
+     coordinate transform corrections use the aa-cell averages
+     `dzbdx_aa = ½·(dzbdx[i, j] + dzbdx[im1, j])` (the two acx faces
+     around aa-cell `i`) and analogously for the other gradients,
+     evaluated at `zeta_ac[k]` rather than `zeta_aa[k]`. Then:
+
+         dzx += c_x · dzz
+         dzy += c_y · dzz
+
+This routine should be called AFTER `calc_uz_3D_jac!` has populated
+`uz` for the current iteration.
+
+The Fortran `ux`, `uy`, `f_grnd`, `boundaries` parameters are unused
+in the routine body and dropped. `dz*` margin one-sided corrections
+follow the "ice front" pattern (full ice cell adjacent to a partial
+neighbour), with both-sides-partial yielding `dzx = 0` (Fortran line
+1022) — *unlike* the uxy-terms `dxx` margin which always uses one of
+the available sides.
+
+Port of `yelmo/src/physics/deformation.f90:843 calc_jacobian_vel_3D_uzterms`.
+"""
+function calc_jacobian_vel_3D_uzterms!(
+        jvel_dzx, jvel_dzy, jvel_dzz,
+        uz,
+        H_ice, f_ice,
+        dzsdx, dzsdy, dzbdx, dzbdy,
+        zeta_ac::AbstractVector{<:Real},
+        dx::Real, dy::Real,
+    )
+
+    Dzx = interior(jvel_dzx); Dzy = interior(jvel_dzy); Dzz = interior(jvel_dzz)
+    UZ  = interior(uz)
+    H   = interior(H_ice);   fi   = interior(f_ice)
+    DZSX = interior(dzsdx);  DZSY = interior(dzsdy)
+    DZBX = interior(dzbdx);  DZBY = interior(dzbdy)
+
+    Nx, Ny  = size(H, 1), size(H, 2)
+    Nz_ac   = length(zeta_ac)
+    Nz_ac == size(Dzz, 3) || error(
+        "calc_jacobian_vel_3D_uzterms!: zeta_ac length $(Nz_ac) ≠ jvel_dzz Nz $(size(Dzz, 3))")
+
+    Tx = topology(jvel_dzz.grid, 1)
+    Ty = topology(jvel_dzz.grid, 2)
+
+    fill!(Dzx, 0.0); fill!(Dzy, 0.0); fill!(Dzz, 0.0)
+
+    dx_f = Float64(dx); dy_f = Float64(dy)
+
+    # ===== Step 1: vertical derivative `dzz` (Fortran lines 918-991) =====
+    @inbounds for j in 1:Ny, i in 1:Nx
+        if fi[i, j, 1] == 1.0
+            H_now = H[i, j, 1]
+
+            # Bottom face (k=1): forward 3-point Lagrange.
+            k = 1
+            h1 = H_now * (zeta_ac[k+1] - zeta_ac[k])
+            h2 = H_now * (zeta_ac[k+2] - zeta_ac[k+1])
+            Dzz[i, j, k] = -(2*h1 + h2)/(h1*(h1 + h2)) * UZ[i, j, k]   +
+                            (h1 + h2)/(h1*h2)         * UZ[i, j, k+1] -
+                            h1/(h2*(h1 + h2))         * UZ[i, j, k+2]
+
+            # Interior faces (k=2..Nz_ac-1): centered 3-point Lagrange.
+            for k in 2:Nz_ac-1
+                h1 = H_now * (zeta_ac[k]   - zeta_ac[k-1])
+                h2 = H_now * (zeta_ac[k+1] - zeta_ac[k])
+                Dzz[i, j, k] = -h2/(h1*(h1 + h2))    * UZ[i, j, k-1] -
+                                (h1 - h2)/(h1*h2)   * UZ[i, j, k]   +
+                                h1/(h2*(h1 + h2))    * UZ[i, j, k+1]
+            end
+
+            # Top face (k=Nz_ac): simple downwind FD. Fortran's 3-point
+            # downwind formula was found broken (deformation.f90:977-984
+            # — formula commented out, replaced with the simple FD).
+            k = Nz_ac
+            Dzz[i, j, k] = (UZ[i, j, k] - UZ[i, j, k-1]) /
+                           (H_now * (zeta_ac[k] - zeta_ac[k-1]))
+        end
+    end
+
+    # ===== Step 2: horizontal derivatives + sigma corrections ============
+    # Fortran lines 995-1097.
+    @inbounds for j in 1:Ny, i in 1:Nx
+        im1 = _neighbor_im1(i, Nx, Tx); ip1 = _neighbor_ip1(i, Nx, Tx)
+        jm1 = _neighbor_jm1(j, Ny, Ty); jp1 = _neighbor_jp1(j, Ny, Ty)
+
+        if fi[i, j, 1] == 1.0
+            for k in 1:Nz_ac
+                # ---- Centered second-order FD (Fortran lines 1015-1016) ----
+                Dzx[i, j, k] = (UZ[ip1, j, k] - UZ[im1, j, k]) / (2 * dx_f)
+                Dzy[i, j, k] = (UZ[i, jp1, k] - UZ[i, jm1, k]) / (2 * dy_f)
+
+                # ---- One-sided margin fixes for dzx (Fortran lines 1021-1045) ----
+                if fi[ip1, j, 1] < 1.0 && fi[im1, j, 1] < 1.0
+                    # Both x-neighbours partial — drop the gradient.
+                    Dzx[i, j, k] = 0.0
+                elseif fi[ip1, j, 1] < 1.0 && fi[im1, j, 1] == 1.0
+                    if im1 > 1
+                        im2 = im1 - 1
+                        if fi[im2, j, 1] == 1.0
+                            Dzx[i, j, k] = (UZ[im2, j, k] - 4 * UZ[im1, j, k] +
+                                            3 * UZ[i, j, k]) / (2 * dx_f)
+                        else
+                            Dzx[i, j, k] = (UZ[i, j, k] - UZ[im1, j, k]) / dx_f
+                        end
+                    else
+                        Dzx[i, j, k] = (UZ[i, j, k] - UZ[im1, j, k]) / dx_f
+                    end
+                elseif fi[ip1, j, 1] == 1.0 && fi[im1, j, 1] < 1.0
+                    if ip1 < Nx
+                        ip2 = ip1 + 1
+                        if fi[ip2, j, 1] == 1.0
+                            Dzx[i, j, k] = -(UZ[ip2, j, k] - 4 * UZ[ip1, j, k] +
+                                             3 * UZ[i, j, k]) / (2 * dx_f)
+                        else
+                            Dzx[i, j, k] = (UZ[ip1, j, k] - UZ[i, j, k]) / dx_f
+                        end
+                    else
+                        Dzx[i, j, k] = (UZ[ip1, j, k] - UZ[i, j, k]) / dx_f
+                    end
+                end
+
+                # ---- One-sided margin fixes for dzy (Fortran lines 1048-1072) ----
+                if fi[i, jp1, 1] < 1.0 && fi[i, jm1, 1] < 1.0
+                    Dzy[i, j, k] = 0.0
+                elseif fi[i, jp1, 1] < 1.0 && fi[i, jm1, 1] == 1.0
+                    if jm1 > 1
+                        jm2 = jm1 - 1
+                        if fi[i, jm2, 1] == 1.0
+                            Dzy[i, j, k] = (UZ[i, jm2, k] - 4 * UZ[i, jm1, k] +
+                                            3 * UZ[i, j, k]) / (2 * dy_f)
+                        else
+                            Dzy[i, j, k] = (UZ[i, j, k] - UZ[i, jm1, k]) / dy_f
+                        end
+                    else
+                        Dzy[i, j, k] = (UZ[i, j, k] - UZ[i, jm1, k]) / dy_f
+                    end
+                elseif fi[i, jp1, 1] == 1.0 && fi[i, jm1, 1] < 1.0
+                    if jp1 < Ny
+                        jp2 = jp1 + 1
+                        if fi[i, jp2, 1] == 1.0
+                            Dzy[i, j, k] = -(UZ[i, jp2, k] - 4 * UZ[i, jp1, k] +
+                                             3 * UZ[i, j, k]) / (2 * dy_f)
+                        else
+                            Dzy[i, j, k] = (UZ[i, jp1, k] - UZ[i, j, k]) / dy_f
+                        end
+                    else
+                        Dzy[i, j, k] = (UZ[i, jp1, k] - UZ[i, j, k]) / dy_f
+                    end
+                end
+
+                # ---- Sigma-coordinate transform corrections ----
+                # Fortran lines 1078-1089. dzbdx_aa averages the two
+                # acx faces of cell i (slot [i,j,1] and [im1,j,1] under
+                # the dzbdx CenterField storage convention).
+                dzbdx_aa = 0.5 * (DZBX[i, j, 1] + DZBX[im1, j, 1])
+                dzbdy_aa = 0.5 * (DZBY[i, j, 1] + DZBY[i, jm1, 1])
+                dzsdx_aa = 0.5 * (DZSX[i, j, 1] + DZSX[im1, j, 1])
+                dzsdy_aa = 0.5 * (DZSY[i, j, 1] + DZSY[i, jm1, 1])
+
+                zk = zeta_ac[k]
+                c_x = -((1.0 - zk) * dzbdx_aa + zk * dzsdx_aa)
+                c_y = -((1.0 - zk) * dzbdy_aa + zk * dzsdy_aa)
+
+                Dzx[i, j, k] += c_x * Dzz[i, j, k]
+                Dzy[i, j, k] += c_y * Dzz[i, j, k]
+            end
         end
     end
 
