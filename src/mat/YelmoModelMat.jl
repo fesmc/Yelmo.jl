@@ -39,7 +39,10 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel
 
 import ..YelmoCore: mat_step!
 
-export mat_step!
+export mat_step!,
+       calc_viscosity_glen!, calc_visc_int!
+
+include("viscosity.jl")
 
 """
     mat_step!(y::YelmoModel, dt) -> y

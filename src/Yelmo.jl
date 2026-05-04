@@ -128,6 +128,7 @@ export set_inactive_margins!, calc_basal_stress!
 
 # YelmoModelMat
 export mat_step!
+export calc_viscosity_glen!, calc_visc_int!
 
 # YelmoIO
 export init_output
