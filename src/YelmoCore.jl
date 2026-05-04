@@ -638,6 +638,18 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_iter_now               = Ref{Int}(0),
         ssa_solver_workspace       = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
         ssa_amg_cache              = Ref{Any}(nothing),
+        # CSC cache for the SSA stiffness matrix. The COO triplets
+        # written by `_assemble_ssa_matrix!` change values across
+        # Picard iterations but the *structure* (set of unique
+        # (row, col) pairs) is invariant within one `dyn_step!` call.
+        # On the first Picard iter we build the CSC via `sparse(...)`
+        # and cache the COO→CSC permutation `ssa_coo_to_csc`; on
+        # subsequent iters we just refresh the cached CSC's `nzval`
+        # via the permutation, avoiding the colptr/rowval rebuild
+        # and most allocations. See
+        # `_build_or_refresh_ssa_csc!` in `src/dyn/velocity_ssa.jl`.
+        ssa_csc                    = Ref{Any}(nothing),
+        ssa_coo_to_csc             = Vector{Int}(undef, N_nz_max),
         ssa_picard_visc_eff_nm1    = CenterField(gt),
         ssa_picard_ux_b_nm1        = XFaceField(g),
         ssa_picard_uy_b_nm1        = YFaceField(g),

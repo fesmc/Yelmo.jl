@@ -610,13 +610,15 @@ function calc_velocity_diva!(y)
             lateral_bc = p_ydyn.ssa_lat_bc,
         )
 
-        # Step 8 — sparse matrix + Krylov solve.
-        nnz = sc.ssa_nnz[]
-        I_view = view(sc.ssa_I_idx, 1:nnz)
-        J_view = view(sc.ssa_J_idx, 1:nnz)
-        V_view = view(sc.ssa_vals,  1:nnz)
-        N_rows = 2 * Nx * Ny
-        A = sparse(I_view, J_view, V_view, N_rows, N_rows)
+        # Step 8 — build (or refresh) sparse CSC + Krylov solve.
+        # On `iter == 1` builds A from COO via `sparse(...)` and caches
+        # the COO→CSC permutation; subsequent iters refresh `A.nzval`
+        # in-place. See `_build_or_refresh_ssa_csc!` in velocity_ssa.jl.
+        nnz_now = sc.ssa_nnz[]
+        N_rows  = 2 * Nx * Ny
+        A = _build_or_refresh_ssa_csc!(sc,
+                                       sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                                       nnz_now, N_rows, iter)
         x = _solve_ssa_linear!(sc, A, sc.ssa_b_vec, ssa)
 
         # Step 9 — unpack into ux_bar / uy_bar (NOT ux_b / uy_b — the

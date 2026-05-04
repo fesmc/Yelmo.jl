@@ -346,6 +346,57 @@ end
     return k
 end
 
+# CSC cache for the SSA stiffness matrix.
+#
+# Within one `dyn_step!` Picard loop the (row, col) structure of the
+# assembled SSA matrix is invariant — only the values change as
+# viscosity / beta refresh. On `picard_iter == 1` we build the CSC
+# from the COO triplets via `sparse(...)` (allocating colptr / rowval
+# / nzval) and compute a permutation `coo_to_csc[k]` that maps each
+# COO triplet index `k` to its position in `A.nzval` (summed across
+# duplicates). On subsequent Picard iters we reset `A.nzval .= 0`
+# and accumulate `A.nzval[coo_to_csc[k]] += vals[k]`, reusing the
+# same `A` object — zero-allocation refresh.
+#
+# Across `dyn_step!` calls the SSA mask can change (grounding line
+# moves), so the cache is rebuilt on every `iter == 1`. Pre-PR cost
+# was one `sparse(...)` call per Picard iter; post-PR is one
+# `sparse(...)` per `dyn_step!`.
+function _build_or_refresh_ssa_csc!(scratch,
+                                     I_idx::Vector{Int},
+                                     J_idx::Vector{Int},
+                                     vals::Vector{Float64},
+                                     nnz::Int, N::Int,
+                                     picard_iter::Int)
+    if picard_iter == 1 || scratch.ssa_csc[] === nothing
+        I_view = view(I_idx, 1:nnz)
+        J_view = view(J_idx, 1:nnz)
+        V_view = view(vals,  1:nnz)
+        A = sparse(I_view, J_view, V_view, N, N)
+        # Build COO → CSC permutation: for each k, find the index in
+        # A.nzval corresponding to (I_idx[k], J_idx[k]). `A.rowval` is
+        # sorted within each column, so a binary search inside the
+        # column slice is O(log nnz_per_col).
+        @inbounds for k in 1:nnz
+            i, j = I_idx[k], J_idx[k]
+            col_start = A.colptr[j]
+            col_end   = A.colptr[j+1] - 1
+            pos = searchsortedfirst(view(A.rowval, col_start:col_end), i)
+            scratch.ssa_coo_to_csc[k] = col_start + pos - 1
+        end
+        scratch.ssa_csc[] = A
+        return A
+    else
+        A = scratch.ssa_csc[]::SparseMatrixCSC{Float64,Int}
+        nzval = A.nzval
+        fill!(nzval, 0.0)
+        @inbounds for k in 1:nnz
+            nzval[scratch.ssa_coo_to_csc[k]] += vals[k]
+        end
+        return A
+    end
+end
+
 """
     _assemble_ssa_matrix!(I_idx, J_idx, vals, b_vec, nnz_ref,
                           ux_b, uy_b,
@@ -1536,13 +1587,15 @@ function calc_velocity_ssa!(y)
             lateral_bc = p_ydyn.ssa_lat_bc,
         )
 
-        # ---- Step 8: build sparse matrix, solve. ----
-        nnz = sc.ssa_nnz[]
-        I_view = view(sc.ssa_I_idx, 1:nnz)
-        J_view = view(sc.ssa_J_idx, 1:nnz)
-        V_view = view(sc.ssa_vals,  1:nnz)
-        N_rows = 2 * Nx * Ny
-        A = sparse(I_view, J_view, V_view, N_rows, N_rows)
+        # ---- Step 8: build (or refresh) sparse CSC, solve. ----
+        # On `iter == 1` builds A from COO via `sparse(...)` and caches
+        # the COO→CSC permutation in `sc.ssa_coo_to_csc`. On subsequent
+        # iters refreshes `A.nzval` in-place via the cached permutation.
+        nnz_now = sc.ssa_nnz[]
+        N_rows  = 2 * Nx * Ny
+        A = _build_or_refresh_ssa_csc!(sc,
+                                       sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                                       nnz_now, N_rows, iter)
         x = _solve_ssa_linear!(sc, A, sc.ssa_b_vec, ssa)
 
         # ---- Step 9: unpack x → ux_b, uy_b face slots. ----
