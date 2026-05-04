@@ -784,6 +784,10 @@ function calc_strain_rate_tensor_jac_quad3D!(
         zeta_aa::AbstractVector{<:Real},
         de_max::Real,
     )
+    # Wrapper: same template as PRs #45 / #47 / #48 / #49 — extract
+    # Field views, look up topology, dispatch into the parametric kernel
+    # below. The 2D depth-average loop stays here (touches Fields via
+    # `_depth_avg!`); only the 3D hot path moves into the kernel.
 
     Sxx = interior(strn_dxx); Syy = interior(strn_dyy); Sxy = interior(strn_dxy)
     Sxz = interior(strn_dxz); Syz = interior(strn_dyz)
@@ -801,14 +805,43 @@ function calc_strain_rate_tensor_jac_quad3D!(
     Tx = topology(strn_dxx.grid, 1)
     Ty = topology(strn_dxx.grid, 2)
 
+    _calc_strain_rate_tensor_jac_quad3D_kernel!(
+        Sxx, Syy, Sxy, Sxz, Syz, Sde, Sdv, Sfs,
+        Jxx, Jxy, Jxz, Jyx, Jyy, Jyz, Jzx, Jzy,
+        fi, fg, Float64(de_max),
+        Tx, Ty, Nx, Ny, Nz_aa)
+
+    # ----- Depth-averaged 2D tensor -----
+    # Uniform-spacing centre-only mean — ∑ strn[k] / Nz_aa.
+    _depth_avg!(strn2D_dxx,     Sxx, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dyy,     Syy, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dxy,     Sxy, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dxz,     Sxz, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_dyz,     Syz, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_de,      Sde, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_div,     Sdv, Nx, Ny, Nz_aa)
+    _depth_avg!(strn2D_f_shear, Sfs, Nx, Ny, Nz_aa)
+
+    return nothing
+end
+
+# Compute kernel for `calc_strain_rate_tensor_jac_quad3D!`. Parametric
+# topology, concrete typed scalars, plain arrays. ParallelStencil-shape
+# 3D body. The 2D depth-averages happen in the wrapper since they touch
+# Fields (`_depth_avg!` does its own interior() lift internally).
+function _calc_strain_rate_tensor_jac_quad3D_kernel!(
+        Sxx, Syy, Sxy, Sxz, Syz, Sde, Sdv, Sfs,
+        Jxx, Jxy, Jxz, Jyx, Jyy, Jyz, Jzx, Jzy,
+        fi, fg, de_max_f::Float64,
+        ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int, Nz_aa::Int,
+    ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
+
     # Initialise everything — ice-free cells stay at zero (Fortran skips
     # the assignment under `if (f_ice == 1)`, leaving the previous value;
     # for a fresh-allocation Field that's zero).
     fill!(Sxx, 0.0); fill!(Syy, 0.0); fill!(Sxy, 0.0)
     fill!(Sxz, 0.0); fill!(Syz, 0.0)
     fill!(Sde, 0.0); fill!(Sdv, 0.0); fill!(Sfs, 0.0)
-
-    de_max_f = Float64(de_max)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi[i, j, 1] != 1.0
@@ -872,17 +905,6 @@ function calc_strain_rate_tensor_jac_quad3D!(
             Sfs[i, j, k] = f_shear
         end
     end
-
-    # ----- Depth-averaged 2D tensor -----
-    # Uniform-spacing centre-only mean — ∑ strn[k] / Nz_aa.
-    _depth_avg!(strn2D_dxx,     Sxx, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_dyy,     Syy, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_dxy,     Sxy, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_dxz,     Sxz, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_dyz,     Syz, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_de,      Sde, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_div,     Sdv, Nx, Ny, Nz_aa)
-    _depth_avg!(strn2D_f_shear, Sfs, Nx, Ny, Nz_aa)
 
     return nothing
 end
