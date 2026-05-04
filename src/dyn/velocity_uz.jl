@@ -68,7 +68,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
-using Oceananigans.Grids: topology, Bounded, Periodic
+using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_uz_3D_jac!, calc_uz_3D!, calc_uz_3D_aa!
 
@@ -226,6 +226,9 @@ function calc_uz_3D_jac!(
         dx::Real, dy::Real,
         use_bmb::Bool,
     )
+    # Wrapper: lift Field args to interior() views, materialise zeta as
+    # concrete `Vector{Float64}`, look up topology, dispatch into the
+    # parametric kernel below. Same template as PR #45 / #47.
 
     UZ      = interior(uz);        UZS     = interior(uz_star)
     UX      = interior(ux);        UY      = interior(uy)
@@ -249,6 +252,27 @@ function calc_uz_3D_jac!(
 
     Tx = topology(uz.grid, 1)
     Ty = topology(uz.grid, 2)
+    zeta_aa_v = collect(Float64, zeta_aa)
+    zeta_ac_v = collect(Float64, zeta_ac)
+
+    _calc_uz_3D_jac_kernel!(
+        UZ, UZS, UX, UY, Dxx, Dyy, H, fi,
+        SMB, BMB, DHDT, DZSDT, DZSX, DZSY, DZBX, DZBY,
+        zeta_aa_v, zeta_ac_v, use_bmb,
+        Tx, Ty, Nx, Ny, Nz_aa, Nz_ac)
+
+    return nothing
+end
+
+# Compute kernel for `calc_uz_3D_jac!`. Parametric topology, concrete
+# typed scalars, plain arrays. ParallelStencil-shape body.
+function _calc_uz_3D_jac_kernel!(
+        UZ, UZS, UX, UY, Dxx, Dyy, H, fi,
+        SMB, BMB, DHDT, DZSDT, DZSX, DZSY, DZBX, DZBY,
+        zeta_aa::Vector{Float64}, zeta_ac::Vector{Float64},
+        use_bmb::Bool,
+        ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int, Nz_aa::Int, Nz_ac::Int,
+    ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
 
     fill!(UZ, 0.0)
 
