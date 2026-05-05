@@ -98,36 +98,39 @@ function Base.close(log::TimestepLog)
         NCDataset(log.path, "c") do ds
             defDim(ds, "time", Inf)
             ds.attrib["pc_eps"] = log.pc_eps
+            # NCDatasets won't grow an unlimited dim of current size 0
+            # via `tv[:] = data`; index explicitly so the dim extends.
+            r = 1:n
 
             tv = defVar(ds, "time", Float64, ("time",))
             tv.attrib["units"]     = "yr"
             tv.attrib["long_name"] = "model time at end of accepted PC step"
-            tv[:] = log.times
+            tv[r] = log.times
 
             dv = defVar(ds, "dt_now", Float64, ("time",))
             dv.attrib["units"]     = "yr"
             dv.attrib["long_name"] = "PC sub-step dt taken"
-            dv[:] = log.dt_now
+            dv[r] = log.dt_now
 
             ev = defVar(ds, "pc_eta", Float64, ("time",))
             ev.attrib["units"]     = "m yr^-1"
             ev.attrib["long_name"] = "PC truncation-error proxy (eta)"
-            ev[:] = log.pc_eta
+            ev[r] = log.pc_eta
 
             sv = defVar(ds, "ssa_iter", Int64, ("time",))
             sv.attrib["units"]     = "1"
             sv.attrib["long_name"] = "Picard iterations the SSA / DIVA solver took on this step"
-            sv[:] = log.ssa_iter
+            sv[r] = log.ssa_iter
 
             rv = defVar(ds, "iter_redo", Int64, ("time",))
             rv.attrib["units"]     = "1"
             rv.attrib["long_name"] = "PC retry count (1 = accepted on first try)"
-            rv[:] = log.iter_redo
+            rv[r] = log.iter_redo
 
             wv = defVar(ds, "wallclock_s", Float64, ("time",))
             wv.attrib["units"]     = "s"
             wv.attrib["long_name"] = "wall-clock seconds for this PC sub-step"
-            wv[:] = log.wallclock_s
+            wv[r] = log.wallclock_s
         end
     end
 
