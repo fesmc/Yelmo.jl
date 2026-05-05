@@ -37,7 +37,8 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
-const WITH_LOG = "--with-log" in ARGS
+const WITH_LOG    = "--with-log" in ARGS
+const SKIP_TIGHT  = "--skip-tight" in ARGS
 
 const T_END = 25_000.0
 const RUNDIR_ROOT = abspath(joinpath(@__DIR__, "..", "..", "logs", "bench_sia_eismint"))
@@ -133,7 +134,11 @@ end
 # -------- Run --------
 mkpath(RUNDIR_ROOT)
 y_def,  wc_def,  log_def  = run_yelmo("default", 2, 100.0; log_timestep = WITH_LOG)
-y_tight, wc_tight, log_tight = run_yelmo("tight",   0, 1.0;   log_timestep = false)
+y_tight, wc_tight, log_tight = if SKIP_TIGHT
+    (nothing, NaN, "")
+else
+    run_yelmo("tight", 0, 1.0; log_timestep = false)
+end
 
 mirror = load_mirror()
 
@@ -142,9 +147,12 @@ println("\n" * "="^72)
 println("EISMINT-moving 25-kyr SIA benchmark$(WITH_LOG ? "  (with log_timestep)" : "")")
 println("="^72)
 
-for (label, y, wc, log_path) in (
-        ("default (dt=100, adaptive Heun)", y_def,   wc_def,   log_def),
-        ("tight   (dt=1,   fixed Heun)",    y_tight, wc_tight, log_tight))
+runs_to_report = SKIP_TIGHT ?
+    (("default (dt=100, adaptive Heun)", y_def, wc_def, log_def),) :
+    (("default (dt=100, adaptive Heun)", y_def,   wc_def,   log_def),
+     ("tight   (dt=1,   fixed Heun)",    y_tight, wc_tight, log_tight))
+
+for (label, y, wc, log_path) in runs_to_report
     H = Array{Float64}(interior(y.tpo.H_ice)[:, :, 1])
     uxy = Array{Float64}(interior(y.dyn.uxy_bar)[:, :, 1])
 
@@ -169,12 +177,14 @@ for (label, y, wc, log_path) in (
     println("  rel L∞ H vs mirror, common = $(round(rel_linf(H, mirror.H; mask=common), sigdigits=4))")
 end
 
-H_def   = Array{Float64}(interior(y_def.tpo.H_ice)[:, :, 1])
-H_tight = Array{Float64}(interior(y_tight.tpo.H_ice)[:, :, 1])
-common = (H_def .≥ 100.0) .& (H_tight .≥ 100.0)
-println("\n--- Yelmo.jl-default vs Yelmo.jl-tight (own near-converged reference) ---")
-println("  rel L∞ H, full    = $(round(rel_linf(H_def, H_tight), sigdigits=4))")
-println("  rel L∞ H, common  = $(round(rel_linf(H_def, H_tight; mask=common), sigdigits=4))")
+if !SKIP_TIGHT
+    H_def   = Array{Float64}(interior(y_def.tpo.H_ice)[:, :, 1])
+    H_tight = Array{Float64}(interior(y_tight.tpo.H_ice)[:, :, 1])
+    common = (H_def .≥ 100.0) .& (H_tight .≥ 100.0)
+    println("\n--- Yelmo.jl-default vs Yelmo.jl-tight (own near-converged reference) ---")
+    println("  rel L∞ H, full    = $(round(rel_linf(H_def, H_tight), sigdigits=4))")
+    println("  rel L∞ H, common  = $(round(rel_linf(H_def, H_tight; mask=common), sigdigits=4))")
+end
 
 println("\n--- Mirror reference ---")
 println("  wallclock_s = $(round(mirror.wallclock, digits=2))")
