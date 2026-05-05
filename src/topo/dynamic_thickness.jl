@@ -117,11 +117,25 @@ parameter:
   - `"slab-ext"` — same as `"slab"`, plus a `n_ext`-cell
     `extend_floating_slab!` extension of a thin slab outward from
     grounded marine margins.
-  - everything else (e.g. `"floating"`, the default) — pass-through:
-    `H_ice_dyn = H_ice` and `f_ice_dyn = f_ice`.
+  - everything else (e.g. `"floating"`, the default) — Yelmo.jl-
+    specific extension: `H_ice_dyn = H_eff` (= `H_ice / f_ice`) at
+    sub-grid margin cells where `0 < f_ice < 1`, and `f_ice_dyn`
+    binary (`1.0` for any `f_ice > 0`). At fully-covered cells
+    (`f_ice ≥ 1`) `H_ice_dyn = H_ice` and `f_ice_dyn = 1.0`. At
+    ice-free cells (`f_ice = 0`) both are zero. This carries the
+    *effective* (in-cell) thickness into the dynamics matrix and
+    extends the binary cover to the whole partial-cell, so the
+    velocity field is well-defined out to the prognostic margin —
+    important for sub-stepping schemes like `dt_method = 3` where
+    the velocity is frozen within an outer step while the front
+    advances.
+
+    Diverges from Fortran's default at yelmo_topography.f90:1051-1058,
+    which is plain pass-through.
 
 Port of the `select case(trim(dyn%par%ssa_lat_bc))` block at
-`yelmo_topography.f90:1022-1058`.
+`yelmo_topography.f90:1022-1058`, with the default branch extended
+as described above.
 """
 function calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
                                   H_ice, f_ice, f_grnd,
@@ -161,9 +175,22 @@ function calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
                     flt_subgrid = flt_subgrid)
 
     else
-        # Default: pass-through.
-        Hd .= H
-        Fd .= F
+        # Default: H_eff at sub-grid margin cells, binary cover.
+        @inbounds for j in axes(Hd, 2), i in axes(Hd, 1)
+            f = F[i, j, 1]
+            h = H[i, j, 1]
+            if f <= 0.0
+                Hd[i, j, 1] = 0.0
+                Fd[i, j, 1] = 0.0
+            elseif f >= 1.0
+                Hd[i, j, 1] = h
+                Fd[i, j, 1] = 1.0
+            else
+                # 0 < f < 1: in-cell effective thickness, binary cover.
+                Hd[i, j, 1] = h / f
+                Fd[i, j, 1] = 1.0
+            end
+        end
     end
 
     return H_ice_dyn

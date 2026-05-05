@@ -165,7 +165,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
 
     # 4. Lateral boundary stress at the ice front (Pa·m).
     calc_lateral_bc_stress_2D!(y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-                               y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
+                               y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                y.tpo.z_srf, y.bnd.z_sl,
                                y.c.rho_ice, y.c.rho_sw, y.c.g)
 
@@ -214,7 +214,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                            y.dyn.scratch.ux_i_s, y.dyn.scratch.uy_i_s,
                            y.dyn.scratch.sia_tau_xz,
                            y.dyn.scratch.sia_tau_yz,
-                           y.tpo.H_ice, y.tpo.f_ice,
+                           y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                            y.dyn.taud_acx, y.dyn.taud_acy,
                            y.mat.ATT,
                            zeta_c,
@@ -270,7 +270,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                            y.dyn.scratch.ux_i_s, y.dyn.scratch.uy_i_s,
                            y.dyn.scratch.sia_tau_xz,
                            y.dyn.scratch.sia_tau_yz,
-                           y.tpo.H_ice, y.tpo.f_ice,
+                           y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                            y.dyn.taud_acx, y.dyn.taud_acy,
                            y.mat.ATT,
                            zeta_c,
@@ -393,19 +393,19 @@ function dyn_step!(y::YelmoModel, dt::Float64)
 
     # Ice flux on ac-staggered faces.
     calc_ice_flux!(y.dyn.qq_acx, y.dyn.qq_acy,
-                   y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.H_ice,
+                   y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.H_ice_dyn,
                    dx_g, dy_g)
 
     # Stress + flux + velocity magnitudes at aa-cells.
-    calc_magnitude_from_staggered!(y.dyn.qq,        y.dyn.qq_acx,   y.dyn.qq_acy,   y.tpo.f_ice)
-    calc_magnitude_from_staggered!(y.dyn.taub,      y.dyn.taub_acx, y.dyn.taub_acy, y.tpo.f_ice)
-    calc_magnitude_from_staggered!(y.dyn.taud,      y.dyn.taud_acx, y.dyn.taud_acy, y.tpo.f_ice)
-    calc_magnitude_from_staggered!(y.dyn.uxy_b,     y.dyn.ux_b,     y.dyn.uy_b,     y.tpo.f_ice)
-    calc_magnitude_from_staggered!(y.dyn.uxy_i_bar, y.dyn.ux_i_bar, y.dyn.uy_i_bar, y.tpo.f_ice)
-    calc_magnitude_from_staggered!(y.dyn.uxy_bar,   y.dyn.ux_bar,   y.dyn.uy_bar,   y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.qq,        y.dyn.qq_acx,   y.dyn.qq_acy,   y.tpo.f_ice_dyn)
+    calc_magnitude_from_staggered!(y.dyn.taub,      y.dyn.taub_acx, y.dyn.taub_acy, y.tpo.f_ice_dyn)
+    calc_magnitude_from_staggered!(y.dyn.taud,      y.dyn.taud_acx, y.dyn.taud_acy, y.tpo.f_ice_dyn)
+    calc_magnitude_from_staggered!(y.dyn.uxy_b,     y.dyn.ux_b,     y.dyn.uy_b,     y.tpo.f_ice_dyn)
+    calc_magnitude_from_staggered!(y.dyn.uxy_i_bar, y.dyn.ux_i_bar, y.dyn.uy_i_bar, y.tpo.f_ice_dyn)
+    calc_magnitude_from_staggered!(y.dyn.uxy_bar,   y.dyn.ux_bar,   y.dyn.uy_bar,   y.tpo.f_ice_dyn)
 
     # 3D per-layer magnitude — the kernel naturally loops over k.
-    calc_magnitude_from_staggered!(y.dyn.uxy, y.dyn.ux, y.dyn.uy, y.tpo.f_ice)
+    calc_magnitude_from_staggered!(y.dyn.uxy, y.dyn.ux, y.dyn.uy, y.tpo.f_ice_dyn)
 
     # Surface / basal velocity slices. Fortran:
     #   uz_b  = uz(:, :, 1)
@@ -449,7 +449,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         # topmost-Center magnitude, not the surface magnitude).
         calc_magnitude_from_staggered!(y.dyn.uxy_s,
                                        y.dyn.ux_s, y.dyn.uy_s,
-                                       y.tpo.f_ice)
+                                       y.tpo.f_ice_dyn)
     end
 
     # Basal-to-surface velocity ratio.

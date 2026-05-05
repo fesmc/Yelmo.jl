@@ -486,7 +486,7 @@ function calc_velocity_diva!(y)
 
     # Step 1 — SSA masks.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
-                   y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
+                   y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                    y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
                    use_ssa = true,
                    lateral_bc = p_ydyn.ssa_lat_bc)
@@ -500,7 +500,7 @@ function calc_velocity_diva!(y)
     fill!(interior(y.dyn.ssa_err_acy), 1.0)
 
     zeta_c = znodes(y.gt, Center())
-    set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice)
+    set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice_dyn)
 
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
@@ -526,12 +526,12 @@ function calc_velocity_diva!(y)
             fill!(interior(y.dyn.visc_eff), Float64(p_ydyn.visc_const))
         elseif p_ydyn.visc_method == 1
             calc_visc_eff_3D_nodes!(y.dyn.visc_eff, y.dyn.ux_bar, y.dyn.uy_bar,
-                                    y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                    y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                     zeta_c, dx, dy,
                                     p_ymat.n_glen, p_ydyn.eps_0)
         elseif p_ydyn.visc_method == 2
             calc_visc_eff_3D_aa!(y.dyn.visc_eff, y.dyn.ux_bar, y.dyn.uy_bar,
-                                 y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                 y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                  zeta_c, dx, dy,
                                  p_ymat.n_glen, p_ydyn.eps_0)
         else
@@ -551,16 +551,16 @@ function calc_velocity_diva!(y)
             interior(y.dyn.visc_eff)[:, :, end]
         calc_visc_eff_int!(y.dyn.visc_eff_int, y.dyn.visc_eff,
                            sc.ssa_visc_eff_b, sc.ssa_visc_eff_s,
-                           y.tpo.H_ice, y.tpo.f_ice, zeta_c)
+                           y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)
 
         # Step 4b — F2 integral (DIVA-specific).
         calc_F_integral_2D!(sc.diva_F2, y.dyn.visc_eff,
-                            y.tpo.H_ice, y.tpo.f_ice, zeta_c; n = 2.0)
+                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c; n = 2.0)
 
         # Step 5 — beta and beta_eff on aa-cells (uses CURRENT depth-averaged
         # velocity for the friction-law nonlinearity).
         calc_beta!(y.dyn.beta, y.dyn.c_bed, y.dyn.ux_bar, y.dyn.uy_bar,
-                   y.tpo.H_ice, y.tpo.f_ice, y.tpo.H_grnd, y.tpo.f_grnd,
+                   y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, y.tpo.H_grnd, y.tpo.f_grnd,
                    y.bnd.z_bed, y.bnd.z_sl;
                    beta_method   = p_ydyn.beta_method,
                    beta_const    = p_ydyn.beta_const,
@@ -579,7 +579,7 @@ function calc_velocity_diva!(y)
         # Step 6a — stagger β to face grid (kept for diagnostics; the
         # matrix kernel reads `beta_eff_acx / beta_eff_acy` below).
         stagger_beta!(y.dyn.beta_acx, y.dyn.beta_acy, y.dyn.beta,
-                      y.tpo.H_ice, y.tpo.f_ice, y.dyn.ux_bar, y.dyn.uy_bar,
+                      y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, y.dyn.ux_bar, y.dyn.uy_bar,
                       y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy;
                       beta_gl_stag = p_ydyn.beta_gl_stag,
                       beta_min     = p_ydyn.beta_min)
@@ -588,7 +588,7 @@ function calc_velocity_diva!(y)
         # to the SSA matrix kernel).
         stagger_beta_eff!(sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
                           sc.diva_beta_eff,
-                          y.tpo.H_ice, y.tpo.f_ice,
+                          y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                           y.dyn.ux_bar, y.dyn.uy_bar,
                           y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy;
                           beta_gl_stag = p_ydyn.beta_gl_stag,
@@ -596,7 +596,7 @@ function calc_velocity_diva!(y)
 
         # Step 6c — corner-stagger viscosity (same as SSA).
         stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice, y.tpo.f_ice)
+                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
 
         # Step 7 — assemble SSA matrix with β_eff in place of β.
         # The kernel and inputs are otherwise identical to SSA.
@@ -607,7 +607,7 @@ function calc_velocity_diva!(y)
             sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
             y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
             y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
-            y.tpo.H_ice, y.tpo.f_ice,
+            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
             y.dyn.taud_acx, y.dyn.taud_acy,
             y.dyn.taul_int_acx, y.dyn.taul_int_acy,
             dx, dy, p_ydyn.beta_min;
@@ -681,7 +681,7 @@ function calc_velocity_diva!(y)
         end
 
         # Step 11 — zero face velocities at fully-empty margins.
-        set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice)
+        set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice_dyn)
 
         # Step 12 — convergence (L2 relative residual on ux_bar, uy_bar).
         l2_resid = picard_calc_convergence_l2(
@@ -708,18 +708,18 @@ function calc_velocity_diva!(y)
     calc_vel_basal_diva!(y.dyn.ux_b, y.dyn.uy_b,
                          y.dyn.ux_bar, y.dyn.uy_bar,
                          y.dyn.taub_acx, y.dyn.taub_acy,
-                         sc.diva_F2, y.tpo.f_ice;
+                         sc.diva_F2, y.tpo.f_ice_dyn;
                          no_slip = no_slip)
 
     # 3. Compute F1 cumulative (3D).
     calc_F1_integral_3D!(sc.diva_F1_3D, y.dyn.visc_eff,
-                         y.tpo.H_ice, y.tpo.f_ice, zeta_c)
+                         y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)
 
     # 4. Reconstruct 3D ux, uy via Lipscomb (2019) Eq. 29.
     calc_vel_horizontal_3D!(y.dyn.ux, y.dyn.uy,
                             y.dyn.ux_b, y.dyn.uy_b,
                             y.dyn.taub_acx, y.dyn.taub_acy,
-                            sc.diva_F1_3D, y.tpo.f_ice)
+                            sc.diva_F1_3D, y.tpo.f_ice_dyn)
 
     # 5. Shearing component ux_i = ux − ux_b, depth-averaged ux_i_bar
     #    is also useful for diagnostics.

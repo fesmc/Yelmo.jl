@@ -965,23 +965,19 @@ function therm_step! end
 # `step!` in `YelmoMirrorCore` to call the C API instead of the per-phase
 # chain.
 function step!(y::YelmoModel, dt::Float64)
-    # Backend dispatch on `y.p.yelmo.dt_method`:
-    #   0 = fixed forward Euler (this body, current default).
-    #   2 = adaptive predictor-corrector (delegates to
-    #       `Yelmo._select_step!` from src/timestepping.jl, which
-    #       handles snapshot/restore + PC + PI controller).
-    # When `y.p === nothing`, fall back to fixed FE for backwards
-    # compatibility with simple in-memory benchmark constructions
-    # that don't pass parameters.
-    method = y.p === nothing ? 0 : Int(y.p.yelmo.dt_method)
-    if method == 0
-        # Per-section timing wraps live inside `_step_fe!` (defined in
-        # src/timestepping.jl) so both the fixed-FE and the adaptive PC
-        # paths share the same instrumented call sites.
+    # Backend dispatch:
+    #
+    #   - `y.p === nothing` (parameter-less benchmark constructions):
+    #     fall through to a plain forward-Euler chain via `_step_fe!`,
+    #     so simple in-memory test setups work without parameters.
+    #   - Otherwise route through `_select_step!` (src/timestepping.jl)
+    #     which dispatches on `y.p.yelmo.dt_method`. Both `dt_method=0`
+    #     (fixed-dt Heun, no controller) and `dt_method=2` (adaptive
+    #     Heun + PI42) run the PC machinery so `eta` is always
+    #     available as a diagnostic.
+    if y.p === nothing
         return _step_fe!(y, dt)
     else
-        # `_select_step!` is defined in src/timestepping.jl, which is
-        # included after the topo + dyn modules so it can call them.
         return _select_step!(y, dt)
     end
 end
