@@ -278,7 +278,7 @@ function _calc_uz_3D_jac_kernel!(
 
     f_bmb = use_bmb ? 1.0 : 0.0
 
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
 
     @inbounds for j in 1:Ny, i in 1:Nx
         im1 = _neighbor_im1(i, Nx, Tx); ip1 = _neighbor_ip1(i, Nx, Tx)

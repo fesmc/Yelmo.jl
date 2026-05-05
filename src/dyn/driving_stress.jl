@@ -79,10 +79,16 @@ function calc_driving_stress!(taud_acx, taud_acy,
                               dzsdx, dzsdy,
                               dx::Real, taud_lim::Real,
                               rho_ice::Real, g::Real)
-    # H_ice halo (Dirichlet 0) and f_ice halo (Neumann replicate)
-    # supply the ip1 / jp1 reads at the eastern / northern domain edge.
-    # Reads use field-indexed access (which goes through halos via
-    # the underlying OffsetArray); writes use the interior view.
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric kernel below. Same wrapper-+-parametric-kernel template
+    # as the Lever-2 dyn 3D refactors.
+    #
+    # H_ice halo (Dirichlet 0) and f_ice halo (Neumann replicate) supply
+    # the `i+1` / `j+1` reads at the eastern / northern domain edge.
+    # Halo-aware reads go through the field's underlying `OffsetArray`
+    # (`field.data`) so the kernel hot path stays alloc-free without
+    # changing the boundary semantics. Writes use the plain `interior`
+    # SubArray.
     fill_halo_regions!(H_ice_dyn)
     fill_halo_regions!(f_ice_dyn)
 
@@ -91,6 +97,14 @@ function calc_driving_stress!(taud_acx, taud_acy,
 
     Tx = interior(taud_acx)
     Ty = interior(taud_acy)
+    # Halo-aware OffsetArray views — `OA[i+1, j, 1]` reads the halo at
+    # `i = Nx` without bounds adjustment. The `field.data` accessor is
+    # the standard Oceananigans handle for the offset-indexed underlying
+    # storage.
+    Hd  = H_ice_dyn.data
+    fid = f_ice_dyn.data
+    DSX = interior(dzsdx)
+    DSY = interior(dzsdy)
     Nx = size(interior(H_ice_dyn), 1)
     Ny = size(interior(H_ice_dyn), 2)
 
@@ -101,13 +115,31 @@ function calc_driving_stress!(taud_acx, taud_acy,
     Tx_top = topology(taud_acx.grid, 1)
     Ty_top = topology(taud_acy.grid, 2)
 
+    _calc_driving_stress_kernel!(Tx, Ty, Hd, fid, DSX, DSY,
+                                 rhog, lim,
+                                 Tx_top, Ty_top, Nx, Ny)
+
+    return taud_acx, taud_acy
+end
+
+# Compute kernel: parametric topology, plain arrays, typed scalars.
+# Reads of `H_ice` / `f_ice` go through `field.data` (an `OffsetArray`)
+# so `[i+1, j, 1]` at `i = Nx` returns the halo value (Dirichlet 0 for
+# H, Neumann replicate for f) — preserving the original wrapper's
+# boundary semantics. Inner-loop hot path is allocation-free.
+function _calc_driving_stress_kernel!(
+        Tx, Ty, Hd, fid, DSX, DSY,
+        rhog::Float64, lim::Float64,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
+
     # x-direction: Fortran taud_acx[i, j] = east face of cell i.
     # Julia XFaceField stores it at interior(taud_acx)[i+1, j, 1].
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1f = _ip1_modular(i, Nx, Tx_top)
-        H_mid = _H_mid_margin(H_ice_dyn[i, j, 1], H_ice_dyn[i+1, j, 1],
-                              f_ice_dyn[i, j, 1], f_ice_dyn[i+1, j, 1])
-        taud  = rhog * H_mid * dzsdx[i, j, 1]
+        H_mid = _H_mid_margin(Hd[i, j, 1], Hd[i+1, j, 1],
+                              fid[i, j, 1], fid[i+1, j, 1])
+        taud  = rhog * H_mid * DSX[i, j, 1]
         Tx[ip1f, j, 1] = clamp(taud, -lim, lim)
     end
     # Replicate first-face slot per the YelmoMirror loader convention
@@ -120,16 +152,15 @@ function calc_driving_stress!(taud_acx, taud_acy,
     # y-direction: same pattern.
     @inbounds for j in 1:Ny, i in 1:Nx
         jp1f = _jp1_modular(j, Ny, Ty_top)
-        H_mid = _H_mid_margin(H_ice_dyn[i, j, 1], H_ice_dyn[i, j+1, 1],
-                              f_ice_dyn[i, j, 1], f_ice_dyn[i, j+1, 1])
-        taud  = rhog * H_mid * dzsdy[i, j, 1]
+        H_mid = _H_mid_margin(Hd[i, j, 1], Hd[i, j+1, 1],
+                              fid[i, j, 1], fid[i, j+1, 1])
+        taud  = rhog * H_mid * DSY[i, j, 1]
         Ty[i, jp1f, 1] = clamp(taud, -lim, lim)
     end
     if Ty_top === Bounded
         @views Ty[:, 1, :] .= Ty[:, 2, :]
     end
-
-    return taud_acx, taud_acy
+    return nothing
 end
 
 # Subgrid driving stress at a grounded↔floating face by piecewise-

@@ -121,7 +121,7 @@ export calc_cb_ref!, calc_c_bed!
 export calc_beta!, stagger_beta!
 export calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
 export calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!
-export gq2d_nodes
+export gq2d_nodes, gq2d_nodes_2pt
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!
 export stagger_visc_aa_ab!
 export calc_jacobian_vel_3D_uxyterms!

@@ -95,17 +95,21 @@ function calc_visc_eff_3D_aa!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                               zeta_aa::AbstractVector{<:Real},
                               dx::Real, dy::Real,
                               n_glen::Real, eps_0::Real)
-    # Wrapper: extract Field views, materialise zeta, look up topology,
-    # dispatch to the parametric kernel below. Same wrapper-+-parametric-
-    # kernel template as the Lever-2 dyn 3D refactors.
-    V       = interior(visc_eff)
-    ux_int  = interior(ux)
-    uy_int  = interior(uy)
-    ATT_int = interior(ATT)
-    fi_int  = interior(f_ice)
+    # Wrapper: lift to halo-inclusive `field.data` OffsetArrays, look
+    # up topology, dispatch to the parametric kernel below. Same
+    # wrapper-+-parametric-kernel template as the Lever-2 dyn 3D
+    # refactors. Interior cells live at offset indices `1:Nx, 1:Ny, 1:Nz`
+    # — kernel addressing matches the previous `interior(...)` form
+    # without per-call SubArray construction.
+    V       = visc_eff.data
+    ux_int  = ux.data
+    uy_int  = uy.data
+    ATT_int = ATT.data
+    fi_int  = f_ice.data
 
-    Nx, Ny = size(V, 1), size(V, 2)
-    Nz     = size(V, 3)
+    Nx = visc_eff.grid.Nx
+    Ny = visc_eff.grid.Ny
+    Nz = visc_eff.grid.Nz
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_aa!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
@@ -134,7 +138,11 @@ function _calc_visc_eff_3D_aa_kernel!(
     p2 = -1.0 / n_glen_f
     eps_0_sq = eps_0_f^2
 
-    fill!(V, _VISC_MIN)
+    # Interior-only initialisation (callers may pass halo-inclusive
+    # `field.data` OffsetArrays, where `fill!` would also touch halos).
+    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        V[i, j, k] = _VISC_MIN
+    end
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi_int[i, j, 1] == 1.0
@@ -219,19 +227,20 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                                  zeta_aa::AbstractVector{<:Real},
                                  dx::Real, dy::Real,
                                  n_glen::Real, eps_0::Real)
-    # Wrapper: extract Field views, allocate the per-call strain-rate
-    # scratch matrices, look up topology, and dispatch into the
-    # parametric kernel below. Allocation in the wrapper is tiny
-    # (~30 KB for 4×Nx×Ny Float64 matrices); the kernel hot path is
-    # alloc-free.
-    V       = interior(visc_eff)
-    ux_int  = interior(ux)
-    uy_int  = interior(uy)
-    ATT_int = interior(ATT)
-    fi_int  = interior(f_ice)
+    # Wrapper: lift to halo-inclusive `field.data` OffsetArrays, allocate
+    # the per-call strain-rate scratch matrices, look up topology, and
+    # dispatch into the parametric kernel below. Allocation in the
+    # wrapper is tiny (~30 KB for 4×Nx×Ny Float64 matrices); the kernel
+    # hot path is alloc-free.
+    V       = visc_eff.data
+    ux_int  = ux.data
+    uy_int  = uy.data
+    ATT_int = ATT.data
+    fi_int  = f_ice.data
 
-    Nx, Ny = size(V, 1), size(V, 2)
-    Nz     = size(V, 3)
+    Nx = visc_eff.grid.Nx
+    Ny = visc_eff.grid.Ny
+    Nz = visc_eff.grid.Nz
     Nz == length(zeta_aa) || error(
         "calc_visc_eff_3D_nodes!: visc_eff has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
@@ -273,8 +282,11 @@ function _calc_visc_eff_3D_nodes_kernel!(
     p2 = -1.0 / n_glen_f
     eps_0_sq = eps_0_f^2
 
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
-    fill!(V, _VISC_MIN)
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
+    # Interior-only init (callers may pass halo-inclusive `field.data`).
+    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        V[i, j, k] = _VISC_MIN
+    end
 
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi_int[i, j, 1] == 1.0
@@ -477,15 +489,32 @@ interior shape `(Nx+1, Ny+1, 1)`. The corner east-and-north of cell
 H_ice may consume it.
 """
 function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric kernel below. Same wrapper-+-parametric-kernel template
+    # as the dyn 3D refactors — `_neighbor_ip1` / `_jp1_modular` fold at
+    # compile time when `Tx_top` / `Ty_top` enter the kernel as `Type`
+    # parameters.
     Vab = interior(visc_ab)
     V   = interior(visc)
     fi  = interior(f_ice)
 
     Nx, Ny = size(V, 1), size(V, 2)
-    fill!(Vab, 0.0)
 
     Tx_top = topology(visc_ab.grid, 1)
     Ty_top = topology(visc_ab.grid, 2)
+
+    _stagger_visc_aa_ab_kernel!(Vab, V, fi, Tx_top, Ty_top, Nx, Ny)
+    return visc_ab
+end
+
+# Compute kernel: parametric topology, plain arrays. Inner loop is
+# alloc-free.
+function _stagger_visc_aa_ab_kernel!(
+        Vab, V, fi,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
+
+    fill!(Vab, 0.0)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -512,5 +541,5 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
             Vab[ip1f, jp1f, 1] = acc / k_count
         end
     end
-    return visc_ab
+    return nothing
 end

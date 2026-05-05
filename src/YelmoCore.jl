@@ -638,6 +638,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_iter_now               = Ref{Int}(0),
         ssa_solver_workspace       = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
         ssa_amg_cache              = Ref{Any}(nothing),
+        # Reusable diagonal-inverse buffer for the `:jacobi`
+        # preconditioner — `_build_ssa_precond` refreshes
+        # `d_inv = 1.0 ./ diag(A)` into this buffer in-place each Picard
+        # iteration (was a fresh `Vector{Float64}` allocation per iter
+        # before).
+        ssa_jacobi_d_inv           = Vector{Float64}(undef, N_rows),
         # CSC cache for the SSA stiffness matrix. The COO triplets
         # written by `_assemble_ssa_matrix!` change values across
         # Picard iterations but the *structure* (set of unique

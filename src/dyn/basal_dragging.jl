@@ -312,16 +312,21 @@ function _calc_beta_aa_power_plastic!(beta_int::AbstractArray,
                                       c_int::AbstractArray, fi_int::AbstractArray,
                                       q::Float64, u_0::Float64,
                                       simple_stagger::Bool,
-                                      Tx_top::Type{<:AbstractTopology},
-                                      Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
-
-    # Initialize friction to zero everywhere (Fortran line 949).
-    fill!(beta_int, 0.0)
+                                      ::Type{Tx_top}, ::Type{Ty_top},
+                                      Nx::Int, Ny::Int,
+                                      ) where {Tx_top<:AbstractTopology,
+                                               Ty_top<:AbstractTopology}
+    # Initialize the interior to zero (Fortran line 949). Loop instead
+    # of `fill!` so callers can pass the field's halo-inclusive
+    # OffsetArray data directly without zeroing halos.
+    @inbounds for j in 1:Ny, i in 1:Nx
+        beta_int[i, j, 1] = 0.0
+    end
 
     # 2D Gauss-Legendre nodes (4 nodes for n=2 — counter-clockwise from
-    # SW corner; matches Fortran `gq2D_init`).
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+    # SW corner; matches Fortran `gq2D_init`). NTuple{4,Float64} via
+    # `gq2d_nodes_2pt` — alloc-free.
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
 
     @inbounds for j in 1:Ny, i in 1:Nx
         # Topology-aware neighbour indices (Fortran line 955).
@@ -420,11 +425,16 @@ function _calc_beta_aa_reg_coulomb!(beta_int::AbstractArray,
                                     c_int::AbstractArray, fi_int::AbstractArray,
                                     q::Float64, u_0::Float64,
                                     simple_stagger::Bool,
-                                    Tx_top::Type{<:AbstractTopology},
-                                    Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
-    fill!(beta_int, 0.0)
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+                                    ::Type{Tx_top}, ::Type{Ty_top},
+                                    Nx::Int, Ny::Int,
+                                    ) where {Tx_top<:AbstractTopology,
+                                             Ty_top<:AbstractTopology}
+    # Zero the interior (matching `_calc_beta_aa_power_plastic!`).
+    @inbounds for j in 1:Ny, i in 1:Nx
+        beta_int[i, j, 1] = 0.0
+    end
+    # 2-point Gauss-Legendre via const NTuple — alloc-free.
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
 
     @inbounds for j in 1:Ny, i in 1:Nx
         # Topology-aware neighbour indices (Fortran line 1066, "infinite" BC
@@ -498,10 +508,11 @@ end
 function _scale_beta_gl_fraction!(beta_int::AbstractArray,
                                   fg_int::AbstractArray,
                                   f_gl::Float64,
-                                  Tx_top::Type{<:AbstractTopology},
-                                  Ty_top::Type{<:AbstractTopology})
+                                  ::Type{Tx_top}, ::Type{Ty_top},
+                                  Nx::Int, Ny::Int,
+                                  ) where {Tx_top<:AbstractTopology,
+                                           Ty_top<:AbstractTopology}
     (0.0 ≤ f_gl ≤ 1.0) || error("scale_beta_gl_fraction: f_gl must be in [0, 1]; got $f_gl")
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:(Nx - 1)
         # Topology-aware neighbour indices: clamp under Bounded
         # (Fortran "infinite" BC), wrap under Periodic.
@@ -522,9 +533,9 @@ end
 # H_grnd → 0.
 function _scale_beta_gl_Hgrnd!(beta_int::AbstractArray,
                                Hg_int::AbstractArray,
-                               H_grnd_lim::Float64)
+                               H_grnd_lim::Float64,
+                               Nx::Int, Ny::Int)
     H_grnd_lim > 0.0 || error("scale_beta_gl_Hgrnd: H_grnd_lim must be > 0; got $H_grnd_lim")
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         f_scale = max(min(Hg_int[i, j, 1], H_grnd_lim) / H_grnd_lim, 0.0)
         beta_int[i, j, 1] *= f_scale
@@ -538,8 +549,8 @@ end
 function _scale_beta_gl_zstar!(beta_int::AbstractArray,
                                H_int::AbstractArray, fi_int::AbstractArray,
                                zb_int::AbstractArray, zsl_int::AbstractArray,
-                               rho_ice::Float64, rho_sw::Float64)
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
+                               rho_ice::Float64, rho_sw::Float64,
+                               Nx::Int, Ny::Int)
     rho_sw_ice = rho_sw / rho_ice
     @inbounds for j in 1:Ny, i in 1:Nx
         if fi_int[i, j, 1] > 0.0
@@ -612,61 +623,78 @@ function calc_beta!(beta, c_bed, ux_b, uy_b,
                     H_grnd_lim::Real,
                     beta_min::Real,
                     rho_ice::Real, rho_sw::Real)
-    beta_int = interior(beta)
-    c_int    = interior(c_bed)
-    ux_int   = interior(ux_b)
-    uy_int   = interior(uy_b)
-    H_int    = interior(H_ice)
-    fi_int   = interior(f_ice)
-    Hg_int   = interior(H_grnd)
-    fg_int   = interior(f_grnd)
-    zb_int   = interior(z_bed)
-    zsl_int  = interior(z_sl)
+    # Lift to halo-inclusive `field.data` OffsetArrays — interior cells
+    # are at offset indices `1:Nx, 1:Ny` so kernel addressing is
+    # unchanged from the `interior(field)` form, but no SubArray is
+    # constructed per call.
+    beta_int = beta.data
+    c_int    = c_bed.data
+    ux_int   = ux_b.data
+    uy_int   = uy_b.data
+    H_int    = H_ice.data
+    fi_int   = f_ice.data
+    Hg_int   = H_grnd.data
+    fg_int   = f_grnd.data
+    zb_int   = z_bed.data
+    zsl_int  = z_sl.data
+
+    Nx = beta.grid.Nx
+    Ny = beta.grid.Ny
 
     Tx_top = topology(beta.grid, 1)
     Ty_top = topology(beta.grid, 2)
+
+    bu0_f  = Float64(beta_u0)
+    bq_f   = Float64(beta_q)
+    bgl_f  = Float64(beta_gl_f)
+    bm_f   = Float64(beta_min)
+    Hgl_f  = Float64(H_grnd_lim)
+    rhoi_f = Float64(rho_ice)
+    rhosw_f = Float64(rho_sw)
 
     # === Step 1 (Fortran line 393-437): beta_method dispatch ===
     if beta_method == -1
         # External — no-op.
     elseif beta_method == 0
-        fill!(beta_int, Float64(beta_const))
+        bc_f = Float64(beta_const)
+        @inbounds for j in 1:Ny, i in 1:Nx
+            beta_int[i, j, 1] = bc_f
+        end
     elseif beta_method == 1
         # Linear law via power-plastic (q=1).
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     1.0, Float64(beta_u0), false,
-                                     Tx_top, Ty_top)
+                                     1.0, bu0_f, false,
+                                     Tx_top, Ty_top, Nx, Ny)
     elseif beta_method == 2
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     Float64(beta_q), Float64(beta_u0), false,
-                                     Tx_top, Ty_top)
+                                     bq_f, bu0_f, false,
+                                     Tx_top, Ty_top, Nx, Ny)
     elseif beta_method == 3
         _calc_beta_aa_reg_coulomb!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                   Float64(beta_q), Float64(beta_u0), false,
-                                   Tx_top, Ty_top)
+                                   bq_f, bu0_f, false,
+                                   Tx_top, Ty_top, Nx, Ny)
     elseif beta_method == 4
         _calc_beta_aa_power_plastic!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                     Float64(beta_q), Float64(beta_u0), true,
-                                     Tx_top, Ty_top)
+                                     bq_f, bu0_f, true,
+                                     Tx_top, Ty_top, Nx, Ny)
     elseif beta_method == 5
         _calc_beta_aa_reg_coulomb!(beta_int, ux_int, uy_int, c_int, fi_int,
-                                   Float64(beta_q), Float64(beta_u0), true,
-                                   Tx_top, Ty_top)
+                                   bq_f, bu0_f, true,
+                                   Tx_top, Ty_top, Nx, Ny)
     else
         error("calc_beta!: beta_method = $beta_method not recognised; expected -1..5.")
     end
 
     # === Step 2 (Fortran line 444-476): beta_gl_scale post-scaling ===
     if beta_gl_scale == 0
-        _scale_beta_gl_fraction!(beta_int, fg_int, Float64(beta_gl_f),
-                                 Tx_top, Ty_top)
+        _scale_beta_gl_fraction!(beta_int, fg_int, bgl_f,
+                                 Tx_top, Ty_top, Nx, Ny)
     elseif beta_gl_scale == 1
-        _scale_beta_gl_Hgrnd!(beta_int, Hg_int, Float64(H_grnd_lim))
+        _scale_beta_gl_Hgrnd!(beta_int, Hg_int, Hgl_f, Nx, Ny)
     elseif beta_gl_scale == 2
         _scale_beta_gl_zstar!(beta_int, H_int, fi_int, zb_int, zsl_int,
-                              Float64(rho_ice), Float64(rho_sw))
+                              rhoi_f, rhosw_f, Nx, Ny)
     elseif beta_gl_scale == 3
-        Nx, Ny = size(beta_int, 1), size(beta_int, 2)
         @inbounds for j in 1:Ny, i in 1:Nx
             beta_int[i, j, 1] *= fg_int[i, j, 1]
         end
@@ -675,7 +703,6 @@ function calc_beta!(beta, c_bed, ux_b, uy_b,
     end
 
     # === Step 3 (Fortran line 483): zero beta on purely floating cells.
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         if fg_int[i, j, 1] == 0.0
             beta_int[i, j, 1] = 0.0
@@ -683,11 +710,10 @@ function calc_beta!(beta, c_bed, ux_b, uy_b,
     end
 
     # === Step 4 (Fortran line 515): beta_min floor on positive values.
-    bm = Float64(beta_min)
     @inbounds for j in 1:Ny, i in 1:Nx
         b = beta_int[i, j, 1]
-        if b > 0.0 && b < bm
-            beta_int[i, j, 1] = bm
+        if b > 0.0 && b < bm_f
+            beta_int[i, j, 1] = bm_f
         end
     end
 
@@ -732,13 +758,14 @@ end
 function _stagger_beta_aa_mean!(beta_acx_int::AbstractArray, beta_acy_int::AbstractArray,
                                 beta_int::AbstractArray, fi_int::AbstractArray,
                                 fg_int::AbstractArray,
-                                Tx_top::Type{<:AbstractTopology},
-                                Ty_top::Type{<:AbstractTopology})
-    # beta_acx_int has interior shape (Nx+1, Ny, 1) under Bounded and
-    # (Nx, Ny, 1) under Periodic. The face-east of cell (i, j) lives at
+                                ::Type{Tx_top}, ::Type{Ty_top},
+                                Nx::Int, Ny::Int,
+                                ) where {Tx_top<:AbstractTopology,
+                                         Ty_top<:AbstractTopology}
+    # beta_acx_int has interior face indices `1:(Nx+1)` under Bounded and
+    # `1:Nx` under Periodic. The face-east of cell (i, j) lives at
     # `_ip1_modular(i, Nx, Tx_top)`: `i+1` under Bounded, wrapped under
     # Periodic.
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
         jp1 = _neighbor_jp1(j, Ny, Ty_top)
@@ -774,11 +801,18 @@ function _stagger_beta_aa_mean!(beta_acx_int::AbstractArray, beta_acy_int::Abstr
     # Replicate the leading face slot (matches `calc_driving_stress!`).
     # Bounded only — under Periodic the leading slot is the wrapped
     # eastern/northern face that was just populated by the loop.
+    # Explicit interior loops (rather than `[1, :, :] .= [2, :, :]`) so
+    # callers can pass halo-inclusive `field.data` OffsetArrays — the
+    # `:` slice would otherwise touch the y/x halos.
     if Tx_top === Bounded
-        @views beta_acx_int[1, :, :] .= beta_acx_int[2, :, :]
+        @inbounds for j in 1:Ny
+            beta_acx_int[1, j, 1] = beta_acx_int[2, j, 1]
+        end
     end
     if Ty_top === Bounded
-        @views beta_acy_int[:, 1, :] .= beta_acy_int[:, 2, :]
+        @inbounds for i in 1:Nx
+            beta_acy_int[i, 1, 1] = beta_acy_int[i, 2, 1]
+        end
     end
     return nothing
 end
@@ -790,9 +824,10 @@ function _stagger_beta_aa_gl_upstream!(beta_acx_int::AbstractArray,
                                        beta_int::AbstractArray,
                                        fi_int::AbstractArray,
                                        fg_int::AbstractArray,
-                                       Tx_top::Type{<:AbstractTopology},
-                                       Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
+                                       ::Type{Tx_top}, ::Type{Ty_top},
+                                       Nx::Int, Ny::Int,
+                                       ) where {Tx_top<:AbstractTopology,
+                                                Ty_top<:AbstractTopology}
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
         jp1 = _neighbor_jp1(j, Ny, Ty_top)
@@ -824,9 +859,10 @@ function _stagger_beta_aa_gl_downstream!(beta_acx_int::AbstractArray,
                                          beta_int::AbstractArray,
                                          fi_int::AbstractArray,
                                          fg_int::AbstractArray,
-                                         Tx_top::Type{<:AbstractTopology},
-                                         Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
+                                         ::Type{Tx_top}, ::Type{Ty_top},
+                                         Nx::Int, Ny::Int,
+                                         ) where {Tx_top<:AbstractTopology,
+                                                  Ty_top<:AbstractTopology}
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
         jp1 = _neighbor_jp1(j, Ny, Ty_top)
@@ -858,9 +894,10 @@ function _stagger_beta_aa_gl_subgrid!(beta_acx_int::AbstractArray,
                                       fg_int::AbstractArray,
                                       fg_acx_int::AbstractArray,
                                       fg_acy_int::AbstractArray,
-                                      Tx_top::Type{<:AbstractTopology},
-                                      Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
+                                      ::Type{Tx_top}, ::Type{Ty_top},
+                                      Nx::Int, Ny::Int,
+                                      ) where {Tx_top<:AbstractTopology,
+                                               Ty_top<:AbstractTopology}
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
         jp1 = _neighbor_jp1(j, Ny, Ty_top)
@@ -902,9 +939,10 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                                            fg_int::AbstractArray,
                                            fg_acx_int::AbstractArray,
                                            fg_acy_int::AbstractArray,
-                                           Tx_top::Type{<:AbstractTopology},
-                                           Ty_top::Type{<:AbstractTopology})
-    Nx, Ny = size(beta_int, 1), size(beta_int, 2)
+                                           ::Type{Tx_top}, ::Type{Ty_top},
+                                           Nx::Int, Ny::Int,
+                                           ) where {Tx_top<:AbstractTopology,
+                                                    Ty_top<:AbstractTopology}
     @inbounds for j in 1:Ny, i in 1:Nx
         im1 = _neighbor_im1(i, Nx, Tx_top)
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -1011,20 +1049,25 @@ function stagger_beta!(beta_acx, beta_acy, beta,
                        f_grnd, f_grnd_acx, f_grnd_acy;
                        beta_gl_stag::Int,
                        beta_min::Real)
-    # Wrapper: lift Field views, look up topology, dispatch into the
-    # parametric beta_min floor below. The dispatched helpers
-    # (`_stagger_beta_*`) already accept `Tx_top, Ty_top` as runtime
-    # values; making them parametric is a separate, larger refactor.
-    bx_int = interior(beta_acx)
-    by_int = interior(beta_acy)
-    b_int  = interior(beta)
-    H_int  = interior(H_ice)
-    fi_int = interior(f_ice)
-    ux_int = interior(ux)
-    uy_int = interior(uy)
-    fg_int = interior(f_grnd)
-    fgx_int = interior(f_grnd_acx)
-    fgy_int = interior(f_grnd_acy)
+    # Wrapper: lift each Field's underlying `OffsetArray` storage
+    # (`field.data`), look up topology + interior cell counts, then
+    # dispatch into the parametric `_stagger_beta_*` helpers and the
+    # `beta_min` floor kernel. All take `Tx_top` / `Ty_top` as `Type`
+    # parameters so the `_neighbor_ip1` / `_ip1_modular` topology helpers
+    # fold at compile time on the concrete subtype.
+    bx_int  = beta_acx.data
+    by_int  = beta_acy.data
+    b_int   = beta.data
+    H_int   = H_ice.data
+    fi_int  = f_ice.data
+    ux_int  = ux.data
+    uy_int  = uy.data
+    fg_int  = f_grnd.data
+    fgx_int = f_grnd_acx.data
+    fgy_int = f_grnd_acy.data
+
+    Nx = beta.grid.Nx
+    Ny = beta.grid.Ny
 
     Tx_top = topology(beta_acx.grid, 1)
     Ty_top = topology(beta_acy.grid, 2)
@@ -1036,30 +1079,30 @@ function stagger_beta!(beta_acx, beta_acy, beta,
         # Fortran line 560 always calls mean staggering first, then
         # (line 563-600) optionally overlays the GL modifier.
         _stagger_beta_aa_mean!(bx_int, by_int, b_int, fi_int, fg_int,
-                               Tx_top, Ty_top)
+                               Tx_top, Ty_top, Nx, Ny)
 
         if beta_gl_stag == 0
             # Already done.
         elseif beta_gl_stag == 1
             _stagger_beta_aa_gl_upstream!(bx_int, by_int, b_int, fi_int, fg_int,
-                                          Tx_top, Ty_top)
+                                          Tx_top, Ty_top, Nx, Ny)
         elseif beta_gl_stag == 2
             _stagger_beta_aa_gl_downstream!(bx_int, by_int, b_int, fi_int, fg_int,
-                                            Tx_top, Ty_top)
+                                            Tx_top, Ty_top, Nx, Ny)
         elseif beta_gl_stag == 3
             _stagger_beta_aa_gl_subgrid!(bx_int, by_int, b_int, fi_int, fg_int,
-                                         fgx_int, fgy_int, Tx_top, Ty_top)
+                                         fgx_int, fgy_int,
+                                         Tx_top, Ty_top, Nx, Ny)
         elseif beta_gl_stag == 4
             _stagger_beta_aa_gl_subgrid_flux!(bx_int, by_int, b_int,
                                               H_int, fi_int, ux_int, uy_int,
                                               fg_int, fgx_int, fgy_int,
-                                              Tx_top, Ty_top)
+                                              Tx_top, Ty_top, Nx, Ny)
         else
             error("stagger_beta!: beta_gl_stag = $beta_gl_stag not recognised; expected -1..4.")
         end
     end
 
-    Nx, Ny = size(b_int, 1), size(b_int, 2)
     _stagger_beta_min_floor_kernel!(bx_int, by_int, Float64(beta_min),
                                      Tx_top, Ty_top, Nx, Ny)
 
