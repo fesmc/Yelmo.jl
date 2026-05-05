@@ -154,6 +154,9 @@ export therm_step!
 export calc_specific_heat_capacity, calc_thermal_conductivity, calc_T_pmp
 export calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_f_pmp!
 export calc_dzeta_terms!
+export convert_to_enthalpy, convert_to_enthalpy_3D!
+export define_temp_linear_3D!, define_temp_robin_3D!
+export define_temp_linear_column!, define_temp_robin_column!
 
 # YelmoIO
 export init_output
