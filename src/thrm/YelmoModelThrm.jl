@@ -17,12 +17,19 @@ Port plan (incremental):
   - **PR1**: foundation. Module scaffolding, `therm_step!` dispatching
     `method = "fixed"` as a no-op, foundation kernels (`solve_tridiag!`,
     properties, `calc_dzeta_terms!`).
-  - **PR2 (this commit)**: analytic solvers `linear`, `robin`,
-    `robin-cold`. Adds the per-step property update (cp / kt / T_pmp),
-    the Q_rock-from-Q_geo fallback, the analytic dispatch, and the
+  - **PR2**: analytic solvers `linear`, `robin`, `robin-cold`.
+    Adds the per-step property update (cp / kt / T_pmp), the
+    Q_rock-from-Q_geo fallback, the analytic dispatch, and the
     universal post-step diagnostics (`T_prime`, `T_prime_b`, `f_pmp`,
     `enth`).
-  - **PR3**: heat sources (`Q_strn`, `Q_b`) and basal water (`H_w`).
+  - **PR3 (this commit)**: heat sources (`Q_strn`, `Q_b`) and basal
+    water (`H_w`, `dHwdt`). Adds `qb_method ∈ {1, 2}` dispatch, the
+    `use_strain_sia` toggle for the SIA-style strain-heating
+    approximation, and the per-step `H_w` mass-balance update inside
+    a `dt > 0` gate. With analytic / fixed methods the Fortran RK2
+    half-then-full split degenerates to a single full-dt update; PR4
+    will reintroduce the split when the implicit solver writes
+    `bmb_grnd`.
   - **PR4**: implicit `temp` solver + bedrock column.
   - **PR5**: `enth` solver (port-only, not benchmarked).
   - **PR6**: horizontal advection (`advecxy`) + `bmb_grnd` +
@@ -37,10 +44,20 @@ Out of scope: `enth-poly` (~1929 lines of adaptive CTS solver) and
 module YelmoModelThrm
 
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
-using Oceananigans.Grids: znodes
+using Oceananigans.Grids: znodes, topology, AbstractTopology
 using Oceananigans.Fields: interior
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
+
+# Topology-aware neighbour helpers + 2-point Gauss-Legendre quadrature.
+# These logically belong in a shared `src/utils/` module — they are
+# not dyn-specific. Imported here from `YelmoModelDyn` until the
+# layering cleanup lands.
+using ..YelmoModelDyn: gq2d_nodes_2pt
+import ..YelmoModelDyn: gq2d_interp_to_node,
+                        _neighbor_im1, _neighbor_ip1,
+                        _neighbor_jm1, _neighbor_jp1,
+                        _ip1_modular,  _jp1_modular
 
 import ..YelmoCore: therm_step!
 
@@ -51,12 +68,18 @@ export therm_step!,
        calc_dzeta_terms!,
        convert_to_enthalpy, convert_to_enthalpy_3D!,
        define_temp_linear_3D!, define_temp_robin_3D!,
-       define_temp_linear_column!, define_temp_robin_column!
+       define_temp_linear_column!, define_temp_robin_column!,
+       calc_strain_heating!, calc_strain_heating_sia!,
+       calc_basal_heating_simplestagger!, calc_basal_heating_nodes!,
+       calc_basal_water_local!
 
 include("properties.jl")
 include("dzeta.jl")
 include("enthalpy.jl")
 include("solvers_analytic.jl")
+include("strain_heating.jl")
+include("basal_heating.jl")
+include("basal_water.jl")
 
 """
     therm_step!(y::YelmoModel, dt) -> y
@@ -67,27 +90,37 @@ on `y.p.ytherm.method`.
 Phase order (Fortran `calc_ytherm`, yelmo_thermodynamics.f90:22):
 
   1. **Properties** — refresh `cp`, `kt` from current `T_ice` (or pin
-     to `const_cp` / `const_kt` per `y.p.ytherm`); refresh `T_pmp`
-     from current `H_ice`.
-  2. **Q_rock fallback** — if `Q_rock` is identically zero (first
-     step), seed from `bnd.Q_geo` to give the Robin solver a
-     non-degenerate basal flux. Subsequent steps reuse the previous
-     value.
-  3. **Method dispatch** —
-       - `fixed`              : pass-through (no T_ice update).
-       - `linear`             : `define_temp_linear_3D!`.
-       - `robin`              : `define_temp_robin_3D!(cold=false)`.
-       - `robin-cold`         : `define_temp_robin_3D!(cold=true)`.
-       - `temp`               : not yet ported (PR4).
-       - `enth`               : not yet ported (PR5).
-       - `enth-poly`          : out of scope.
-  4. **Enthalpy** — `convert_to_enthalpy_3D!` keeps `enth` consistent
+     to `const_cp` / `const_kt`); refresh `T_pmp` from current `H_ice`.
+  2. **Basal heat Q_b** — `calc_basal_heating_simplestagger!`
+     (`qb_method = 1`) or `calc_basal_heating_nodes!`
+     (`qb_method = 2`, default).
+  3. **Strain heat Q_strn** — `calc_strain_heating!` (general
+     `4 * visc * de^2`) or `calc_strain_heating_sia!`
+     (`use_strain_sia = true`).
+  4. **dQsdT = 0** — Fortran-faithful (the `dQsdT` derivative is
+     gated behind a hard-coded `false` in calc_ytherm).
+  5. **Q_rock fallback** — if `Q_rock` is identically zero (first
+     step), seed from `bnd.Q_geo` for a non-degenerate basal flux.
+  6. **Time-stepped block** (`dt > 0` only):
+       a. `calc_basal_water_local!` — single full-dt update of `H_w`
+          / `dHwdt` (Fortran's RK2 half-then-full split degenerates
+          to a single update for analytic / fixed methods; PR4 will
+          reintroduce the split).
+       b. **Method dispatch** —
+            - `fixed`        : pass-through (no T_ice update).
+            - `linear`       : `define_temp_linear_3D!`.
+            - `robin`        : `define_temp_robin_3D!(cold=false)`.
+            - `robin-cold`   : `define_temp_robin_3D!(cold=true)`.
+            - `temp`         : not yet ported (PR4).
+            - `enth`         : not yet ported (PR5).
+            - `enth-poly`    : out of scope.
+  7. **Enthalpy** — `convert_to_enthalpy_3D!` keeps `enth` consistent
      with the just-written `(T_ice, omega)`.
-  5. **Diagnostics** — `T_prime = T_ice - T_pmp`, `T_prime_b =
+  8. **Diagnostics** — `T_prime = T_ice - T_pmp`, `T_prime_b =
      T_prime[:, :, 1]`, `f_pmp` via `calc_f_pmp!`.
 
-Steps 1, 2, 4, 5 always run, even for `method = "fixed"`. Heat
-sources (`Q_strn`, `Q_b`) and basal water (`H_w`) are PR3.
+Steps 1–5, 7, 8 always run, even for `method = "fixed"` and at
+`dt = 0`. Step 6 runs only when `dt > 0`.
 
 `therm_step!` does NOT advance `y.time`.
 """
@@ -101,6 +134,7 @@ function therm_step!(y::YelmoModel, dt::Float64)
     method  = par.method
     c       = y.c
     zeta_aa = znodes(y.gt, Center())
+    zeta_ac = znodes(y.gt, Face())
 
     # 1. Thermal property update.
     if par.use_const_cp
@@ -116,74 +150,149 @@ function therm_step!(y::YelmoModel, dt::Float64)
     calc_T_pmp_3D!(y.thrm.T_pmp, y.tpo.H_ice, zeta_aa,
                    c.T0, c.T_pmp_beta, c.rho_ice, c.g)
 
-    # 2. Q_rock fallback: first step seeds Q_rock from Q_geo so the
-    #    Robin solver has a non-zero basal heat flux. Mirrors Fortran
-    #    `calc_ytherm` lines 122-124. Uses `interior(...)` so we look
-    #    at and write to interior cells only.
+    # 2. Heat sources — basal frictional heating Q_b.
+    if par.qb_method == 1
+        calc_basal_heating_simplestagger!(y.thrm.Q_b,
+                                          y.dyn.ux_b, y.dyn.uy_b,
+                                          y.dyn.taub_acx, y.dyn.taub_acy,
+                                          c.sec_year)
+    elseif par.qb_method == 2
+        calc_basal_heating_nodes!(y.thrm.Q_b,
+                                  y.dyn.ux_b, y.dyn.uy_b,
+                                  y.dyn.taub_acx, y.dyn.taub_acy,
+                                  y.tpo.f_ice, c.sec_year)
+    else
+        error("therm_step!: unknown qb_method=$(par.qb_method); supported: 1 (\"aa\"), 2 (\"nodes\").")
+    end
+
+    # 3. Heat sources — internal strain heating Q_strn.
+    if par.use_strain_sia
+        calc_strain_heating_sia!(y.thrm.Q_strn,
+                                 y.dyn.ux, y.dyn.uy,
+                                 y.tpo.dzsdx, y.tpo.dzsdy,
+                                 y.tpo.H_ice,
+                                 zeta_aa, zeta_ac, c.rho_ice, c.g)
+    else
+        calc_strain_heating!(y.thrm.Q_strn, y.dyn.strn_de, y.mat.visc)
+    end
+
+    # 4. dQ_strn/dT — Fortran gates this behind a hard-coded
+    #    `calculate_Q_strn_derivative = .FALSE.`, leaving dQsdT at zero.
+    #    Mirror that.
+    fill!(interior(y.thrm.dQsdT), 0.0)
+
+    # 5. Q_rock fallback: first step seeds Q_rock from Q_geo so the
+    #    column solvers have a non-zero basal heat flux. Mirrors
+    #    Fortran `calc_ytherm` lines 122-124.
     Q_rock_int = interior(y.thrm.Q_rock)
     if maximum(Q_rock_int) == 0.0
         copyto!(Q_rock_int, interior(y.bnd.Q_geo))
     end
 
-    # 3. Method dispatch — write `T_ice` and `omega`.
-    if method == "fixed"
-        # Pass-through. Leave T_ice and omega alone.
-    elseif method == "linear"
-        define_temp_linear_3D!(y.thrm.T_ice, y.thrm.omega,
-                               y.tpo.H_ice, y.bnd.T_srf,
-                               zeta_aa,
-                               c.T0, c.T_pmp_beta, c.rho_ice, c.g)
-    elseif method == "robin"
-        define_temp_robin_3D!(y.thrm.T_ice, y.thrm.omega,
-                              y.thrm.T_pmp, y.thrm.cp, y.thrm.kt,
-                              y.thrm.Q_rock, y.bnd.T_srf, y.tpo.H_ice,
-                              y.bnd.smb_ref, y.thrm.bmb_grnd, y.tpo.f_grnd,
-                              zeta_aa, c.rho_ice, c.sec_year;
-                              cold=false)
-    elseif method == "robin-cold"
-        define_temp_robin_3D!(y.thrm.T_ice, y.thrm.omega,
-                              y.thrm.T_pmp, y.thrm.cp, y.thrm.kt,
-                              y.thrm.Q_rock, y.bnd.T_srf, y.tpo.H_ice,
-                              y.bnd.smb_ref, y.thrm.bmb_grnd, y.tpo.f_grnd,
-                              zeta_aa, c.rho_ice, c.sec_year;
-                              cold=true)
-    elseif method == "temp"
-        error("therm_step!: method=\"$(method)\" (implicit temperature " *
-              "solver, production target) lands in the temp+bedrock " *
-              "milestone (PR4). Use \"fixed\", \"linear\", \"robin\", " *
-              "or \"robin-cold\" for now.")
-    elseif method == "enth"
-        error("therm_step!: method=\"$(method)\" (enthalpy solver) " *
-              "lands in the enth milestone (PR5). Note: enth is ported " *
-              "but not benchmarked against the Mirror — the Mirror path " *
-              "showed issues on the Fortran side. Use \"fixed\" or " *
-              "\"temp\" (once PR4 lands) for now.")
-    elseif method == "enth-poly"
-        error("therm_step!: method=\"$(method)\" (polythermal CTS-adaptive " *
-              "solver) is out of scope for the Yelmo.jl thrm port. The " *
-              "Fortran `ice_enthalpy_poly.f90` (~1929 lines) is not " *
-              "planned for porting. Use \"temp\" (production) once PR4 " *
-              "lands.")
-    else
-        error("therm_step!: unknown method=\"$(method)\". Supported: " *
-              "\"fixed\", \"linear\", \"robin\", \"robin-cold\" (PR2). " *
-              "Coming: \"temp\" (PR4); \"enth\" (PR5).")
-    end
+    # 6. Time-stepped block (basal water + method dispatch).
+    #    Fortran `calc_ytherm` runs the H_w update + analytic / implicit
+    #    solver only when `dt > 0`. With analytic methods the
+    #    H_w-half-step + H_w-full-step RK2 split degenerates to a
+    #    single full-dt update (the analytic solver does not touch
+    #    `bmb_grnd`), so we collapse to one `calc_basal_water_local!`
+    #    call here. PR4 will reintroduce the two-stage split once the
+    #    implicit solver writes `bmb_grnd`.
+    if dt > 0.0
+        # 6a. Basal water layer. Fortran does an RK2-style half-then-
+        #     full update around the method dispatch; with the analytic
+        #     methods (which never touch `bmb_grnd`) the half-update is
+        #     overwritten by the full-dt update, so we collapse to one
+        #     call. PR4 will reintroduce the two-stage split for the
+        #     implicit solver.
+        Nx_2D = y.thrm.H_w.grid.Nx
+        Ny_2D = y.thrm.H_w.grid.Ny
+        bmb_w_scratch = Array{Float64}(undef, Nx_2D, Ny_2D, 1)
+        _fill_bmb_w_scratch!(bmb_w_scratch, y.thrm.bmb_grnd,
+                             c.rho_ice, c.rho_w)
+        _calc_basal_water_local_kernel!(y.thrm.H_w.data, y.thrm.dHwdt.data,
+                                        y.tpo.f_ice.data, y.tpo.f_grnd.data,
+                                        bmb_w_scratch,
+                                        dt, Float64(par.till_rate),
+                                        Float64(par.H_w_max),
+                                        Nx_2D, Ny_2D)
 
-    # 4. Update enth from (T_ice, omega, T_pmp, cp, L). For analytic
+        # 6b. Method dispatch — write `T_ice` and `omega`.
+        if method == "fixed"
+            # Pass-through. Leave T_ice and omega alone.
+        elseif method == "linear"
+            define_temp_linear_3D!(y.thrm.T_ice, y.thrm.omega,
+                                   y.tpo.H_ice, y.bnd.T_srf,
+                                   zeta_aa,
+                                   c.T0, c.T_pmp_beta, c.rho_ice, c.g)
+        elseif method == "robin"
+            define_temp_robin_3D!(y.thrm.T_ice, y.thrm.omega,
+                                  y.thrm.T_pmp, y.thrm.cp, y.thrm.kt,
+                                  y.thrm.Q_rock, y.bnd.T_srf, y.tpo.H_ice,
+                                  y.bnd.smb_ref, y.thrm.bmb_grnd, y.tpo.f_grnd,
+                                  zeta_aa, c.rho_ice, c.sec_year;
+                                  cold=false)
+        elseif method == "robin-cold"
+            define_temp_robin_3D!(y.thrm.T_ice, y.thrm.omega,
+                                  y.thrm.T_pmp, y.thrm.cp, y.thrm.kt,
+                                  y.thrm.Q_rock, y.bnd.T_srf, y.tpo.H_ice,
+                                  y.bnd.smb_ref, y.thrm.bmb_grnd, y.tpo.f_grnd,
+                                  zeta_aa, c.rho_ice, c.sec_year;
+                                  cold=true)
+        elseif method == "temp"
+            error("therm_step!: method=\"$(method)\" (implicit temperature " *
+                  "solver, production target) lands in the temp+bedrock " *
+                  "milestone (PR4). Use \"fixed\", \"linear\", \"robin\", " *
+                  "or \"robin-cold\" for now.")
+        elseif method == "enth"
+            error("therm_step!: method=\"$(method)\" (enthalpy solver) " *
+                  "lands in the enth milestone (PR5). Note: enth is ported " *
+                  "but not benchmarked against the Mirror — the Mirror path " *
+                  "showed issues on the Fortran side. Use \"fixed\" or " *
+                  "\"temp\" (once PR4 lands) for now.")
+        elseif method == "enth-poly"
+            error("therm_step!: method=\"$(method)\" (polythermal CTS-adaptive " *
+                  "solver) is out of scope for the Yelmo.jl thrm port. The " *
+                  "Fortran `ice_enthalpy_poly.f90` (~1929 lines) is not " *
+                  "planned for porting. Use \"temp\" (production) once PR4 " *
+                  "lands.")
+        else
+            error("therm_step!: unknown method=\"$(method)\". Supported: " *
+                  "\"fixed\", \"linear\", \"robin\", \"robin-cold\" (PR2). " *
+                  "Coming: \"temp\" (PR4); \"enth\" (PR5).")
+        end
+    end  # end if dt > 0
+
+    # 7. Update enth from (T_ice, omega, T_pmp, cp, L). For analytic
     #    methods omega is identically zero, so enth = cp * T_ice; the
     #    formula is general and handles the temperate enth solver
     #    once it lands in PR5.
     convert_to_enthalpy_3D!(y.thrm.enth, y.thrm.T_ice, y.thrm.omega,
                             y.thrm.T_pmp, y.thrm.cp, c.L_ice)
 
-    # 5. Homologous-temperature + pressure-melting fraction.
+    # 8. Homologous-temperature + pressure-melting fraction.
     _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b,
                       y.thrm.T_ice, y.thrm.T_pmp)
     calc_f_pmp!(y.thrm.f_pmp, y.thrm.T_ice, y.thrm.T_pmp, y.tpo.f_grnd;
                 gamma=par.gamma)
 
     return y
+end
+
+# Helper: fill a 2D scratch buffer with `bmb_w = -bmb_grnd * (rho_ice
+# / rho_w)`. Mirrors the inline expression at Fortran calc_ytherm:134
+# / 206. The buffer is shaped (Nx, Ny, 1) to match the OffsetArray
+# convention of `interior(field)`.
+function _fill_bmb_w_scratch!(bmb_w::AbstractArray{Float64,3},
+                              bmb_grnd_field,
+                              rho_ice::Real, rho_w::Real)
+    Bg     = bmb_grnd_field.data
+    Nx     = bmb_grnd_field.grid.Nx
+    Ny     = bmb_grnd_field.grid.Ny
+    factor = -Float64(rho_ice) / Float64(rho_w)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        bmb_w[i, j, 1] = factor * Bg[i, j, 1]
+    end
+    return bmb_w
 end
 
 # Compute T_prime = T_ice - T_pmp (3D) and T_prime_b = T_prime[:, :, 1]
