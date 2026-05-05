@@ -464,15 +464,20 @@ function _adaptive_step!(y, dt_outer::Float64,
         remaining  = target_time - y.time
         dt_attempt = max(_equal_sub_step(dt_now, remaining), dt_min)
         eta = NaN
+        accepted_iter = 0
+        wallclock_s = 0.0
 
         accepted = false
         for iter_redo in 1:pc_n_redo
             snapshot!(scratch.snap, y)
+            t0 = time()
             eta = pc_step!(scheme, y, dt_attempt, scratch)
+            wallclock_s += time() - t0
 
             # Accept if error within tol, or last redo, or hit dt_min.
             if eta <= pc_tol || iter_redo == pc_n_redo || dt_attempt <= dt_min
                 accepted = true
+                accepted_iter = iter_redo
                 break
             end
 
@@ -490,6 +495,7 @@ function _adaptive_step!(y, dt_outer::Float64,
         # sees the true history. `_dt_ratio` does its own floor at
         # 1e-8 to keep the divisor finite.
         _push_history!(scratch, eta, dt_attempt)
+        _maybe_log_timestep!(y, dt_attempt, eta, accepted_iter, wallclock_s)
 
         # Pick next sub-dt via the controller, clamped per-step
         # to [0.5, 2.0] of the previous dt and overall to [dt_min, dt_ceil].
@@ -577,10 +583,40 @@ the safety net of the corrector identity.
 function _fixed_step!(y, dt_outer::Float64,
                       scheme::PCScheme, scratch::PCScratch, p_yelmo)
     snapshot!(scratch.snap, y)
+    t0 = time()
     eta = pc_step!(scheme, y, dt_outer, scratch)
+    wallclock_s = time() - t0
     scratch.n_steps_taken += 1
     _push_history!(scratch, eta, dt_outer)
+    _maybe_log_timestep!(y, dt_outer, eta, 1, wallclock_s)
     return y
+end
+
+
+# ===== Lazy timestep-log accessor =====
+
+# When `y.p.yelmo.log_timestep == true`, lazily create a `TimestepLog`
+# at `<rundir>/yelmo_timesteps.nc` and append one row per accepted PC
+# step. No-op otherwise. The log is cached on
+# `y.dyn.scratch.timestep_log[]` (allocated as `Ref{Any}(nothing)` by
+# `_alloc_yelmo_groups`, mirroring the `pc_scratch` lazy pattern).
+function _maybe_log_timestep!(y, dt_now::Real, eta::Real,
+                              iter_redo::Integer, wallclock_s::Real)
+    (y.p === nothing || !y.p.yelmo.log_timestep) && return nothing
+    cached = y.dyn.scratch.timestep_log[]
+    log = if cached === nothing
+        new_log = init_timestep_log!(y)
+        y.dyn.scratch.timestep_log[] = new_log
+        new_log
+    else
+        cached::TimestepLog
+    end
+    write_timestep_row!(log, y;
+                        dt_now      = dt_now,
+                        eta         = eta,
+                        iter_redo   = iter_redo,
+                        wallclock_s = wallclock_s)
+    return nothing
 end
 
 

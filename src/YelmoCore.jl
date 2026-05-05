@@ -666,7 +666,10 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # call to `step!` with `dt_method != 0` — the type lives in a
     # later-included module, so eagerly typing it here would create
     # an awkward forward-reference. Mirror the `ssa_amg_cache` pattern.
-    pc_scratch = (pc_scratch = Ref{Any}(nothing),)
+    # `timestep_log` slot follows the same lazy pattern; populated only
+    # when `y.p.yelmo.log_timestep = true` (src/timestep_log.jl).
+    pc_scratch = (pc_scratch   = Ref{Any}(nothing),
+                  timestep_log = Ref{Any}(nothing),)
 
     # DIVA scratch (src/dyn/velocity_diva.jl). The Picard outer loop
     # there mirrors SSA's structure but operates on the depth-averaged
