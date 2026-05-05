@@ -624,7 +624,7 @@ function calc_velocity_diva!(y)
         A = _build_or_refresh_ssa_csc!(sc,
                                        sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
                                        nnz_now, N_rows, iter)
-        x = _solve_ssa_linear!(sc, A, sc.ssa_b_vec, ssa)
+        x = _solve_ssa_linear!(sc.ssa_x_vec, sc, A, sc.ssa_b_vec, ssa)
 
         # Step 9 — unpack into ux_bar / uy_bar (NOT ux_b / uy_b — the
         # DIVA matrix solves for the depth-averaged velocity directly).

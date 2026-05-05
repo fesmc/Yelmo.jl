@@ -1066,7 +1066,16 @@ function _build_ssa_precond(scratch,
         scratch.ssa_amg_cache[] = nothing
         return nothing, false
     elseif ssa.precond === :jacobi
-        d_inv = 1.0 ./ diag(A)
+        # Refresh the cached `d_inv` buffer in-place (was a fresh
+        # `Vector{Float64}` allocation each Picard iter before).
+        d_inv = scratch.ssa_jacobi_d_inv
+        N_rows = size(A, 1)
+        length(d_inv) == N_rows || error(
+            "_build_ssa_precond: scratch.ssa_jacobi_d_inv has length " *
+            "$(length(d_inv)), expected $(N_rows).")
+        @inbounds for k in 1:N_rows
+            d_inv[k] = 1.0 / A[k, k]
+        end
         any(!isfinite, d_inv) && error("_build_ssa_precond: Jacobi " *
               "preconditioner has non-finite diagonal entries (singular " *
               "row?). Check the SSA mask handling and matrix assembly.")
@@ -1091,24 +1100,31 @@ function _build_ssa_precond(scratch,
 end
 
 """
-    _solve_ssa_linear!(scratch, A::SparseMatrixCSC{Float64,Int},
-                       b::Vector{Float64}, ssa::SSASolver) -> Vector{Float64}
+    _solve_ssa_linear!(x_dest, scratch, A::SparseMatrixCSC{Float64,Int},
+                       b::Vector{Float64}, ssa::SSASolver) -> x_dest
 
 Solve `A x = b` for the SSA linear system using the configured Krylov
-method + preconditioner (per `ssa.precond`). Returns `x` (a fresh
-`Vector{Float64}` sized to match `b`). Uses the Krylov workspace
-stored in `scratch.ssa_solver_workspace` so per-call allocation is
-minimal.
+method + preconditioner (per `ssa.precond`). Writes the solution into
+the caller-supplied `x_dest::Vector{Float64}` (must have `length ==
+length(b)`) and returns the same vector. Uses the Krylov workspace in
+`scratch.ssa_solver_workspace` and the cached Jacobi `d_inv` buffer in
+`scratch.ssa_jacobi_d_inv` so per-call allocation is minimal.
 
 Soft-warns (does not error) on non-convergence — Fortran-faithful;
 the outer Picard loop is the safety net for poor inner convergence.
 """
-function _solve_ssa_linear!(scratch,
+function _solve_ssa_linear!(x_dest::Vector{Float64},
+                            scratch,
                             A::SparseMatrixCSC{Float64,Int},
                             b::Vector{Float64},
                             ssa::SSASolver)
+    length(x_dest) == length(b) || error(
+        "_solve_ssa_linear!: x_dest length $(length(x_dest)) ≠ b length $(length(b))")
+
     # Build (or rebuild) the preconditioner. The matrix coefficients
-    # change every Picard iteration so we cannot cache across calls.
+    # change every Picard iteration so we cannot cache across calls;
+    # for `:jacobi` the d_inv vector is refreshed in-place into
+    # `scratch.ssa_jacobi_d_inv`.
     M, ldiv_flag = _build_ssa_precond(scratch, A, ssa)
 
     # Run the configured Krylov method. Currently only :bicgstab is
@@ -1125,12 +1141,14 @@ function _solve_ssa_linear!(scratch,
                       rtol = ssa.rtol, itmax = ssa.itmax,
                       history = false)
         end
-        x = copy(workspace.x)
+        # Copy the workspace solution into the caller-supplied buffer
+        # (in-place — was `copy(workspace.x)` returning a fresh Vector).
+        copyto!(x_dest, workspace.x)
         if !workspace.stats.solved
-            res = norm(A * x .- b)
+            res = norm(A * x_dest .- b)
             @warn "SSA BiCGStab did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
         end
-        return x
+        return x_dest
     else
         error("_solve_ssa_linear!: method=$(ssa.method) not yet implemented. " *
               "Currently only :bicgstab is supported.")
@@ -1609,7 +1627,7 @@ function calc_velocity_ssa!(y)
         A = _build_or_refresh_ssa_csc!(sc,
                                        sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
                                        nnz_now, N_rows, iter)
-        x = _solve_ssa_linear!(sc, A, sc.ssa_b_vec, ssa)
+        x = _solve_ssa_linear!(sc.ssa_x_vec, sc, A, sc.ssa_b_vec, ssa)
 
         # ---- Step 9: unpack x → ux_b, uy_b face slots. ----
         Tx_top = topology(y.dyn.ux_b.grid, 1)

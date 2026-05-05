@@ -43,12 +43,13 @@ _bounded_2d(Nx, Ny; dx=1.0) = RectilinearGrid(size=(Nx, Ny),
 # Test set 1 — `_solve_ssa_linear!` Krylov+AMG plumbing
 # ======================================================================
 
-# Build a minimal scratch struct — only needs the Krylov workspace +
-# AMG cache fields used by `_solve_ssa_linear!`.
+# Build a minimal scratch struct — only needs the Krylov workspace,
+# AMG cache, and Jacobi d_inv buffer fields used by `_solve_ssa_linear!`.
 function _build_solver_scratch(N_rows)
     return (
         ssa_solver_workspace = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
         ssa_amg_cache        = Ref{Any}(nothing),
+        ssa_jacobi_d_inv     = Vector{Float64}(undef, N_rows),
     )
 end
 
@@ -59,7 +60,8 @@ end
 
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-10, itmax = 100)   # default precond = :jacobi
-    x = _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
     @test scratch.ssa_solver_workspace.stats.solved == true
     @test norm(A * x .- b) / norm(b) < 1e-8
@@ -74,7 +76,8 @@ end
 
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-10, itmax = 100, precond = :amg_sa)
-    x = _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
     @test scratch.ssa_solver_workspace.stats.solved == true
     @test norm(A * x .- b) / norm(b) < 1e-8
@@ -89,7 +92,8 @@ end
 
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-10, itmax = 200, precond = :none)
-    x = _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
     @test scratch.ssa_solver_workspace.stats.solved == true
     @test norm(A * x .- b) / norm(b) < 1e-8
@@ -115,7 +119,8 @@ end
 
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-10, itmax = 100)
-    x = _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
     @test scratch.ssa_solver_workspace.stats.solved == true
     @test norm(A * x .- b) / norm(b) < 1e-8
@@ -132,7 +137,8 @@ end
     b = ones(n)
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :amg_sa, smoother = :jacobi)
-    @test_throws ErrorException _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    @test_throws ErrorException _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 end
 
 @testset "_solve_ssa_linear!: unrecognized precond errors clearly" begin
@@ -141,7 +147,8 @@ end
     b = ones(n)
     scratch = _build_solver_scratch(n)
     ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :ilu0)
-    @test_throws ErrorException _solve_ssa_linear!(scratch, A, b, ssa)
+    x_dest = Vector{Float64}(undef, length(b))
+    @test_throws ErrorException _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 end
 # ======================================================================
 # Test set 2 — Picard helpers
