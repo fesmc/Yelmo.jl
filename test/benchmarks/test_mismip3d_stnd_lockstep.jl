@@ -47,7 +47,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -90,6 +90,9 @@ function _mismip3d_lockstep_params()
             enh_shlf   = 1.0,
         ),
         ytopo = ytopo_params(),
+        # Mirror MISMIP3D namelist: `ytherm.method = "fixed"` keeps
+        # `therm_step!` a no-op for this benchmark.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 

@@ -140,7 +140,8 @@ end
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
                    p      = YelmoModelParameters("tpo-mask-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -336,7 +337,8 @@ end
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
                    p      = YelmoModelParameters("tpo-smoke";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -409,7 +411,8 @@ end
                    rundir = mktempdir(; prefix="tpo_smb_test_"),
                    alias  = "tpo-smb-test",
                    p      = YelmoModelParameters("tpo-smb-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -505,7 +508,8 @@ end
                    rundir = mktempdir(; prefix="tpo_bmb_test_"),
                    alias  = "tpo-bmb-test",
                    p      = YelmoModelParameters("tpo-bmb-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed")),
+                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -895,9 +899,12 @@ end
         topo_rel_field = "H_ref",
     )
     # `ydyn.solver = "fixed"`: relaxation kernel only, no velocity solve.
+    # `ytherm.method = "fixed"`: thrm decoupled — `therm_step!` runs as
+    # a no-op alongside the other phases.
     p = YelmoModelParameters("tpo-relax-test";
-                             ytopo = p_ytopo,
-                             ydyn  = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"))
+                             ytopo  = p_ytopo,
+                             ydyn   = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
+                             ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed"))
 
     y = YelmoModel(RESTART_PATH, 0.0;
                    p      = p,
@@ -1228,7 +1235,8 @@ end
 # Calving (phase 7) — kernel-level + end-to-end smoke tests.
 # ------------------------------------------------------------------
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params, ydyn_params
+using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params, ydyn_params,
+                            ytherm_params
 
 # Helper: tiny Bounded grid for kernel-level calving tests.
 _calv_grid(nx, ny; dx=1.0) = RectilinearGrid(size=(nx, ny),
@@ -1431,6 +1439,7 @@ end
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
                              calv_grnd_method="zero", dt_lsf=0.0),
         ydyn  = ydyn_params(solver="fixed"),
+        ytherm = ytherm_params(method="fixed"),
     )
     y = YelmoModel(RESTART_PATH, 0.0; alias="calv-kill", p=p, strict=false)
 
@@ -1479,6 +1488,7 @@ end
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16"),
         ydyn  = ydyn_params(solver="fixed"),
+        ytherm = ytherm_params(method="fixed"),
     )
     y_vm = YelmoModel(RESTART_PATH, 0.0; alias="calv-vm",
                       p=p_vm, strict=false)
@@ -1491,6 +1501,7 @@ end
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="bogus"),
         ydyn  = ydyn_params(solver="fixed"),
+        ytherm = ytherm_params(method="fixed"),
     )
     y_b = YelmoModel(RESTART_PATH, 0.0; alias="calv-bogus",
                     p=p_bogus, strict=false)

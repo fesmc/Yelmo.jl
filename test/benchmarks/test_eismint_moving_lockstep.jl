@@ -53,7 +53,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -96,6 +96,10 @@ function _eismint_moving_lockstep_params()
             enh_stream = 1.0,
             enh_shlf   = 1.0,
         ),
+        # therm decoupled — Fortran runs `ytherm.method = "fixed"`
+        # for this benchmark (see header note); Yelmo.jl now exercises
+        # `therm_step!` with the same `"fixed"` no-op.
+        ytherm = ytherm_params(method = "fixed"),
     )
 end
 

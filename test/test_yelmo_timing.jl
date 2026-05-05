@@ -20,7 +20,7 @@ using .YelmoBenchmarks
 
 using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params,
-                           yelmo_params
+                           yelmo_params, ytherm_params
 
 # Same EISMINT-1 moving setup as test/benchmarks/test_eismint_moving.jl,
 # parameterised on the timing flag.
@@ -45,6 +45,9 @@ function _eismint_moving_params(; timing::Bool)
         ymat  = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3,
                             de_max=0.5, enh_method="shear3D",
                             enh_shear=1.0, enh_stream=1.0, enh_shlf=1.0),
+        # therm decoupled — `therm_step!` lands incrementally; the
+        # timing scaffold doesn't exercise thermodynamics.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 
