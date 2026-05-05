@@ -1482,7 +1482,7 @@ function calc_velocity_ssa!(y)
 
     # 1. Compute SSA masks for this dyn step.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
-                   y.tpo.mask_frnt, y.tpo.H_ice, y.tpo.f_ice,
+                   y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                    y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
                    use_ssa = true,
                    lateral_bc = p_ydyn.ssa_lat_bc)
@@ -1501,7 +1501,7 @@ function calc_velocity_ssa!(y)
     zeta_c = znodes(y.gt, Center())
 
     # Pre-step margin setting (Fortran line 160).
-    set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice)
+    set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice_dyn)
 
     converged = false
     iter_now = 0
@@ -1520,12 +1520,12 @@ function calc_velocity_ssa!(y)
             fill!(interior(y.dyn.visc_eff), Float64(p_ydyn.visc_const))
         elseif p_ydyn.visc_method == 1
             calc_visc_eff_3D_nodes!(y.dyn.visc_eff, y.dyn.ux_b, y.dyn.uy_b,
-                                    y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                    y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                     zeta_c, dx, dy,
                                     p_ymat.n_glen, p_ydyn.eps_0)
         elseif p_ydyn.visc_method == 2
             calc_visc_eff_3D_aa!(y.dyn.visc_eff, y.dyn.ux_b, y.dyn.uy_b,
-                                 y.mat.ATT, y.tpo.H_ice, y.tpo.f_ice,
+                                 y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                  zeta_c, dx, dy,
                                  p_ymat.n_glen, p_ydyn.eps_0)
         else
@@ -1557,11 +1557,11 @@ function calc_velocity_ssa!(y)
             interior(y.dyn.visc_eff)[:, :, end]
         calc_visc_eff_int!(y.dyn.visc_eff_int, y.dyn.visc_eff,
                            sc.ssa_visc_eff_b, sc.ssa_visc_eff_s,
-                           y.tpo.H_ice, y.tpo.f_ice, zeta_c)
+                           y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)
 
         # ---- Step 4: beta on aa-cells (uses current ux_b/uy_b/c_bed). ----
         calc_beta!(y.dyn.beta, y.dyn.c_bed, y.dyn.ux_b, y.dyn.uy_b,
-                   y.tpo.H_ice, y.tpo.f_ice, y.tpo.H_grnd, y.tpo.f_grnd,
+                   y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, y.tpo.H_grnd, y.tpo.f_grnd,
                    y.bnd.z_bed, y.bnd.z_sl;
                    beta_method  = p_ydyn.beta_method,
                    beta_const   = p_ydyn.beta_const,
@@ -1575,14 +1575,14 @@ function calc_velocity_ssa!(y)
 
         # ---- Step 5: stagger beta to faces. ----
         stagger_beta!(y.dyn.beta_acx, y.dyn.beta_acy, y.dyn.beta,
-                      y.tpo.H_ice, y.tpo.f_ice, y.dyn.ux_b, y.dyn.uy_b,
+                      y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, y.dyn.ux_b, y.dyn.uy_b,
                       y.tpo.f_grnd, y.tpo.f_grnd_acx, y.tpo.f_grnd_acy;
                       beta_gl_stag = p_ydyn.beta_gl_stag,
                       beta_min     = p_ydyn.beta_min)
 
         # ---- Step 6: stagger viscosity to ab-corner cache. ----
         stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice, y.tpo.f_ice)
+                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
 
         # ---- Step 7: assemble SSA matrix into COO buffers + RHS. ----
         _assemble_ssa_matrix!(
@@ -1592,7 +1592,7 @@ function calc_velocity_ssa!(y)
             y.dyn.beta_acx, y.dyn.beta_acy,
             y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
             y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
-            y.tpo.H_ice, y.tpo.f_ice,
+            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
             y.dyn.taud_acx, y.dyn.taud_acy,
             y.dyn.taul_int_acx, y.dyn.taul_int_acy,
             dx, dy, p_ydyn.beta_min;
@@ -1676,7 +1676,7 @@ function calc_velocity_ssa!(y)
         end
 
         # ---- Step 11: zero out fully-empty-margin face velocities. ----
-        set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice)
+        set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice_dyn)
 
         # ---- Step 12: convergence check (L2 relative residual). ----
         l2_resid = picard_calc_convergence_l2(

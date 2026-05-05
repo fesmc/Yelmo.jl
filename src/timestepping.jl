@@ -398,6 +398,31 @@ end
 _clamp_dt_ratio(rho) = clamp(rho, 0.5, 2.0)
 
 
+# ===== Equal-sub-step rounding =====
+
+# Avoid taking an unnecessarily small "leftover" sub-step at the end
+# of an outer interval. If the controller suggests `dt_now` and the
+# remaining time is `remaining`, split `remaining` into the smallest
+# integer number of equal sub-steps that each fit within `dt_now`:
+#
+#     n_sub      = max(1, ceil(remaining / dt_now))
+#     dt_attempt = remaining / n_sub
+#
+# Examples:
+#   remaining = 1.0, dt_now = 0.95  →  n_sub = 2,  dt_attempt = 0.5
+#   remaining = 1.0, dt_now = 1.0   →  n_sub = 1,  dt_attempt = 1.0
+#   remaining = 0.4, dt_now = 1.0   →  n_sub = 1,  dt_attempt = 0.4
+#
+# Mirrors the Fortran innovation that prevents (e.g.) a `0.95 + 0.05`
+# pair from creating a tiny final sub-step where the SSA Picard solver
+# would burn iterations re-converging on essentially the same H.
+function _equal_sub_step(dt_now::Float64, remaining::Float64)
+    remaining > 0 || return 0.0
+    n_sub = max(1, ceil(Int, remaining / dt_now))
+    return remaining / n_sub
+end
+
+
 # ===== Outer adaptive driver =====
 
 """
@@ -412,6 +437,10 @@ The first sub-step uses a small `dt = min(dt_outer, 1.0)` to avoid
 any first-step transient on cold-started runs (the SSA `vel_max`
 clamp can spike velocity at IC); subsequent sub-steps use the
 controller's recommendation.
+
+Each accepted sub-step uses `_equal_sub_step` to avoid an
+unnecessarily small final fragment (every step, not just the last
+one).
 """
 function _adaptive_step!(y, dt_outer::Float64,
                          scheme::PCScheme, controller::PIController,
@@ -432,17 +461,23 @@ function _adaptive_step!(y, dt_outer::Float64,
     end
 
     while y.time < target_time - 1e-9
-        dt_attempt = min(dt_now, target_time - y.time)
+        remaining  = target_time - y.time
+        dt_attempt = max(_equal_sub_step(dt_now, remaining), dt_min)
         eta = NaN
+        accepted_iter = 0
+        wallclock_s = 0.0
 
         accepted = false
         for iter_redo in 1:pc_n_redo
             snapshot!(scratch.snap, y)
+            t0 = time()
             eta = pc_step!(scheme, y, dt_attempt, scratch)
+            wallclock_s += time() - t0
 
             # Accept if error within tol, or last redo, or hit dt_min.
             if eta <= pc_tol || iter_redo == pc_n_redo || dt_attempt <= dt_min
                 accepted = true
+                accepted_iter = iter_redo
                 break
             end
 
@@ -460,6 +495,7 @@ function _adaptive_step!(y, dt_outer::Float64,
         # sees the true history. `_dt_ratio` does its own floor at
         # 1e-8 to keep the divisor finite.
         _push_history!(scratch, eta, dt_attempt)
+        _maybe_log_timestep!(y, dt_attempt, eta, accepted_iter, wallclock_s)
 
         # Pick next sub-dt via the controller, clamped per-step
         # to [0.5, 2.0] of the previous dt and overall to [dt_min, dt_ceil].
@@ -472,6 +508,115 @@ function _adaptive_step!(y, dt_outer::Float64,
     end
 
     return y
+end
+
+
+# ===== `dt_method = 3` (frozen-velocity sub-cycling) — DEFERRED =====
+#
+# Originally planned as: 1 dyn solve at start-of-step → adaptive topo+MB
+# sub-cycling with Richardson extrapolation (PI42 controller) → 1 mat at
+# end. Operator-splitting model: amortise the expensive dyn solve over
+# the outer dt while letting the cheap topo+MB step adapt freely.
+#
+# Status: implementation tried and reverted. The dyn-first ordering
+# triggers a positive-feedback runaway on EISMINT-1 moving with
+# dt_outer = 100 yr:
+#
+#   step 51 (t=5100):  H[:, 16] still smooth, max uxy ≈ 50 m/yr
+#   step 52 (t=5200):  H profile becomes non-monotonic at i=9
+#                       (1535 → 1935 → 1943 along the radial),
+#                       SIA velocity at the kink jumps from -19 → -123
+#   step 53 (t=5300):  amplification: max uxy → 320 m/yr,
+#                       max H → 5366 m (vs steady state ≈ 3000)
+#   step 54+:          full runaway, max H > 9000.
+#
+# Root cause sketch: `dyn_step!` at outer step k+1 reads `y.tpo.dzsdx`
+# (and other surface-slope diagnostics) computed at the END of step k's
+# last topo. The frozen-velocity sub-cycle of step k advances H by
+# 100 yr with the velocity solved at H_n, leaving H slightly mis-aligned
+# with the velocity that produced it. Step k+1's dyn solve at this
+# mis-aligned state amplifies the inconsistency, the SIA `u ∝ H_face^5`
+# scaling propagates the kink to neighbouring cells, and the next sub-
+# cycle deposits even more ice unevenly. Cascade.
+#
+# Possible future directions:
+#   - **Velocity-PC variant**: re-solve dyn after the sub-cycle and
+#     average with the start-of-step velocity. This is essentially Heun
+#     on the velocity-topo coupling and adds 1 extra dyn solve per
+#     outer step. Restores stability at the cost of ~1.5× cost vs the
+#     original "1 dyn per outer" target.
+#   - **Smaller `dt_outer`**: at `dt_outer ≤ 10 yr` the frozen-velocity
+#     assumption holds tighter and the runaway likely doesn't fire. But
+#     the current `dt_method = 2` (adaptive Heun + PI42 + the Step-A
+#     `H_ice_dyn`/`f_ice_dyn` fix) is already at 1.19× Fortran wall-
+#     clock for `dt_outer = 100 yr`, so the motivation to add a
+#     smaller-dt-only mode is weak.
+#   - **Reorder the dyn-first chain to dyn-then-update_diagnostics-
+#     then-topo**: explicit refresh of `dzsdx` etc. between dyn and
+#     topo. Untested.
+#
+# A failed working prototype (with the Richardson + PI42 sub-cycler)
+# is preserved on the branch `dt-method3-frozen-vel-failed` for future
+# revisit (also see the trace logs under `logs/trace_dt3_*.log`).
+#
+# To re-enable, restore the `_frozen_vel_step!` body, the
+# `FrozenVelScratch` struct, and the dispatch case in `_select_step!`.
+
+
+# ===== Fixed-dt driver =====
+
+"""
+    _fixed_step!(y, dt_outer, scheme, scratch, p_yelmo) -> y
+
+`dt_method = 0` driver: take a single PC attempt at the requested
+`dt_outer`, with no controller and no rejection. The truncation-
+error proxy `eta` is computed and pushed to history as a diagnostic
+(observable via `scratch.eta_history`), but the model always
+accepts the result.
+
+This is intrinsically more robust than a plain forward-Euler step
+(the Heun PC averages two RK stages so the local error is `O(dt²)`
+rather than `O(dt)`) at the cost of running the dyn solve twice
+per outer step. Use when you want a deterministic outer dt with
+the safety net of the corrector identity.
+"""
+function _fixed_step!(y, dt_outer::Float64,
+                      scheme::PCScheme, scratch::PCScratch, p_yelmo)
+    snapshot!(scratch.snap, y)
+    t0 = time()
+    eta = pc_step!(scheme, y, dt_outer, scratch)
+    wallclock_s = time() - t0
+    scratch.n_steps_taken += 1
+    _push_history!(scratch, eta, dt_outer)
+    _maybe_log_timestep!(y, dt_outer, eta, 1, wallclock_s)
+    return y
+end
+
+
+# ===== Lazy timestep-log accessor =====
+
+# When `y.p.yelmo.log_timestep == true`, lazily create a `TimestepLog`
+# at `<rundir>/yelmo_timesteps.nc` and append one row per accepted PC
+# step. No-op otherwise. The log is cached on
+# `y.dyn.scratch.timestep_log[]` (allocated as `Ref{Any}(nothing)` by
+# `_alloc_yelmo_groups`, mirroring the `pc_scratch` lazy pattern).
+function _maybe_log_timestep!(y, dt_now::Real, eta::Real,
+                              iter_redo::Integer, wallclock_s::Real)
+    (y.p === nothing || !y.p.yelmo.log_timestep) && return nothing
+    cached = y.dyn.scratch.timestep_log[]
+    log = if cached === nothing
+        new_log = init_timestep_log!(y)
+        y.dyn.scratch.timestep_log[] = new_log
+        new_log
+    else
+        cached::TimestepLog
+    end
+    write_timestep_row!(log, y;
+                        dt_now      = dt_now,
+                        eta         = eta,
+                        iter_redo   = iter_redo,
+                        wallclock_s = wallclock_s)
+    return nothing
 end
 
 
@@ -499,23 +644,36 @@ end
 Backend for `step!(YelmoModel, dt)`. Dispatches on
 `y.p.yelmo.dt_method`:
 
-  - `0` : fixed forward Euler (one topo + one dyn pass).
-  - `2` : adaptive predictor-corrector (this module's machinery).
+  - `0` : fixed `dt_outer` Heun PC (one attempt, no controller, no
+          rejection). `eta` is computed as a diagnostic.
+  - `2` : adaptive Heun PC with PI42 controller and reject/retry.
 
-Other values error explicitly. Default is `0` to preserve the
-existing fixed-dt behaviour for all current tests.
+Other values error explicitly. `dt_method = 3` (frozen-velocity sub-
+cycling) was prototyped but reverted — see the comment block above
+the `_fixed_step!` definition for what failed and where to revisit.
+
+`y.p === nothing` (parameter-less benchmark constructions) falls
+through to a plain forward-Euler step `_step_fe!` so simple
+in-memory test setups keep working without a `YelmoModelParameters`.
 """
 function _select_step!(y, dt::Float64)
-    method = y.p === nothing ? 0 : Int(y.p.yelmo.dt_method)
-    if method == 0
+    if y.p === nothing
         return _step_fe!(y, dt)
+    end
+    method  = Int(y.p.yelmo.dt_method)
+    scratch = _ensure_pc_scratch!(y)
+    if method == 0
+        # Heun is the only PC scheme implemented. Hardcode it here so a
+        # default `pc_method = "AB-SAM"` (currently a stub) still gives
+        # a usable diagnostic eta. `pc_method` is read but only honoured
+        # when it matches an implemented scheme.
+        return _fixed_step!(y, dt, HEUN(), scratch, y.p.yelmo)
     elseif method == 2
         scheme     = _resolve_pc_scheme(y.p.yelmo.pc_method)
         controller = _resolve_pc_controller(y.p.yelmo.pc_controller)
-        scratch    = _ensure_pc_scratch!(y)
         return _adaptive_step!(y, dt, scheme, controller, scratch, y.p.yelmo)
     else
-        error("step!: unsupported dt_method=$method (use 0=fixed FE or " *
-              "2=adaptive PC).")
+        error("step!: unsupported dt_method=$method (use 0=fixed-dt Heun " *
+              "or 2=adaptive Heun).")
     end
 end

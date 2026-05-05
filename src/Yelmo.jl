@@ -23,6 +23,7 @@ include("mat/YelmoModelMat.jl")
 # `dyn_step!`, and `update_diagnostics!`. Methods land into the
 # top-level `Yelmo` namespace; `step!` (defined in YelmoCore.jl)
 # dispatches into them at runtime via `_select_step!`.
+include("timestep_log.jl")
 include("timestepping.jl")
 include("YelmoIO.jl")
 
@@ -148,6 +149,9 @@ export write_output!
 # Adaptive timestepping (timestepping.jl)
 export PCScheme, HEUN, FE_SBE, AB_SAM
 export PIController, PI42
+
+# Timestep log (timestep_log.jl)
+export TimestepLog, init_timestep_log!, write_timestep_row!
 
 # Timing scaffold (timing.jl)
 export YelmoTimer, @timed_section, reset_timings!, print_timings
