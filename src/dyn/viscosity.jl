@@ -273,7 +273,7 @@ function _calc_visc_eff_3D_nodes_kernel!(
     p2 = -1.0 / n_glen_f
     eps_0_sq = eps_0_f^2
 
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
     fill!(V, _VISC_MIN)
 
     @inbounds for j in 1:Ny, i in 1:Nx
@@ -477,15 +477,32 @@ interior shape `(Nx+1, Ny+1, 1)`. The corner east-and-north of cell
 H_ice may consume it.
 """
 function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric kernel below. Same wrapper-+-parametric-kernel template
+    # as the dyn 3D refactors — `_neighbor_ip1` / `_jp1_modular` fold at
+    # compile time when `Tx_top` / `Ty_top` enter the kernel as `Type`
+    # parameters.
     Vab = interior(visc_ab)
     V   = interior(visc)
     fi  = interior(f_ice)
 
     Nx, Ny = size(V, 1), size(V, 2)
-    fill!(Vab, 0.0)
 
     Tx_top = topology(visc_ab.grid, 1)
     Ty_top = topology(visc_ab.grid, 2)
+
+    _stagger_visc_aa_ab_kernel!(Vab, V, fi, Tx_top, Ty_top, Nx, Ny)
+    return visc_ab
+end
+
+# Compute kernel: parametric topology, plain arrays. Inner loop is
+# alloc-free.
+function _stagger_visc_aa_ab_kernel!(
+        Vab, V, fi,
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
+
+    fill!(Vab, 0.0)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -512,5 +529,5 @@ function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
             Vab[ip1f, jp1f, 1] = acc / k_count
         end
     end
-    return visc_ab
+    return nothing
 end

@@ -312,16 +312,18 @@ function _calc_beta_aa_power_plastic!(beta_int::AbstractArray,
                                       c_int::AbstractArray, fi_int::AbstractArray,
                                       q::Float64, u_0::Float64,
                                       simple_stagger::Bool,
-                                      Tx_top::Type{<:AbstractTopology},
-                                      Ty_top::Type{<:AbstractTopology})
+                                      ::Type{Tx_top}, ::Type{Ty_top},
+                                      ) where {Tx_top<:AbstractTopology,
+                                               Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
 
     # Initialize friction to zero everywhere (Fortran line 949).
     fill!(beta_int, 0.0)
 
     # 2D Gauss-Legendre nodes (4 nodes for n=2 — counter-clockwise from
-    # SW corner; matches Fortran `gq2D_init`).
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+    # SW corner; matches Fortran `gq2D_init`). NTuple{4,Float64} via
+    # `gq2d_nodes_2pt` — alloc-free.
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
 
     @inbounds for j in 1:Ny, i in 1:Nx
         # Topology-aware neighbour indices (Fortran line 955).
@@ -420,11 +422,13 @@ function _calc_beta_aa_reg_coulomb!(beta_int::AbstractArray,
                                     c_int::AbstractArray, fi_int::AbstractArray,
                                     q::Float64, u_0::Float64,
                                     simple_stagger::Bool,
-                                    Tx_top::Type{<:AbstractTopology},
-                                    Ty_top::Type{<:AbstractTopology})
+                                    ::Type{Tx_top}, ::Type{Ty_top},
+                                    ) where {Tx_top<:AbstractTopology,
+                                             Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     fill!(beta_int, 0.0)
-    xr, yr, wt, wt_tot = gq2d_nodes(2)
+    # 2-point Gauss-Legendre via const NTuple — alloc-free.
+    xr, yr, wt, wt_tot = gq2d_nodes_2pt()
 
     @inbounds for j in 1:Ny, i in 1:Nx
         # Topology-aware neighbour indices (Fortran line 1066, "infinite" BC
@@ -498,8 +502,9 @@ end
 function _scale_beta_gl_fraction!(beta_int::AbstractArray,
                                   fg_int::AbstractArray,
                                   f_gl::Float64,
-                                  Tx_top::Type{<:AbstractTopology},
-                                  Ty_top::Type{<:AbstractTopology})
+                                  ::Type{Tx_top}, ::Type{Ty_top},
+                                  ) where {Tx_top<:AbstractTopology,
+                                           Ty_top<:AbstractTopology}
     (0.0 ≤ f_gl ≤ 1.0) || error("scale_beta_gl_fraction: f_gl must be in [0, 1]; got $f_gl")
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:(Nx - 1)
@@ -732,8 +737,9 @@ end
 function _stagger_beta_aa_mean!(beta_acx_int::AbstractArray, beta_acy_int::AbstractArray,
                                 beta_int::AbstractArray, fi_int::AbstractArray,
                                 fg_int::AbstractArray,
-                                Tx_top::Type{<:AbstractTopology},
-                                Ty_top::Type{<:AbstractTopology})
+                                ::Type{Tx_top}, ::Type{Ty_top},
+                                ) where {Tx_top<:AbstractTopology,
+                                         Ty_top<:AbstractTopology}
     # beta_acx_int has interior shape (Nx+1, Ny, 1) under Bounded and
     # (Nx, Ny, 1) under Periodic. The face-east of cell (i, j) lives at
     # `_ip1_modular(i, Nx, Tx_top)`: `i+1` under Bounded, wrapped under
@@ -790,8 +796,9 @@ function _stagger_beta_aa_gl_upstream!(beta_acx_int::AbstractArray,
                                        beta_int::AbstractArray,
                                        fi_int::AbstractArray,
                                        fg_int::AbstractArray,
-                                       Tx_top::Type{<:AbstractTopology},
-                                       Ty_top::Type{<:AbstractTopology})
+                                       ::Type{Tx_top}, ::Type{Ty_top},
+                                       ) where {Tx_top<:AbstractTopology,
+                                                Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -824,8 +831,9 @@ function _stagger_beta_aa_gl_downstream!(beta_acx_int::AbstractArray,
                                          beta_int::AbstractArray,
                                          fi_int::AbstractArray,
                                          fg_int::AbstractArray,
-                                         Tx_top::Type{<:AbstractTopology},
-                                         Ty_top::Type{<:AbstractTopology})
+                                         ::Type{Tx_top}, ::Type{Ty_top},
+                                         ) where {Tx_top<:AbstractTopology,
+                                                  Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -858,8 +866,9 @@ function _stagger_beta_aa_gl_subgrid!(beta_acx_int::AbstractArray,
                                       fg_int::AbstractArray,
                                       fg_acx_int::AbstractArray,
                                       fg_acy_int::AbstractArray,
-                                      Tx_top::Type{<:AbstractTopology},
-                                      Ty_top::Type{<:AbstractTopology})
+                                      ::Type{Tx_top}, ::Type{Ty_top},
+                                      ) where {Tx_top<:AbstractTopology,
+                                               Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
@@ -902,8 +911,9 @@ function _stagger_beta_aa_gl_subgrid_flux!(beta_acx_int::AbstractArray,
                                            fg_int::AbstractArray,
                                            fg_acx_int::AbstractArray,
                                            fg_acy_int::AbstractArray,
-                                           Tx_top::Type{<:AbstractTopology},
-                                           Ty_top::Type{<:AbstractTopology})
+                                           ::Type{Tx_top}, ::Type{Ty_top},
+                                           ) where {Tx_top<:AbstractTopology,
+                                                    Ty_top<:AbstractTopology}
     Nx, Ny = size(beta_int, 1), size(beta_int, 2)
     @inbounds for j in 1:Ny, i in 1:Nx
         im1 = _neighbor_im1(i, Nx, Tx_top)
@@ -1012,9 +1022,11 @@ function stagger_beta!(beta_acx, beta_acy, beta,
                        beta_gl_stag::Int,
                        beta_min::Real)
     # Wrapper: lift Field views, look up topology, dispatch into the
-    # parametric beta_min floor below. The dispatched helpers
-    # (`_stagger_beta_*`) already accept `Tx_top, Ty_top` as runtime
-    # values; making them parametric is a separate, larger refactor.
+    # `_stagger_beta_*` helpers + the parametric beta_min floor below.
+    # All dispatched helpers take `Tx_top` / `Ty_top` as `Type` parameters
+    # (`where {Tx_top<:AbstractTopology, ...}`) so the topology helpers
+    # `_neighbor_ip1` / `_ip1_modular` etc. fold at compile time on the
+    # concrete topology subtype that came out of `topology(grid, n)`.
     bx_int = interior(beta_acx)
     by_int = interior(beta_acy)
     b_int  = interior(beta)

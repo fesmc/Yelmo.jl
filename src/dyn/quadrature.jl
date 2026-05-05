@@ -39,7 +39,17 @@
 
 using FastGaussQuadrature: gausslegendre
 
-export gq2d_nodes
+export gq2d_nodes, gq2d_nodes_2pt
+
+# Const NTuple{4,Float64} tables for the 2-point Gauss-Legendre rule
+# in counter-clockwise corner order — see `gq2d_nodes_2pt` below for
+# the contract. Exposing these as `const` Julia globals avoids the
+# per-call `Vector{Float64}` allocations that `gq2d_nodes(2)` performs.
+const _R_GQ2_2PT     = 1.0 / sqrt(3.0)
+const _XR_GQ2_2PT    = (-_R_GQ2_2PT, +_R_GQ2_2PT, +_R_GQ2_2PT, -_R_GQ2_2PT)
+const _YR_GQ2_2PT    = (-_R_GQ2_2PT, -_R_GQ2_2PT, +_R_GQ2_2PT, +_R_GQ2_2PT)
+const _WT_GQ2_2PT    = (1.0, 1.0, 1.0, 1.0)
+const _WTTOT_GQ2_2PT = 4.0
 
 """
     gq2d_nodes(n::Int = 2)
@@ -106,6 +116,31 @@ function gq2d_nodes(n::Int = 2)
     end
     return xr, yr, wt, sum(wt)
 end
+
+"""
+    gq2d_nodes_2pt()
+        -> (xr::NTuple{4,Float64}, yr::NTuple{4,Float64},
+            wt::NTuple{4,Float64}, wt_tot::Float64)
+
+Allocation-free 2-point Gauss-Legendre rule on `[-1, 1]²`, returned as
+`NTuple{4,Float64}` instead of `Vector{Float64}`. Counter-clockwise
+corner order matches `gq2d_nodes(2)`:
+
+    xr = (-r,  +r,  +r,  -r)
+    yr = (-r,  -r,  +r,  +r)
+    wt = ( 1,   1,   1,   1)
+    wt_tot = 4
+
+with `r = 1/√3`. Use this in hot loops that previously called
+`gq2d_nodes(2)` once per call (e.g. `_calc_beta_aa_*`,
+`calc_visc_eff_3D_nodes!`, `_calc_uz_3D_kernel!`) — the three
+`Vector{Float64}` allocations of the general `gq2d_nodes` are removed.
+NTuple indexing `xr[p]` is alloc-free and inlines.
+
+For `n != 2`, fall back to `gq2d_nodes(n)`.
+"""
+@inline gq2d_nodes_2pt() = (_XR_GQ2_2PT, _YR_GQ2_2PT,
+                            _WT_GQ2_2PT, _WTTOT_GQ2_2PT)
 
 """
     gq2d_shape_functions(xr::Real, yr::Real)
