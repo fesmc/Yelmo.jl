@@ -236,70 +236,78 @@ end
     return max(zb_x + zb_y, Float64(zb_deep))
 end
 
-# Apply the F17 initial state to a YelmoMirror in-place. Reads
-# `b.xc`/`b.yc` (metres) → converts to km for the F17 formula → fills
-# z_bed, H_ice, surface forcing, calving mask. Then `yelmo_sync!`s
-# Julia state back to Fortran so `init_state!` sees the trough
-# topography.
-#
-# `time` is the simulation time at the call (passed through by
-# `BenchmarkSpec.setup_initial_state!`; unused for the F17 setup
-# since the IC has no time dependence).
-function _setup_trough_initial_state!(ymirror, b::TroughBenchmark, time::Real)
+"""
+    apply_trough_f17_ic!(model, b::TroughBenchmark) -> model
+
+Apply the Feldmann-Levermann F17 cold-start initial state to `model`'s
+`.bnd` and `.tpo` subfields:
+
+  - `z_bed`     ← F17 trough formula (`_trough_f17_zbed`).
+  - `H_ice`     ← `50` m for `x ≤ x_cf`, `0` beyond the calving front.
+  - `calv_mask` ← `1` where `x ≥ x_cf`, else `0`.
+  - `z_sl`, `bmb_shlf`, `H_sed` ← `0`.
+  - `T_shlf` ← `T0 = 273.15` K. `T_srf` ← `T0 + b.Tsrf_const`.
+  - `smb_ref` ← `b.smb_const` (m/yr). `Q_geo` ← `b.Qgeo_const` (mW/m²).
+
+Works on any model object that exposes Oceananigans `Field`s under the
+canonical `.bnd.*` / `.tpo.*` paths — i.e. both YelmoMirror (used by
+`_setup_trough_initial_state!` below as the BenchmarkSpec callback)
+and a Yelmo.jl `YelmoModel` (used by `bench_diva_trough.jl` to drive
+the cold-start trajectory). Caller responsibilities:
+
+  - For `YelmoMirror`: call `yelmo_sync!` afterward so `init_state!`
+    sees the new topography (handled by `_setup_trough_initial_state!`).
+  - For `YelmoModel`: call `Yelmo.update_diagnostics!(y)` afterward to
+    refresh `f_ice / f_grnd / mask_frnt` from the new H_ice / z_bed,
+    and zero any pre-existing velocity history (`ux_b`, `uy_b`,
+    `ux_bar`, `uy_bar`, `ux`, `uy`) since this helper does not touch
+    velocity fields.
+
+Mirrors the Fortran initial-state block at
+`yelmo_trough.f90:206-211 + 112-119 + 237`.
+"""
+function apply_trough_f17_ic!(model, b::TroughBenchmark)
     Nx = length(b.xc)
     Ny = length(b.yc)
 
-    # Scratch arrays for the (Nx, Ny) interior fields. Build in pure
-    # Julia, then copy into the YelmoMirror Field interiors.
-    z_bed = zeros(Nx, Ny)
-    H_ice = zeros(Nx, Ny)
+    z_bed     = zeros(Nx, Ny)
+    H_ice     = zeros(Nx, Ny)
+    calv_mask = zeros(Nx, Ny)
 
     @inbounds for j in 1:Ny, i in 1:Nx
         x_km = b.xc[i] * 1e-3
         y_km = b.yc[j] * 1e-3
-        z_bed[i, j] = _trough_f17_zbed(x_km, y_km,
-                                        b.fc_km, b.dc_m, b.wc_km)
-        H_ice[i, j] = (x_km <= b.x_cf_km) ? 50.0 : 0.0
+        z_bed[i, j]     = _trough_f17_zbed(x_km, y_km,
+                                            b.fc_km, b.dc_m, b.wc_km)
+        H_ice[i, j]     = (x_km <= b.x_cf_km) ? 50.0 : 0.0
+        calv_mask[i, j] = (x_km >= b.x_cf_km) ? 1.0  : 0.0
     end
 
-    # === Push 2D fields into the YelmoMirror — mirrors the Fortran
-    # block at yelmo_trough.f90:206-211 plus the boundary loads at
-    # 112-119 plus the calving-front mask at 237.
-    _assign_field!(ymirror.bnd.z_bed,    z_bed)
-    _assign_field!(ymirror.tpo.H_ice,    H_ice)
+    _assign_field!(model.bnd.z_bed,    z_bed)
+    _assign_field!(model.tpo.H_ice,    H_ice)
+    _assign_field!(model.bnd.calv_mask, calv_mask)
 
-    # Boundary forcing (uniform). z_sl=0, bmb_shlf=0, H_sed=0.
-    fill!(interior(ymirror.bnd.z_sl),     0.0)
-    fill!(interior(ymirror.bnd.bmb_shlf), 0.0)
-    fill!(interior(ymirror.bnd.H_sed),    0.0)
+    fill!(interior(model.bnd.z_sl),     0.0)
+    fill!(interior(model.bnd.bmb_shlf), 0.0)
+    fill!(interior(model.bnd.H_sed),    0.0)
 
-    # T_shlf = T0 (using the pressure-melting reference from
-    # YelmoConstants — match the Fortran `yelmo1%bnd%c%T0`
-    # = 273.15 K).
     T0 = 273.15
-    fill!(interior(ymirror.bnd.T_shlf), T0)
+    fill!(interior(model.bnd.T_shlf),  T0)
+    fill!(interior(model.bnd.T_srf),   T0 + b.Tsrf_const)
+    fill!(interior(model.bnd.smb_ref), b.smb_const)
+    fill!(interior(model.bnd.Q_geo),   b.Qgeo_const)
 
-    # T_srf = T0 + Tsrf_const [K]
-    fill!(interior(ymirror.bnd.T_srf), T0 + b.Tsrf_const)
+    return model
+end
 
-    # smb (m/yr), Q_geo (mW/m²)
-    fill!(interior(ymirror.bnd.smb_ref), b.smb_const)
-    fill!(interior(ymirror.bnd.Q_geo),   b.Qgeo_const)
-
-    # Calving mask: `True` where x ≥ x_cf  (i.e. ice will be calved
-    # beyond the calving front). Stored as Float64 (0/1) in the
-    # YelmoMirror — mirrors the Fortran logical → C-API double
-    # round-trip.
-    calv_mask = zeros(Nx, Ny)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        x_km = b.xc[i] * 1e-3
-        calv_mask[i, j] = (x_km >= b.x_cf_km) ? 1.0 : 0.0
-    end
-    _assign_field!(ymirror.bnd.calv_mask, calv_mask)
-
-    # Sync Julia → Fortran so init_state! sees the trough topography.
+# YelmoMirror IC callback consumed by `BenchmarkSpec.setup_initial_state!`.
+# Thin wrapper around `apply_trough_f17_ic!` that adds the post-fill
+# `yelmo_sync!` so Fortran's `init_state!` sees the trough topography.
+# `time` is unused (F17 IC has no time dependence) but kept in the
+# signature for parity with the BenchmarkSpec callback contract.
+function _setup_trough_initial_state!(ymirror, b::TroughBenchmark, time::Real)
+    apply_trough_f17_ic!(ymirror, b)
     yelmo_sync!(ymirror)
-
     return ymirror
 end
 

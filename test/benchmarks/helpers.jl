@@ -46,6 +46,7 @@ export run_mirror_benchmark!, load_fixture
 export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma
 export _setup_hom_c_beta!
+export apply_trough_f17_ic!
 
 # Registry callback signature: `(ymirror, time)` → mutate `ymirror`
 # fields and push back to Fortran. The spec author is responsible for

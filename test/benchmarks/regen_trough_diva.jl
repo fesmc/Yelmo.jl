@@ -21,9 +21,8 @@ using .YelmoBenchmarks
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 const SPECS_DIR    = abspath(joinpath(@__DIR__, "specs"))
 const TROUGH_NML   = joinpath(SPECS_DIR, "yelmo_TROUGH.nml")
-const FIX_RESTART      = joinpath(FIXTURES_DIR, "trough_f17_t1000.nc")
-const FIX_RESTART_T2K  = joinpath(FIXTURES_DIR, "trough_f17_t2000.nc")
-const FIX_TS_LOG       = joinpath(FIXTURES_DIR, "trough_f17_timesteps.nc")
+const FIX_RESTART  = joinpath(FIXTURES_DIR, "trough_f17_t1000.nc")
+const FIX_TS_LOG   = joinpath(FIXTURES_DIR, "trough_f17_timesteps.nc")
 
 # Build a patched namelist on disk: log_timestep=True, pc_method="HEUN".
 # Text-substitution against the source namelist — keeps every other
@@ -43,17 +42,18 @@ function patch_namelist(src::AbstractString)
 end
 
 function run_trough_mirror!(b::TroughBenchmark, namelist::AbstractString,
-                              t_out::Float64; t_extra::Float64 = 1000.0)
-    # Two output times: the canonical t=1000 (Yelmo.jl warm-start IC)
-    # plus t_out + t_extra (Mirror end state to compare Yelmo.jl to
-    # after running for `t_extra` more years from the warm start).
+                              t_out::Float64)
+    # Single output time: the canonical t=1000 cold-start fixture
+    # (Mirror's evolution from the F17 IC over [0, t_out]). Also the
+    # reference end-state for `bench_diva_trough.jl`'s cold-start
+    # comparison.
     spec = BenchmarkSpec(
         name           = "trough_f17_regen",
         namelist_path  = namelist,
         grid           = (xc = b.xc, yc = b.yc, grid_name = "TROUGH-F17"),
         time_init      = 0.0,
-        end_time       = t_out + t_extra,
-        output_times   = [t_out, t_out + t_extra],
+        end_time       = t_out,
+        output_times   = [t_out],
         dt             = 5.0,
         setup_initial_state! = (ymirror, t) ->
             YelmoBenchmarks._setup_trough_initial_state!(ymirror, b, t),
@@ -86,14 +86,11 @@ function run_trough_mirror!(b::TroughBenchmark, namelist::AbstractString,
     wallclock = time() - t0
     @info "YelmoMirror finished" wallclock_s=round(wallclock, digits=2)
 
-    # Move restarts into the canonical fixture dir.
-    @assert length(paths) == 2 "expected 2 restart fixtures, got $(length(paths))"
+    # Move restart into the canonical fixture dir.
+    @assert length(paths) == 1 "expected 1 restart fixture, got $(length(paths))"
     isfile(FIX_RESTART) && rm(FIX_RESTART)
     mv(paths[1], FIX_RESTART; force = true)
-    @info "restart written (t=1000)" path=FIX_RESTART size_kb=round(filesize(FIX_RESTART)/1024, digits=1)
-    isfile(FIX_RESTART_T2K) && rm(FIX_RESTART_T2K)
-    mv(paths[2], FIX_RESTART_T2K; force = true)
-    @info "restart written (t=2000)" path=FIX_RESTART_T2K size_kb=round(filesize(FIX_RESTART_T2K)/1024, digits=1)
+    @info "restart written (t=$(Int(t_out)))" path=FIX_RESTART size_kb=round(filesize(FIX_RESTART)/1024, digits=1)
 
     # Find Fortran's `timesteps.nc` under the now-bounded tmp_root.
     # `walkdir` may hit permission-denied entries (TemporaryItems on
@@ -123,19 +120,17 @@ function run_trough_mirror!(b::TroughBenchmark, namelist::AbstractString,
     catch
         "unknown"
     end
-    # Record wallclock (combined for both phases) on both fixture files.
-    for path in (FIX_RESTART, FIX_RESTART_T2K)
-        NCDataset(path, "a") do ds
-            ds.attrib["mirror_wallclock_seconds_total"] = wallclock
-            ds.attrib["mirror_t_init"]            = 0.0
-            ds.attrib["mirror_t_end"]             = t_out + t_extra
-            ds.attrib["mirror_dt_outer_yr"]       = spec.dt
-            ds.attrib["mirror_julia_version"]     = string(VERSION)
-            ds.attrib["mirror_cpu_model"]         = cpu_info
-            ds.attrib["mirror_n_julia_threads"]   = Threads.nthreads()
-            ds.attrib["mirror_pc_method"]         = "HEUN"
-            ds.attrib["mirror_solver"]            = "diva"
-        end
+    # Record wallclock + provenance on the restart fixture.
+    NCDataset(FIX_RESTART, "a") do ds
+        ds.attrib["mirror_wallclock_seconds_total"] = wallclock
+        ds.attrib["mirror_t_init"]            = 0.0
+        ds.attrib["mirror_t_end"]             = t_out
+        ds.attrib["mirror_dt_outer_yr"]       = spec.dt
+        ds.attrib["mirror_julia_version"]     = string(VERSION)
+        ds.attrib["mirror_cpu_model"]         = cpu_info
+        ds.attrib["mirror_n_julia_threads"]   = Threads.nthreads()
+        ds.attrib["mirror_pc_method"]         = "HEUN"
+        ds.attrib["mirror_solver"]            = "diva"
     end
     @info "wallclock recorded" wallclock_s=round(wallclock, digits=2)
     return wallclock
