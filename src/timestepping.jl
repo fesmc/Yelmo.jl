@@ -398,28 +398,34 @@ end
 _clamp_dt_ratio(rho) = clamp(rho, 0.5, 2.0)
 
 
-# ===== Equal-sub-step rounding =====
+# ===== Outer-step boundary limiter =====
 
-# Avoid taking an unnecessarily small "leftover" sub-step at the end
-# of an outer interval. If the controller suggests `dt_now` and the
-# remaining time is `remaining`, split `remaining` into the smallest
-# integer number of equal sub-steps that each fit within `dt_now`:
+# Avoid a lopsided (1 big + 1 tiny) sub-step pair at the end of an
+# outer interval. Mirrors Fortran `limit_adaptive_timestep`
+# (yelmo_timesteps.f90:735): if the controller's `dt_now` is more than
+# half of `remaining` but less than `remaining`, halve `remaining` so
+# we'll take exactly two equal sub-steps. Otherwise leave `dt_now`
+# alone (clamped to `remaining`).
 #
-#     n_sub      = max(1, ceil(remaining / dt_now))
-#     dt_attempt = remaining / n_sub
+# Examples (`remaining = 1.0`):
+#   dt_now = 0.95 → 0.5     (halved: > 0.5 of remaining)
+#   dt_now = 0.5  → 0.5     (unchanged)
+#   dt_now = 0.4  → 0.4     (unchanged: ≤ 0.5 of remaining)
+#   dt_now = 1.0  → 1.0     (unchanged: equals remaining)
+#   dt_now = 1.5  → 1.0     (clamped to remaining)
 #
-# Examples:
-#   remaining = 1.0, dt_now = 0.95  →  n_sub = 2,  dt_attempt = 0.5
-#   remaining = 1.0, dt_now = 1.0   →  n_sub = 1,  dt_attempt = 1.0
-#   remaining = 0.4, dt_now = 1.0   →  n_sub = 1,  dt_attempt = 0.4
-#
-# Mirrors the Fortran innovation that prevents (e.g.) a `0.95 + 0.05`
-# pair from creating a tiny final sub-step where the SSA Picard solver
-# would burn iterations re-converging on essentially the same H.
-function _equal_sub_step(dt_now::Float64, remaining::Float64)
+# This is asymmetric — only large fractions of `remaining` get cut.
+# An earlier port used equal-N-tiling
+# (`dt = remaining / ceil(remaining/dt_now)`) which was strictly more
+# aggressive than Fortran and caused a ratchet-down when combined with
+# seeding `dt_now` from `dt_history[end]` across outer calls.
+function _limit_step(dt_now::Float64, remaining::Float64)
     remaining > 0 || return 0.0
-    n_sub = max(1, ceil(Int, remaining / dt_now))
-    return remaining / n_sub
+    dt = min(dt_now, remaining)
+    if dt / remaining > 0.5 && dt < remaining
+        return 0.5 * remaining
+    end
+    return dt
 end
 
 
@@ -433,14 +439,15 @@ machinery. Internally the driver may take many sub-steps with
 controller-chosen `dt`, and may reject and retry attempts up to
 `pc_n_redo` times when the truncation error exceeds `pc_tol`.
 
-The first sub-step uses a small `dt = min(dt_outer, 1.0)` to avoid
-any first-step transient on cold-started runs (the SSA `vel_max`
-clamp can spike velocity at IC); subsequent sub-steps use the
-controller's recommendation.
+The controller (`_dt_ratio`) is recomputed fresh at the top of every
+sub-step from the persistent `eta_history` / `dt_history` rings,
+mirroring Fortran's `set_adaptive_timestep_pc` call at the head of
+the inner `do n = 1, nstep` loop in `yelmo_ice.f90`. On the very
+first call ever (empty history) we seed conservatively at
+`min(dt_outer, 1.0)`.
 
-Each accepted sub-step uses `_equal_sub_step` to avoid an
-unnecessarily small final fragment (every step, not just the last
-one).
+Before each sub-step `_limit_step` clamps the controller's `dt_now`
+to avoid a lopsided big-then-tiny pair at the outer-step boundary.
 """
 function _adaptive_step!(y, dt_outer::Float64,
                          scheme::PCScheme, controller::PIController,
@@ -452,17 +459,24 @@ function _adaptive_step!(y, dt_outer::Float64,
     dt_min    = Float64(p_yelmo.dt_min)
     dt_ceil   = dt_outer    # never exceed the requested outer step
 
-    # Initial dt for this outer call: re-use the last accepted sub-dt
-    # if we have one, else seed conservatively.
-    dt_now = if isempty(scratch.dt_history)
-        min(dt_ceil, 1.0)
-    else
-        clamp(scratch.dt_history[end], dt_min, dt_ceil)
-    end
-
     while y.time < target_time - 1e-9
-        remaining  = target_time - y.time
-        dt_attempt = max(_equal_sub_step(dt_now, remaining), dt_min)
+        remaining = target_time - y.time
+
+        # Run the controller fresh from history at the top of every
+        # sub-step. Empty history (first call ever) → conservative seed.
+        dt_now = if isempty(scratch.dt_history)
+            min(dt_ceil, 1.0)
+        else
+            eta_n   = scratch.eta_history[end]
+            eta_nm1 = length(scratch.eta_history) >= 2 ? scratch.eta_history[end-1] : 0.0
+            dt_n    = scratch.dt_history[end]
+            dt_nm1  = length(scratch.dt_history)  >= 2 ? scratch.dt_history[end-1]  : 0.0
+            rho = _dt_ratio(controller, eta_n, eta_nm1, dt_n, dt_nm1,
+                            pc_eps, pc_order(scheme))
+            clamp(dt_n * _clamp_dt_ratio(rho), dt_min, dt_ceil)
+        end
+
+        dt_attempt = max(_limit_step(dt_now, remaining), dt_min)
         eta = NaN
         accepted_iter = 0
         wallclock_s = 0.0
@@ -496,15 +510,6 @@ function _adaptive_step!(y, dt_outer::Float64,
         # 1e-8 to keep the divisor finite.
         _push_history!(scratch, eta, dt_attempt)
         _maybe_log_timestep!(y, dt_attempt, eta, accepted_iter, wallclock_s)
-
-        # Pick next sub-dt via the controller, clamped per-step
-        # to [0.5, 2.0] of the previous dt and overall to [dt_min, dt_ceil].
-        eta_n   = scratch.eta_history[end]
-        eta_nm1 = length(scratch.eta_history) >= 2 ? scratch.eta_history[end-1] : 0.0
-        dt_nm1  = length(scratch.dt_history)  >= 2 ? scratch.dt_history[end-1]  : 0.0
-        rho = _dt_ratio(controller, eta_n, eta_nm1, dt_attempt, dt_nm1,
-                        pc_eps, pc_order(scheme))
-        dt_now = clamp(dt_attempt * _clamp_dt_ratio(rho), dt_min, dt_ceil)
     end
 
     return y
