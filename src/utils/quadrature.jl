@@ -2,44 +2,32 @@
 # Gauss-Legendre tensor-product quadrature on a 2D reference square.
 #
 # Mirrors the Fortran `gq2D_class` / `gq2D_init` defined in
-# `fesm-utils/utils/src/gaussian_quadrature.f90` (Yelmo Fortran's
-# `gaussian_quadrature` module). The 2-point Gauss-Legendre rule places
-# 4 quadrature nodes on the reference square `[-1, 1]²` at
+# `fesm-utils/utils/src/gaussian_quadrature.f90`. The 2-point
+# Gauss-Legendre rule places 4 quadrature nodes on the reference
+# square `[-1, 1]²` at
 #
 #     (xr, yr) ∈ {(±1/√3, ±1/√3)}                      (counter-clockwise
 #                                                       from SW corner)
 #
 # all with weight 1.0 and total weight `wt_tot = 4.0`. This rule is
-# exact for bilinear functions on the square (degree 3 in each variable
-# separately).
+# exact for bilinear functions on the square (degree 3 in each
+# variable separately).
 #
-# Backed by [FastGaussQuadrature.jl](https://juliaapproximation.github.io/FastGaussQuadrature.jl/)
-# — `gausslegendre(n)` returns the n-point 1D Gauss-Legendre nodes and
-# weights on `[-1, 1]`, which we tensor-product into 2D.
+# Backed by [FastGaussQuadrature.jl] — `gausslegendre(n)` returns the
+# n-point 1D Gauss-Legendre nodes and weights on `[-1, 1]`, which we
+# tensor-product into 2D.
 #
-# The Fortran node ordering (counter-clockwise from SW corner) is:
+# Originally lived in `src/dyn/quadrature.jl`. Moved to `src/utils/`
+# in PR7-cleanup so `dyn`, `mat`, and `thrm` can all consume them
+# without an `dyn ← thrm` reverse-import smell.
 #
-#       N4----N3
-#       |     |
-#       |     |
-#       N1----N2
-#
-#     N1 = (-r, -r),  N2 = (+r, -r),  N3 = (+r, +r),  N4 = (-r, +r)
-#
-# where r = 1/√3 for the 2-point rule. We match that ordering exactly so
-# Yelmo.jl viscosity / basal-drag kernels can read the nodes in the same
-# index order as their Fortran counterparts (no node-permutation logic
-# at call sites).
-#
-# This file is included from `YelmoModelDyn.jl` and used by the SSA
-# basal-drag helper `calc_beta_aa_power_plastic` and the SSA viscosity
-# helper `calc_visc_eff_3D_nodes!`. The Fortran SIA solver does not use
-# `gq2D`, so this module is SSA-only.
+# Used by:
+#   - dyn:  basal-drag (`calc_beta_aa_*`), viscosity
+#           (`calc_visc_eff_3D_nodes!`), uz (`_calc_uz_3D_kernel!`).
+#   - thrm: basal frictional heating (`calc_basal_heating_nodes!`).
 # ----------------------------------------------------------------------
 
 using FastGaussQuadrature: gausslegendre
-
-export gq2d_nodes, gq2d_nodes_2pt
 
 # Const NTuple{4,Float64} tables for the 2-point Gauss-Legendre rule
 # in counter-clockwise corner order — see `gq2d_nodes_2pt` below for
@@ -77,12 +65,6 @@ counter-clockwise order; only the 2-point rule has the
 counter-clockwise ordering match the column-major scan because each
 "row" has only two nodes. Most Yelmo physics call sites assume `n = 2`
 and the counter-clockwise corner order — extend with care.
-
-Smoke-test self-consistency:
-
-  - Sum of weights equals `wt_tot` (= n² for the [-1, 1] base rule).
-  - For `n = 2`: ∫∫ 1 = 4, ∫∫ x = 0, ∫∫ x² = 4/3, all reproduced
-    exactly via `sum(f(xr, yr) .* wt)`.
 """
 function gq2d_nodes(n::Int = 2)
     n ≥ 1 || error("gq2d_nodes: n must be ≥ 1; got $n")
@@ -124,41 +106,17 @@ end
 
 Allocation-free 2-point Gauss-Legendre rule on `[-1, 1]²`, returned as
 `NTuple{4,Float64}` instead of `Vector{Float64}`. Counter-clockwise
-corner order matches `gq2d_nodes(2)`:
-
-    xr = (-r,  +r,  +r,  -r)
-    yr = (-r,  -r,  +r,  +r)
-    wt = ( 1,   1,   1,   1)
-    wt_tot = 4
-
-with `r = 1/√3`. Use this in hot loops that previously called
-`gq2d_nodes(2)` once per call (e.g. `_calc_beta_aa_*`,
-`calc_visc_eff_3D_nodes!`, `_calc_uz_3D_kernel!`) — the three
-`Vector{Float64}` allocations of the general `gq2d_nodes` are removed.
-NTuple indexing `xr[p]` is alloc-free and inlines.
-
-For `n != 2`, fall back to `gq2d_nodes(n)`.
+corner order matches `gq2d_nodes(2)`.
 """
 @inline gq2d_nodes_2pt() = (_XR_GQ2_2PT, _YR_GQ2_2PT,
                             _WT_GQ2_2PT, _WTTOT_GQ2_2PT)
 
 """
-    gq2d_shape_functions(xr::Real, yr::Real)
-        -> NTuple{4, Float64}
+    gq2d_shape_functions(xr::Real, yr::Real) -> NTuple{4, Float64}
 
 Bilinear shape functions `(N1, N2, N3, N4)` of the reference square,
 evaluated at point `(xr, yr) ∈ [-1, 1]²`. Counter-clockwise corner
-ordering matches `gq2d_nodes`:
-
-    N1(x, y) = (1 - x)(1 - y) / 4    (SW corner is 1, others 0)
-    N2(x, y) = (1 + x)(1 - y) / 4    (SE corner is 1, others 0)
-    N3(x, y) = (1 + x)(1 + y) / 4    (NE corner is 1, others 0)
-    N4(x, y) = (1 - x)(1 + y) / 4    (NW corner is 1, others 0)
-
-Mirrors the Fortran `gq2D%N(:, p)` matrix from
-`fesm-utils/utils/src/gaussian_quadrature.f90:191-196`. Used by
-`gq2d_interp_to_node` to interpolate a corner value to a quadrature
-node.
+ordering matches `gq2d_nodes`.
 """
 @inline function gq2d_shape_functions(xr::Real, yr::Real)
     N1 = (1 - xr) * (1 - yr) / 4
@@ -169,15 +127,11 @@ node.
 end
 
 """
-    gq2d_interp_to_node(v_ab::NTuple{4,Float64}, xr::Real, yr::Real)
-        -> Float64
+    gq2d_interp_to_node(v_ab::NTuple{4,Float64}, xr::Real, yr::Real) -> Float64
 
 Interpolate a 4-corner field `v_ab = (v_SW, v_SE, v_NE, v_NW)` to a
 quadrature node at `(xr, yr) ∈ [-1, 1]²` using the bilinear shape
 functions. Counter-clockwise corner ordering matches `gq2d_nodes`.
-
-Mirrors Fortran's `gq2D_to_nodes` body (`gaussian_quadrature.f90:497-516`):
-`gq.v(p) = sum_n gq.N(n, p) * gq.v_ab(n)`.
 """
 @inline function gq2d_interp_to_node(v_ab::NTuple{4,Float64},
                                      xr::Real, yr::Real)

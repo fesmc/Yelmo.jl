@@ -39,6 +39,16 @@ using ..YelmoSolvers: Solver, SSASolver
 using ..YelmoIntegration: vert_int_trapz_boundary!
 using ..YelmoTiming: @timed_section
 
+# Topology + 2D Gauss-Legendre quadrature helpers — moved out of
+# `dyn` and into `YelmoUtils` (`src/utils/`) so `mat`, `topo`, and
+# `thrm` can consume them without an inter-module reverse import.
+using ..YelmoUtils: gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node,
+                    gq2d_shape_functions,
+                    _ip1_modular, _jp1_modular,
+                    _neighbor_im1, _neighbor_ip1,
+                    _neighbor_jm1, _neighbor_jp1
+using Oceananigans.Grids: Bounded, Periodic, AbstractTopology
+
 import ..YelmoCore: dyn_step!
 
 export dyn_step!,
@@ -48,7 +58,6 @@ export dyn_step!,
        calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
        calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
-       gq2d_nodes, gq2d_nodes_2pt,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
        calc_jacobian_vel_3D_uxyterms!,
@@ -63,8 +72,6 @@ export dyn_step!,
        set_inactive_margins!, calc_basal_stress!,
        dump_ssa_assembly
 
-include("topology_helpers.jl")
-include("quadrature.jl")
 include("driving_stress.jl")
 include("lateral_stress.jl")
 include("neff.jl")

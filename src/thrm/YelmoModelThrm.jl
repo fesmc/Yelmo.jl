@@ -71,17 +71,11 @@ using Oceananigans.Grids: znodes, topology, AbstractTopology
 using Oceananigans.Fields: interior
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
-using ..YelmoUtils: solve_tridiag!
-
-# Topology-aware neighbour helpers + 2-point Gauss-Legendre quadrature.
-# These logically belong in a shared `src/utils/` module — they are
-# not dyn-specific. Imported here from `YelmoModelDyn` until the
-# layering cleanup lands.
-using ..YelmoModelDyn: gq2d_nodes_2pt
-import ..YelmoModelDyn: gq2d_interp_to_node,
-                        _neighbor_im1, _neighbor_ip1,
-                        _neighbor_jm1, _neighbor_jp1,
-                        _ip1_modular,  _jp1_modular
+using ..YelmoUtils: solve_tridiag!,
+                    gq2d_nodes_2pt, gq2d_interp_to_node,
+                    _neighbor_im1, _neighbor_ip1,
+                    _neighbor_jm1, _neighbor_jp1,
+                    _ip1_modular,  _jp1_modular
 
 import ..YelmoCore: therm_step!
 

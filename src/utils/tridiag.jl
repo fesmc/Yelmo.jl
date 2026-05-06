@@ -1,26 +1,15 @@
 # ----------------------------------------------------------------------
-# Shared numerical utilities for Yelmo.jl. Lives at the top level (not
-# inside any per-phase sub-module) so any phase (`thrm`, `mat`, `dyn`,
-# ...) can depend on it without an inter-module layering smell. Mirrors
-# the `YelmoSolvers` (`dyn/solvers.jl`) and `YelmoIntegration`
-# (`integration.jl`) patterns.
+# Tridiagonal-matrix solver (Thomas algorithm).
 #
-# Currently provides:
+# Direct port of Fortran `solver_tridiagonal.f90:solve_tridiag`. Used
+# by every column-wise thermodynamics solver (temp, enthalpy, bedrock,
+# and eventually tracers).
 #
-#   - `solve_tridiag!` — Thomas algorithm for a single tridiagonal
-#     system. Used by every column-wise thermodynamics solver
-#     (temp, enthalpy, bedrock, and eventually tracers). Direct port
-#     of Fortran `solver_tridiagonal.f90:solve_tridiag`.
-#
-# The kernel takes caller-supplied scratch buffers so that the hot
-# loop in a 3D column solver stays alloc-free; an overload that
-# allocates internal scratch is provided for non-perf-critical
-# callers (one-off solves, tests).
+# The kernel takes caller-supplied scratch buffers so the hot loop in
+# a 3D column solver stays alloc-free; an overload that allocates
+# internal scratch is provided for non-perf-critical callers (one-off
+# solves, tests).
 # ----------------------------------------------------------------------
-
-module YelmoUtils
-
-export solve_tridiag!
 
 """
     solve_tridiag!(x, a, b, c, d, cp, dp) -> x
@@ -80,5 +69,3 @@ function solve_tridiag!(x::AbstractVector{Float64},
     dp = Vector{Float64}(undef, n)
     return solve_tridiag!(x, a, b, c, d, cp, dp)
 end
-
-end # module YelmoUtils

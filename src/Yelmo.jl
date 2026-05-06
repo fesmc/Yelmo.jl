@@ -9,7 +9,7 @@ include("YelmoConst.jl")
 # modules so they can use `@timed_section` at their call sites.
 include("timing.jl")
 include("YelmoPar.jl")
-include("utils/tridiag.jl")
+include("utils/YelmoUtils.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
 include("YelmoModelPar.jl")
@@ -68,6 +68,7 @@ export compare
 
 # YelmoUtils
 export solve_tridiag!
+export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 
 # YelmoSolvers
 export Solver, SSASolver
