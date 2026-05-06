@@ -119,6 +119,45 @@ returns m/a (positive = accretion). Two safeties applied in order:
      pathology; mirrors Fortran).
   2. Underflow guard: snap `|bmb_grnd| < 1e-5` to 0.
 """
+# Extrapolate the thermodynamic state (enth / T_ice / omega / T_pmp)
+# from fully-iced neighbours into ice-margin / ice-free cells. Fortran
+# `calc_ytherm_enthalpy_3D:444-477`. The extrapolation gives the rate
+# factor in `mat` (rf_method=1) reasonable starting values at cells
+# that have just been advected ice, improving stability.
+function _extrapolate_thrm_margin!(enth_d, T_d, om_d, Tp_d, fi_d,
+                                   Nx::Int, Ny::Int, Nz::Int)
+    @inbounds for j in 2:(Ny - 1), i in 2:(Nx - 1)
+        if fi_d[i, j, 1] < 1.0
+            # 3×3 neighbour count of fully-iced cells.
+            wt_tot = 0.0
+            for dj in -1:1, di in -1:1
+                if fi_d[i + di, j + dj, 1] == 1.0
+                    wt_tot += 1.0
+                end
+            end
+            if wt_tot > 0.0
+                inv_wt = 1.0 / wt_tot
+                for k in 1:Nz
+                    s_e = 0.0; s_T = 0.0; s_o = 0.0; s_p = 0.0
+                    for dj in -1:1, di in -1:1
+                        if fi_d[i + di, j + dj, 1] == 1.0
+                            s_e += enth_d[i + di, j + dj, k]
+                            s_T += T_d[i + di, j + dj, k]
+                            s_o += om_d[i + di, j + dj, k]
+                            s_p += Tp_d[i + di, j + dj, k]
+                        end
+                    end
+                    enth_d[i, j, k] = s_e * inv_wt
+                    T_d[i, j, k]    = s_T * inv_wt
+                    om_d[i, j, k]   = s_o * inv_wt
+                    Tp_d[i, j, k]   = s_p * inv_wt
+                end
+            end
+        end
+    end
+    return nothing
+end
+
 # Marine-shelf basal temperature approximation (Jenkins 1991, modified
 # to approach T_pmp as the grounding line is approached). Direct port
 # of Fortran `calc_T_base_shlf_approx` (`thermodynamics.f90:1052`).

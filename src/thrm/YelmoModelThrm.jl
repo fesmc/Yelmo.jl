@@ -30,13 +30,36 @@ Port plan (incremental):
     half-then-full split degenerates to a single full-dt update; PR4
     will reintroduce the split when the implicit solver writes
     `bmb_grnd`.
-  - **PR4**: implicit `temp` solver + bedrock column.
-  - **PR5**: `enth` solver (port-only, not benchmarked).
-  - **PR6**: horizontal advection (`advecxy`) + `bmb_grnd` +
-    full `calc_ytherm` orchestrator.
+  - **PR4**: implicit `temp` solver + bedrock column (production
+    target). Adds `calc_advec_horizontal_3D!`,
+    `calc_temp_3D!` / `calc_temp_column!` /
+    `_calc_temp_column_internal!`, `define_temp_bedrock_3D!`
+    (equil) + `define_temp_bedrock_active_3D!` (active), and the
+    Fortran-style RK2 H_w split.
+  - **PR5**: `enth` solver (port-only, not benchmarked). Adds
+    `calc_enth_3D!` / `calc_enth_column!` /
+    `_calc_enth_column_internal!`, `calc_enth_diffusivity!`, and
+    `convert_from_enthalpy_column!`.
+  - **PR6 (this commit)**: ice-margin extrapolation. Adds the
+    Fortran `calc_ytherm_enthalpy_3D:444-477` post-pass that fills
+    ice-free / partial-ice cells with a 3×3 neighbour-average of
+    `enth` / `T_ice` / `omega` / `T_pmp` from fully-iced
+    neighbours, so newly-advected cells inherit reasonable values
+    for downstream consumers (mat's rate factor with rf_method=1).
+    With this, the `temp` and `enth` solvers are at near-Fortran
+    parity inside `therm_step!`.
 
 Out of scope: `enth-poly` (~1929 lines of adaptive CTS solver) and
 `ice_tracer` (belongs to `mat`).
+
+Open follow-ups (not blocking thrm closeout):
+
+  - Julia-native benchmark fixture for the `enth` solver — Mirror's
+    `enth` path is unreliable on the Fortran side, so a Julia
+    self-validation is the right next step.
+  - `mat` `rf_method = 1` (temperature- and water-coupled
+    Arrhenius) gating now has the upstream therm fields available;
+    enabling it is a `mat` follow-up.
 
 `therm_step!` does NOT advance `y.time` — that is owned by
 `topo_step!`, matching the dyn/mat convention.
@@ -302,6 +325,20 @@ function therm_step!(y::YelmoModel, dt::Float64)
             error("therm_step!: unknown method=\"$(method)\". Supported: " *
                   "\"fixed\", \"linear\", \"robin\", \"robin-cold\", \"temp\". " *
                   "Coming: \"enth\" (PR5).")
+        end
+
+        # 6c-extra. Extrapolate the thermodynamic state to ice-free /
+        #           ice-margin cells from full-ice 3×3 neighbours. Helps
+        #           mat's rate factor (rf_method=1) at advected points.
+        #           Fortran calc_ytherm_enthalpy_3D:444-477. Skip for
+        #           method = "fixed" (T_ice unchanged so no extrap needed).
+        if method != "fixed"
+            _extrapolate_thrm_margin!(y.thrm.enth.data, y.thrm.T_ice.data,
+                                       y.thrm.omega.data, y.thrm.T_pmp.data,
+                                       y.tpo.f_ice.data,
+                                       y.thrm.T_ice.grid.Nx,
+                                       y.thrm.T_ice.grid.Ny,
+                                       y.thrm.T_ice.grid.Nz)
         end
 
         # 6d. Basal water — full-dt update from initial snapshot using
