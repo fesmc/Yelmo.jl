@@ -44,8 +44,13 @@ Fortran. Items 8–10 are larger efforts.
    Out of scope (deferred): explicit solver `tracer_method = "expl"`,
    `calc_isochrones` (`depth_iso` diagnostic), and the
    `enh_method ∈ {*-tracer}` paths.
-7. **Regions infrastructure** — port `yelmo_regions.f90` (regional masks,
-   regional analysis utilities).
+7. ~~**Regions infrastructure**~~ — full port. `src/regions/`
+   provides `init_regions`, `add_region!`, `update_regions!`,
+   `write_regions!`, and `calc_region_diagnostics!`. Each region
+   is `(name, mask, outfile, diag)`; `init_regions` auto-creates a
+   whole-domain region by default. NetCDF output is one file per
+   region with the mask written as a static 2D variable plus 39
+   time-series scalar variables (units mirror the Fortran writer).
 8. **Enthalpy solver validation** — benchmark the current port against
    reference data.
 9. **Regridding infrastructure** — port `yelmo_regridding.f90`.

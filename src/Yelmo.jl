@@ -20,6 +20,10 @@ include("topo/YelmoModelTopo.jl")
 include("dyn/YelmoModelDyn.jl")
 include("mat/YelmoModelMat.jl")
 include("thrm/YelmoModelThrm.jl")
+# Regions: regional aggregate diagnostics + per-region NetCDF time-series
+# I/O. Loaded AFTER all per-phase modules since `calc_region_diagnostics!`
+# reads from `tpo`, `dyn`, `mat`, `thrm`, and `bnd` simultaneously.
+include("regions/YelmoRegions.jl")
 # Adaptive timestepping (predictor-corrector): must be loaded AFTER
 # topo + dyn + mat + thrm modules since it calls `topo_step!`,
 # `mat_step!`, `dyn_step!`, `therm_step!`, and `update_diagnostics!`.
@@ -44,6 +48,7 @@ using .YelmoModelTopo
 using .YelmoModelDyn
 using .YelmoModelMat
 using .YelmoModelThrm
+using .YelmoRegions
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -182,5 +187,10 @@ export TimestepLog, init_timestep_log!, write_timestep_row!
 
 # Timing scaffold (timing.jl)
 export YelmoTimer, @timed_section, reset_timings!, print_timings
+
+# YelmoRegions
+export RegionDiagnostics, YelmoRegion, YelmoRegions
+export init_regions, add_region!, update_regions!, write_regions!
+export calc_region_diagnostics!
 
 end # module
