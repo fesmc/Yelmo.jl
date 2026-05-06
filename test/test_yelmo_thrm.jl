@@ -358,3 +358,223 @@ end
                                               zeta_aa, sec_year)
     @test Q_rock_diag ≈ Q_geo atol=1e-9
 end
+
+# =============================================================================
+# Path B column-solver tests
+#
+# Under Path B the first interior centre is at zeta_aa[1] > 0 (no endpoint
+# at z=0). The boundary temperatures T_ice_b / T_pmp_b are separate scalars
+# passed as kwargs. Tests check that:
+#   (a) Steady-state Dirichlet BCs at both boundaries stay put.
+#   (b) The resolved T_ice_b_new matches the prescribed val_base.
+#   (c) Energy conservation under Neumann basal flux is preserved
+#       (within the first-order truncation error of the stencil).
+# =============================================================================
+
+# Build an 8-layer Path B zeta grid (interior only, no 0/1 endpoints).
+function _build_path_b_zeta(Nz_int::Int)
+    # Interior centres at (k - 0.5) / Nz_file for k = 1..Nz_int,
+    # where Nz_file = Nz_int + 2 (file convention includes 0 and 1).
+    Nz_file = Nz_int + 2
+    zeta_aa = [(k - 0.5) / Nz_file for k in 1:Nz_int]
+    # Face edges: zeta_ac[1]=0, zeta_ac[Nz_int+1]=1, interior = midpoints.
+    zeta_ac = zeros(Nz_int + 1)
+    zeta_ac[1]   = 0.0
+    zeta_ac[end] = 1.0
+    for k in 2:Nz_int
+        zeta_ac[k] = 0.5 * (zeta_aa[k - 1] + zeta_aa[k])
+    end
+    return Vector{Float64}(zeta_aa), Vector{Float64}(zeta_ac)
+end
+
+function _alloc_full_scratch(Nz::Int)
+    kappa    = Vector{Float64}(undef, Nz)
+    Qs_K     = Vector{Float64}(undef, Nz)
+    subd, diag, supd, rhs, sol, cp_tri, dp_tri = _alloc_tri_scratch(Nz)
+    return kappa, Qs_K, subd, diag, supd, rhs, sol, cp_tri, dp_tri
+end
+
+@testset "thrm/PathB: path_b stencil — Dirichlet steady state stays put" begin
+    # Test the path_b stencil in _calc_temp_column_internal! directly
+    # (bypassing calc_temp_column!'s temperature-dependent kappa_basal
+    # computation) so the boundary kappa matches the interior exactly.
+    # The linear profile from T_base to T_srf is an exact fixed point
+    # when kappa_basal = kappa_surf = kappa_interior.
+    Nz_int = 8
+    zeta_aa, zeta_ac = _build_path_b_zeta(Nz_int)
+    dzeta_a, dzeta_b = _build_dzeta(zeta_aa, zeta_ac)
+    @test zeta_aa[1] > 0.0    # confirm interior-only grid
+
+    H_ice    = 2000.0
+    T_base   = TEST_T0
+    T_srf    = 250.0
+    dt       = 1.0
+
+    kappa_val = TEST_KT_K / (TEST_RHO * TEST_CP)
+    kappa    = fill(kappa_val, Nz_int)
+    uz       = zeros(Nz_int + 1)
+    advecxy  = zeros(Nz_int)
+    Q_strn_K = zeros(Nz_int)
+    subd, diag, supd, rhs, solution, cp_tri, dp_tri = _alloc_tri_scratch(Nz_int)
+
+    # Linear profile from T_base at ζ=0 to T_srf at ζ=1.
+    T_col    = [T_base + zeta_aa[k] * (T_srf - T_base) for k in 1:Nz_int]
+    T_col_in = copy(T_col)
+
+    for _ in 1:50
+        Yelmo.YelmoModelThrm._calc_temp_column_internal!(
+            T_col, kappa, uz, advecxy, Q_strn_K,
+            T_base, T_srf, H_ice,
+            zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+            TEST_T0, dt,
+            false, false,
+            subd, diag, supd, rhs, solution, cp_tri, dp_tri;
+            path_b      = true,
+            kappa_basal = kappa_val,
+            kappa_surf  = kappa_val,
+        )
+    end
+
+    max_drift = maximum(abs.(T_col .- T_col_in))
+    @info "PathB stencil Dirichlet drift" max_drift
+    @test all(isfinite, T_col)
+    @test max_drift < 1e-6
+end
+
+@testset "thrm/PathB: calc_temp_column! Dirichlet — T_ice_b_new = val_base" begin
+    # Verifies that under the temperate-base Dirichlet branch,
+    # T_ice_b_new equals the prescribed val_base every step regardless
+    # of the interior column evolution.
+    Nz_int = 8
+    zeta_aa, zeta_ac = _build_path_b_zeta(Nz_int)
+    dzeta_a, dzeta_b = _build_dzeta(zeta_aa, zeta_ac)
+
+    H_ice    = 2000.0
+    T_base   = TEST_T0
+    T_srf    = 250.0
+    T0       = TEST_T0
+    dt       = 1.0
+    sec_year = 31536000.0
+    L_ice    = 3.34e5
+
+    T_pmp_col   = fill(T0, Nz_int)
+    cp_col      = fill(TEST_CP, Nz_int)
+    kt_col      = fill(TEST_KT_K, Nz_int)
+    omega_col   = zeros(Nz_int)
+    enth_col    = zeros(Nz_int)
+    advecxy_col = zeros(Nz_int)
+    Q_strn_col  = zeros(Nz_int)
+    uz_col      = zeros(Nz_int + 1)
+    kappa, Qs_K, subd, diag, supd, rhs, sol, cp_tri, dp_tri =
+        _alloc_full_scratch(Nz_int)
+    T_col = [T_base + zeta_aa[k] * (T_srf - T_base) for k in 1:Nz_int]
+
+    for _ in 1:10
+        _, _, _, T_b_new, T_s_new = Yelmo.calc_temp_column!(
+            enth_col, T_col, omega_col, T_pmp_col, cp_col, kt_col,
+            advecxy_col, uz_col, Q_strn_col,
+            0.0, 0.0, T_srf, T0,
+            H_ice, 0.0, 1.0, 0.0,
+            zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+            0.0, T0, TEST_RHO, 1000.0, L_ice, sec_year, dt,
+            kappa, Qs_K, subd, diag, supd, rhs, sol, cp_tri, dp_tri;
+            path_b      = true,
+            T_ice_b_val = T_base,
+            T_pmp_b_val = T0,
+        )
+        @test T_b_new ≈ T_base atol=1e-8
+        @test T_s_new ≈ min(T_srf, T0) atol=1e-8
+    end
+    @test all(isfinite, T_col)
+end
+
+@testset "thrm/PathB: Path B converges to linear profile" begin
+    # Test at the _calc_temp_column_internal! level with kappa_basal = kappa_val
+    # (same as interior kappa) so the linear profile is an exact fixed point.
+    # This mirrors the legacy convergence test but with Path B zeta and path_b=true.
+    Nz_int   = 8
+    zeta_aa, zeta_ac = _build_path_b_zeta(Nz_int)
+    dzeta_a, dzeta_b = _build_dzeta(zeta_aa, zeta_ac)
+    H_ice    = 200.0
+    T_base   = 270.0
+    T_srf    = 250.0
+    dt       = 50.0
+    kappa_val = TEST_KT_K / (TEST_RHO * TEST_CP)
+
+    T_lin = [T_base + zeta_aa[k] * (T_srf - T_base) for k in 1:Nz_int]
+    T_col = T_lin .+ 5.0 .* sin.(2π .* zeta_aa)
+
+    kappa    = fill(kappa_val, Nz_int)
+    uz       = zeros(Nz_int + 1)
+    advecxy  = zeros(Nz_int)
+    Q_strn_K = zeros(Nz_int)
+    subd, diag, supd, rhs, solution, cp_tri, dp_tri = _alloc_tri_scratch(Nz_int)
+
+    for _ in 1:200
+        Yelmo.YelmoModelThrm._calc_temp_column_internal!(
+            T_col, kappa, uz, advecxy, Q_strn_K,
+            T_base, T_srf, H_ice,
+            zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+            TEST_T0, dt,
+            false, false,
+            subd, diag, supd, rhs, solution, cp_tri, dp_tri;
+            path_b = true, kappa_basal = kappa_val, kappa_surf = kappa_val)
+    end
+
+    final_err = maximum(abs.(T_col .- T_lin))
+    @info "PathB pure-conduction convergence" final_err
+    @test final_err < 1e-4
+    @test final_err < 5.0 / 1e4   # at least 4 orders of decay from initial amp 5.0
+end
+
+@testset "thrm/PathB: Neumann base → Q_ice_b consistent with flux" begin
+    # Steady-state with Neumann basal flux and Dirichlet top.
+    # Q_ice_b (mW/m²) returned from calc_temp_column! should reproduce
+    # the applied flux to within the truncation error of the stencil.
+    Nz_int = 8
+    zeta_aa, zeta_ac = _build_path_b_zeta(Nz_int)
+    dzeta_a, dzeta_b = _build_dzeta(zeta_aa, zeta_ac)
+    H_ice    = 200.0
+    T_srf    = 250.0
+    T0       = TEST_T0
+    dt       = 50.0
+    sec_year = 31536000.0
+    L_ice    = 3.34e5
+    Q_b      = 80.0   # mW/m² basal heat flux
+
+    T_col = fill(T_srf, Nz_int)
+    T_pmp_col   = fill(T0, Nz_int)
+    cp_col      = fill(TEST_CP, Nz_int)
+    kt_col      = fill(TEST_KT_K, Nz_int)
+    omega_col   = zeros(Nz_int)
+    enth_col    = zeros(Nz_int)
+    advecxy_col = zeros(Nz_int)
+    Q_strn_col  = zeros(Nz_int)
+    uz_col      = zeros(Nz_int + 1)
+    # Cold base so Neumann BC is active (T_ice_b_val < T_pmp_b_val).
+    T_ice_b_val = T_srf   # cold boundary
+
+    kappa, Qs_K, subd, diag, supd, rhs, sol, cp_tri, dp_tri =
+        _alloc_full_scratch(Nz_int)
+
+    local Q_ice_b_out::Float64
+    for _ in 1:300
+        Q_ice_b_out, _, _, T_b_new, _ = Yelmo.calc_temp_column!(
+            enth_col, T_col, omega_col, T_pmp_col, cp_col, kt_col,
+            advecxy_col, uz_col, Q_strn_col,
+            Q_b, 0.0, T_srf, T0,
+            H_ice, 0.0, 1.0, 0.0,
+            zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+            0.0, T0, TEST_RHO, 1000.0, L_ice, sec_year, dt,
+            kappa, Qs_K, subd, diag, supd, rhs, sol, cp_tri, dp_tri;
+            path_b      = true,
+            T_ice_b_val = T_ice_b_val,
+            T_pmp_b_val = T0,
+        )
+        T_ice_b_val = T_b_new  # carry forward the extrapolated base temp
+    end
+
+    @info "PathB Neumann Q_ice_b vs Q_b" Q_ice_b_out Q_b
+    # At steady state Q_ice_b ≈ Q_b (the applied flux, within 5%).
+    @test isapprox(Q_ice_b_out, Q_b; rtol=0.05)
+end

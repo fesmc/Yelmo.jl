@@ -50,5 +50,24 @@ function calc_dzeta_terms!(dzeta_a::AbstractVector{Float64},
         dzeta_b[k] = 1.0 / ((zeta_ac[k+1] - zeta_ac[k]) * (zeta_aa[k+1] - zeta_aa[k]))
     end
 
+    # Path B endpoints: when `zeta_aa[1] > 0` (i.e. the first interior
+    # centre is *strictly above* the basal boundary) and / or
+    # `zeta_aa[nz_aa] < 1` (last interior centre strictly below the
+    # surface), populate the half-cell weights so the implicit column
+    # solver can apply the standard interior diffusion stencil at
+    # k=1 / k=nz_aa with `val_base` / `val_srf` acting as phantom
+    # `T[0]` / `T[nz_aa+1]` cells. Under the legacy convention
+    # (`zeta_aa[1] = 0` / `zeta_aa[nz_aa] = 1`) the half-cell distance
+    # vanishes and we leave the weights at zero — the legacy solver
+    # never reads them (Dirichlet pin at k=1 / k=nz_aa).
+    @inbounds if zeta_aa[1] > 0.0
+        dzeta_a[1] = 1.0 / ((zeta_ac[2] - zeta_ac[1]) * (zeta_aa[1] - 0.0))
+        dzeta_b[1] = 1.0 / ((zeta_ac[2] - zeta_ac[1]) * (zeta_aa[2] - zeta_aa[1]))
+    end
+    @inbounds if zeta_aa[nz_aa] < 1.0
+        dzeta_a[nz_aa] = 1.0 / ((zeta_ac[nz_aa+1] - zeta_ac[nz_aa]) * (zeta_aa[nz_aa] - zeta_aa[nz_aa-1]))
+        dzeta_b[nz_aa] = 1.0 / ((zeta_ac[nz_aa+1] - zeta_ac[nz_aa]) * (1.0 - zeta_aa[nz_aa]))
+    end
+
     return dzeta_a, dzeta_b
 end

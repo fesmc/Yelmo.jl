@@ -324,7 +324,11 @@ function therm_step!(y::YelmoModel, dt::Float64)
                           y.tpo.f_grnd, y.tpo.H_grnd,
                           zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                           par.omega_max, c.T0, c.rho_ice, c.rho_sw,
-                          c.rho_w, c.L_ice, c.sec_year, dt)
+                          c.rho_w, c.L_ice, c.sec_year, dt;
+                          path_b        = true,
+                          T_ice_b_field = y.thrm.T_ice_b,
+                          T_pmp_b_field = y.thrm.T_pmp_b,
+                          T_ice_s_field = y.thrm.T_ice_s)
         elseif method == "enth"
             # Pre-compute horizontal advection of `enth`.
             calc_advec_horizontal_3D!(y.thrm.advecxy, y.thrm.enth,

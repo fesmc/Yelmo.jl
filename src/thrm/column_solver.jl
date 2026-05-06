@@ -72,18 +72,53 @@ function _calc_temp_column_internal!(temp::AbstractVector{Float64},
                                      rhs::Vector{Float64},
                                      solution::Vector{Float64},
                                      cp_buf::Vector{Float64},
-                                     dp_buf::Vector{Float64})
+                                     dp_buf::Vector{Float64};
+                                     path_b::Bool = false,
+                                     kappa_basal::Float64 = 0.0,
+                                     kappa_surf::Float64 = 0.0)
     nz_aa = length(zeta_aa)
 
     @inbounds begin
+        H2 = thickness * thickness
+
         # -- Base BC --
-        if is_basal_flux
+        if path_b && !is_basal_flux
+            # Path B Dirichlet: `val_base` lives at z=0, `temp[1]` at
+            # zeta_aa[1] (first interior centre). The k=1 row uses the
+            # standard interior diffusion + advection stencil, with
+            # the val_base contribution that would otherwise multiply
+            # T[0] absorbed into the rhs. `dzeta_a[1]` / `dzeta_b[1]`
+            # encode the basal half-cell distance / first-interior
+            # cell-to-cell distance respectively.
+            kappa_a = kappa_basal       # face at z=0 IS the boundary
+            dz1     = zeta_ac[2]   - zeta_aa[1]
+            dz2     = zeta_aa[2]   - zeta_ac[2]
+            kappa_n = _calc_wtd_harmonic_mean(kappa[1], kappa[2], dz1, dz2)
+
+            fac_a = -kappa_a * dzeta_a[1] * dt / H2
+            fac_b = -kappa_n * dzeta_b[1] * dt / H2
+
+            uz_aa     = 0.5 * (uz[1] + uz[2])
+            dzeta_adv = zeta_aa[2] - 0.0
+            dz_adv    = thickness * dzeta_adv
+
+            # Coefficient that would have multiplied T[0] = val_base
+            # in the standard subd[1] slot — we move it to the rhs.
+            absorb = fac_a - uz_aa * dt / dz_adv
+
+            subd[1] = 0.0
+            supd[1] = fac_b + uz_aa * dt / dz_adv
+            diag[1] = 1.0 - fac_a - fac_b
+            rhs[1]  = (temp[1] - T_ref) - dt * advecxy[1] + dt * Q_strn[1] -
+                      absorb * (val_base - T_ref)
+        elseif is_basal_flux
             dz       = thickness * (zeta_aa[2] - zeta_aa[1])
             subd[1]  = 0.0
             diag[1]  = -1.0
             supd[1]  = 1.0
             rhs[1]   = val_base * dz
         else
+            # Legacy Dirichlet pin: temp[1] ≡ val_base.
             subd[1]  = 0.0
             diag[1]  = 1.0
             supd[1]  = 0.0
@@ -91,7 +126,6 @@ function _calc_temp_column_internal!(temp::AbstractVector{Float64},
         end
 
         # -- Interior layers --
-        H2 = thickness * thickness
         for k in 2:(nz_aa - 1)
             # Harmonic-mean kappa onto ac-nodes k and k+1.
             dz1     = zeta_ac[k]   - zeta_aa[k - 1]
@@ -119,7 +153,31 @@ function _calc_temp_column_internal!(temp::AbstractVector{Float64},
         end
 
         # -- Surface BC --
-        if is_surf_flux
+        if path_b && !is_surf_flux
+            # Path B Dirichlet: symmetric to the basal case at the
+            # top of the column. `val_srf` lives at z=1, `temp[nz_aa]`
+            # at zeta_aa[nz_aa] (last interior centre).
+            dz1     = zeta_ac[nz_aa]   - zeta_aa[nz_aa - 1]
+            dz2     = zeta_aa[nz_aa]   - zeta_ac[nz_aa]
+            kappa_a = _calc_wtd_harmonic_mean(kappa[nz_aa - 1], kappa[nz_aa],
+                                              dz1, dz2)
+            kappa_n = kappa_surf       # face at z=1 IS the boundary
+
+            fac_a = -kappa_a * dzeta_a[nz_aa] * dt / H2
+            fac_b = -kappa_n * dzeta_b[nz_aa] * dt / H2
+
+            uz_aa     = 0.5 * (uz[nz_aa] + uz[nz_aa + 1])
+            dzeta_adv = 1.0 - zeta_aa[nz_aa - 1]
+            dz_adv    = thickness * dzeta_adv
+
+            absorb = fac_b + uz_aa * dt / dz_adv
+
+            subd[nz_aa] = fac_a - uz_aa * dt / dz_adv
+            supd[nz_aa] = 0.0
+            diag[nz_aa] = 1.0 - fac_a - fac_b
+            rhs[nz_aa]  = (temp[nz_aa] - T_ref) - dt * advecxy[nz_aa] +
+                          dt * Q_strn[nz_aa] - absorb * (val_srf - T_ref)
+        elseif is_surf_flux
             dz             = thickness * (zeta_aa[nz_aa] - zeta_aa[nz_aa - 1])
             subd[nz_aa]    = -1.0
             diag[nz_aa]    =  1.0
