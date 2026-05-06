@@ -96,11 +96,14 @@ function define_temp_bedrock_3D!(enth_rock_field, T_rock_field,
                                  cp_rock::Real, kt_rock::Real,
                                  H_rock::Real,
                                  zeta_aa_rock::AbstractVector{<:Real},
-                                 sec_year::Real)
+                                 sec_year::Real;
+                                 path_b::Bool = false,
+                                 T_ice_b_field = nothing)
     er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
-    Tib_d = T_ice_basal_field.data
+    Tib_d = (path_b && !isnothing(T_ice_b_field)) ?
+            T_ice_b_field.data : T_ice_basal_field.data
     Qg_d  = Q_geo_field.data
     Nx    = T_rock_field.grid.Nx
     Ny    = T_rock_field.grid.Ny
@@ -157,11 +160,14 @@ function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
                                         zeta_ac_rock::AbstractVector{<:Real},
                                         dzeta_a_rock::AbstractVector{<:Real},
                                         dzeta_b_rock::AbstractVector{<:Real},
-                                        sec_year::Real, dt::Real)
+                                        sec_year::Real, dt::Real;
+                                        path_b::Bool = false,
+                                        T_ice_b_field = nothing)
     er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
-    Tib_d = T_ice_basal_field.data
+    Tib_d = (path_b && !isnothing(T_ice_b_field)) ?
+            T_ice_b_field.data : T_ice_basal_field.data
     Qg_d  = Q_geo_field.data
     Nx    = T_rock_field.grid.Nx
     Ny    = T_rock_field.grid.Ny

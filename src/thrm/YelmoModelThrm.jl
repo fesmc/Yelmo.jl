@@ -394,7 +394,11 @@ function therm_step!(y::YelmoModel, dt::Float64)
                                      y.thrm.T_ice,
                                      y.bnd.Q_geo,
                                      par.cp_rock, par.kt_rock, par.H_rock,
-                                     zeta_aa_rock, c.sec_year)
+                                     zeta_aa_rock, c.sec_year;
+                                     path_b       = true,
+                                     T_ice_b_field = y.thrm.T_ice_b)
+            # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
+            interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         elseif rock_method == "active"
             zeta_aa_rock = znodes(y.gr, Center())
             zeta_ac_rock = znodes(y.gr, Face())
@@ -412,7 +416,11 @@ function therm_step!(y::YelmoModel, dt::Float64)
                                             c.rho_rock, par.H_rock,
                                             zeta_aa_rock, zeta_ac_rock,
                                             dzeta_a_rock, dzeta_b_rock,
-                                            c.sec_year, dt)
+                                            c.sec_year, dt;
+                                            path_b       = true,
+                                            T_ice_b_field = y.thrm.T_ice_b)
+            # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
+            interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         else
             error("therm_step!: unknown rock_method=\"$(rock_method)\". " *
                   "Supported: \"fixed\", \"equil\", \"active\".")

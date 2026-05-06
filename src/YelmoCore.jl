@@ -98,10 +98,11 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 #     fields to the Fortran-side length-`Nz_file` buffers.
 #
 # Only ice-grid fields are registered in commit 2. Bedrock fields
-# (`T_rock`, `enth_rock`) join the registry in commit 5 once the
-# bedrock grid adopts Path B. `T_rock_s` will be aliased to
-# `T_ice_b` (Q2(c)) — encoded via a special-case entry rather than
-# its own storage.
+# (`T_rock`, `enth_rock`) remain on the legacy grid convention (commit
+# 5c defers the bedrock Path B grid switch). `T_rock_b` is written as
+# a diagnostic from the deepest bedrock layer in `therm_step!`.
+# When the bedrock grid switches to Path B, `T_rock_s` will be aliased
+# to `T_ice_b` — encoded via a special-case entry rather than storage.
 #
 # Registry shape: a `NamedTuple` keyed by the unified-name `Symbol`,
 # each entry is `(b = <basal sym>, s = <surface sym>)`. The
