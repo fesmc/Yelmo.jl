@@ -17,9 +17,10 @@ SSA Picard solver (Krylov+AMG inner linear solve) + hybrid SIA+SSA.
 Solver dispatch handles `solver = "fixed"` (no velocity update),
 `solver = "sia"` (Option C SIA wrapper, `calc_velocity_sia!`),
 `solver = "ssa"` (Picard iteration via `calc_velocity_ssa!`),
-`solver = "hybrid"` (SIA shear + SSA basal sliding), and
-`solver = "diva"` (depth-integrated viscosity approximation). L1L2
-will not be ported. Post-solver phases include the velocity Jacobian
+`solver = "hybrid"` (SIA shear + SSA basal sliding),
+`solver = "diva"` (depth-integrated viscosity approximation), and
+`solver = "diva-noslip"` (DIVA with `no_slip=true` forced — i.e.
+zero basal sliding and `beta_eff = 1/F2`). L1L2 will not be ported. Post-solver phases include the velocity Jacobian
 (`jvel.{dx*, dy*, dz*}`), vertical velocity (`uz`, `uz_star`), and
 the symmetrised strain-rate tensor (`strn`, `strn2D`) — milestone 3h.
 
@@ -316,7 +317,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         end
         interior(y.dyn.ux_bar) .= interior(y.dyn.ux_i_bar) .+ Uxb
         interior(y.dyn.uy_bar) .= interior(y.dyn.uy_i_bar) .+ Uyb
-    elseif solver == "diva"
+    elseif solver in ("diva", "diva-noslip")
         # DIVA: depth-integrated viscosity approximation. The driver
         # solves the depth-averaged momentum balance via the SSA matrix
         # kernel with `beta_eff` substituted for `beta`, then
@@ -326,7 +327,11 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         # plus the shearing component `ux_i / uy_i`.
         # Mirrors `yelmo_dynamics.f90:455-547` (DIVA branch of
         # `calc_ydyn_diva`).
-        calc_velocity_diva!(y)
+        #
+        # `"diva-noslip"` forces the no-slip variant (basal sliding
+        # zeroed, `beta_eff = 1/F2`); `"diva"` falls back to
+        # `y.p.ydyn.no_slip`. Mirrors Fortran `yelmo_dynamics.f90:477-480`.
+        calc_velocity_diva!(y; no_slip = solver == "diva-noslip" ? true : nothing)
 
         # `ux_i_bar / uy_i_bar` (depth-averaged shear) are SIA-specific
         # diagnostics not used by DIVA's matrix solve (which gives
@@ -336,7 +341,8 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         fill!(interior(y.dyn.uy_i_bar), 0.0)
     else
         error("dyn_step!: solver=\"$solver\" not yet ported. " *
-              "Supported solvers: \"fixed\", \"sia\", \"ssa\", \"hybrid\", \"diva\". " *
+              "Supported solvers: \"fixed\", \"sia\", \"ssa\", \"hybrid\", " *
+              "\"diva\", \"diva-noslip\". " *
               "L1L2 will not be ported in Yelmo.jl.")
     end
 

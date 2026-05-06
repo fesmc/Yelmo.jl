@@ -8,8 +8,11 @@ Fortran. Items 8–10 are larger efforts.
 
 1. **Advection allocation cleanup** — apply the wrapper + parametric-kernel
    template to `src/topo/advection.jl` to drop per-timestep allocations.
-2. **Hybrid solver dispatch** — wire SIA + SSA hybrid in `dyn` so it can be
-   selected via the existing parameter plumbing.
+2. ~~**Hybrid solver dispatch**~~ — *already operational* (`dyn_step!`
+   handles `"hybrid"` and the SIA+SSA additivity test was already
+   passing). The leftover sub-task was to add the `"diva-noslip"`
+   variant, which mirrors Fortran's `solver = "diva-noslip"` keyword
+   (forces `no_slip = true` regardless of `y.p.ydyn.no_slip`).
 3. **Principal stresses → von-Mises (`vm-m16`) calving** — export principal
    stresses from `mat`/`dyn` so the existing `calc_calving_vonmises_m16_ac!`
    path can be enabled.
