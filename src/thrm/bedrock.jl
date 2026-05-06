@@ -80,30 +80,27 @@ end
 
 """
     define_temp_bedrock_3D!(enth_rock_field, T_rock_field, Q_rock_field,
-                            T_ice_basal_field, Q_geo_field,
+                            T_ice_b_field, Q_geo_field,
                             cp_rock, kt_rock, H_rock,
                             zeta_aa, sec_year) -> nothing
 
 Fill `T_rock`, `Q_rock`, `enth_rock` for the `rock_method = "equil"`
-mode: linear profile at every (i, j) anchored at `T_bed = T_ice[i,j,1]`
-(ice base, the top of the bedrock column) with deep slope from
+mode: linear profile at every (i, j) anchored at `T_bed = T_ice_b[i,j,1]`
+(ice basal boundary field at ζ=0) with deep slope from
 `Q_geo`. `enth_rock = cp_rock * T_rock` (Fortran calls
 `convert_to_enthalpy(enth, T, omega=0, T_pmp=0, cp, L=0)`).
 """
 function define_temp_bedrock_3D!(enth_rock_field, T_rock_field,
-                                 Q_rock_field, T_ice_basal_field,
+                                 Q_rock_field, T_ice_b_field,
                                  Q_geo_field,
                                  cp_rock::Real, kt_rock::Real,
                                  H_rock::Real,
                                  zeta_aa_rock::AbstractVector{<:Real},
-                                 sec_year::Real;
-                                 path_b::Bool = false,
-                                 T_ice_b_field = nothing)
+                                 sec_year::Real)
     er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
-    Tib_d = (path_b && !isnothing(T_ice_b_field)) ?
-            T_ice_b_field.data : T_ice_basal_field.data
+    Tib_d = T_ice_b_field.data
     Qg_d  = Q_geo_field.data
     Nx    = T_rock_field.grid.Nx
     Ny    = T_rock_field.grid.Ny
@@ -139,7 +136,7 @@ end
 
 """
     define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
-                                   Q_rock_field, T_ice_basal_field,
+                                   Q_rock_field, T_ice_b_field,
                                    Q_geo_field,
                                    cp_rock, kt_rock, rho_rock, H_rock,
                                    zeta_aa, zeta_ac, dzeta_a, dzeta_b,
@@ -148,11 +145,11 @@ end
 Implicit-solve variant for `rock_method = "active"`. Mirrors Fortran
 `calc_temp_bedrock_column` (`physics/ice_enthalpy.f90:250-366`) per
 column. No advection, no strain heat — surface (top, bedrock-ice
-interface) is Dirichlet at the ice basal temperature, base (deep) is
-Neumann from Q_geo.
+interface) is Dirichlet at the ice basal temperature (`T_ice_b_field`
+at ζ=0), base (deep) is Neumann from Q_geo.
 """
 function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
-                                        Q_rock_field, T_ice_basal_field,
+                                        Q_rock_field, T_ice_b_field,
                                         Q_geo_field,
                                         cp_rock::Real, kt_rock::Real,
                                         rho_rock::Real, H_rock::Real,
@@ -160,14 +157,11 @@ function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
                                         zeta_ac_rock::AbstractVector{<:Real},
                                         dzeta_a_rock::AbstractVector{<:Real},
                                         dzeta_b_rock::AbstractVector{<:Real},
-                                        sec_year::Real, dt::Real;
-                                        path_b::Bool = false,
-                                        T_ice_b_field = nothing)
+                                        sec_year::Real, dt::Real)
     er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
-    Tib_d = (path_b && !isnothing(T_ice_b_field)) ?
-            T_ice_b_field.data : T_ice_basal_field.data
+    Tib_d = T_ice_b_field.data
     Qg_d  = Q_geo_field.data
     Nx    = T_rock_field.grid.Nx
     Ny    = T_rock_field.grid.Ny
@@ -249,7 +243,9 @@ function _define_temp_bedrock_active_3D_kernel!(er, Tr, Qr, Tib, Qg,
                                     _T_REF_ICE, dt,
                                     is_basal_flux, is_surf_flux,
                                     subd, diag, supd, rhs, solution,
-                                    cp_tri, dp_tri)
+                                    cp_tri, dp_tri;
+                                    kappa_basal = kappa_buf[1],
+                                    kappa_surf  = kappa_buf[1])
 
         Qr[i, j, 1] = calc_Q_bedrock_column(T_col, kt_rock, H_rock,
                                             zeta_aa, sec_year)

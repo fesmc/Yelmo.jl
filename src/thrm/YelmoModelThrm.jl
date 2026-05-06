@@ -61,27 +61,6 @@ Open follow-ups (not blocking thrm closeout):
     Arrhenius) gating now has the upstream therm fields available;
     enabling it is a `mat` follow-up.
 
-KNOWN VERTICAL CONVENTION ISSUE — see `.claude/PlanVerticalSplit.md`
-for the full plan. Yelmo's grid loader builds an Oceananigans
-`Center`-staggered z axis from the file's `zeta_ac` (Face values)
-and loads file `T_ice` / `enth` / `T_pmp` etc. (length Nz_file =
-file zeta length, includes endpoints 0 and 1) into Yelmo's
-`Center` Nz fields by **verbatim index copy**. Because Center cells
-are forced to be midpoints of Faces, file center positions and Yelmo
-center positions don't align — file's `T_ice[:,:,1]` (basal value at
-z=0) ends up at Yelmo's `zeta_aa[1] ≈ 0.003`, and file's
-`T_ice[:,:,Nz_file]` (surface value at z=1) ends up at Yelmo's
-`zeta_aa[Nz] ≈ 0.948` — a 5% mis-alignment at the surface. The
-implicit column solver in this module uses `T_ice[:,:,1]` and
-`T_ice[:,:,Nz]` AS basal / surface BC values, which makes the
-mis-alignment cancel for thrm's own purposes — but any other consumer
-that interprets `T_ice[:,:,1]` as an interior cell value reads
-mis-positioned data. The same issue affects dyn (`ux`, `uy`,
-`uz_star`) and mat (`visc`, `ATT`, `enh`). Path B fix (true
-interior + 2D `_b` / `_s` boundary fields) is documented in
-`.claude/PlanVerticalSplit.md`; deferred to a dedicated
-cross-cutting refactor branch.
-
 `therm_step!` does NOT advance `y.time` — that is owned by
 `topo_step!`, matching the dyn/mat convention.
 """
@@ -325,7 +304,6 @@ function therm_step!(y::YelmoModel, dt::Float64)
                           zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                           par.omega_max, c.T0, c.rho_ice, c.rho_sw,
                           c.rho_w, c.L_ice, c.sec_year, dt;
-                          path_b        = true,
                           T_ice_b_field = y.thrm.T_ice_b,
                           T_pmp_b_field = y.thrm.T_pmp_b,
                           T_ice_s_field = y.thrm.T_ice_s)
@@ -391,12 +369,10 @@ function therm_step!(y::YelmoModel, dt::Float64)
             zeta_aa_rock = znodes(y.gr, Center())
             define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
                                      y.thrm.Q_rock,
-                                     y.thrm.T_ice,
+                                     y.thrm.T_ice_b,
                                      y.bnd.Q_geo,
                                      par.cp_rock, par.kt_rock, par.H_rock,
-                                     zeta_aa_rock, c.sec_year;
-                                     path_b       = true,
-                                     T_ice_b_field = y.thrm.T_ice_b)
+                                     zeta_aa_rock, c.sec_year)
             # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
             interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         elseif rock_method == "active"
@@ -410,15 +386,13 @@ function therm_step!(y::YelmoModel, dt::Float64)
                               collect(Float64, zeta_ac_rock))
             define_temp_bedrock_active_3D!(y.thrm.enth_rock, y.thrm.T_rock,
                                             y.thrm.Q_rock,
-                                            y.thrm.T_ice,
+                                            y.thrm.T_ice_b,
                                             y.bnd.Q_geo,
                                             par.cp_rock, par.kt_rock,
                                             c.rho_rock, par.H_rock,
                                             zeta_aa_rock, zeta_ac_rock,
                                             dzeta_a_rock, dzeta_b_rock,
-                                            c.sec_year, dt;
-                                            path_b       = true,
-                                            T_ice_b_field = y.thrm.T_ice_b)
+                                            c.sec_year, dt)
             # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
             interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         else
