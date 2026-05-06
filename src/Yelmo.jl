@@ -160,6 +160,10 @@ export define_temp_linear_column!, define_temp_robin_column!
 export calc_strain_heating!, calc_strain_heating_sia!
 export calc_basal_heating_simplestagger!, calc_basal_heating_nodes!
 export calc_basal_water_local!
+export calc_advec_horizontal_3D!
+export calc_temp_column!, calc_temp_3D!
+export define_temp_bedrock_column!, define_temp_bedrock_3D!
+export define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
 # YelmoIO
 export init_output

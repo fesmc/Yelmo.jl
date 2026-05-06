@@ -48,6 +48,7 @@ using Oceananigans.Grids: znodes, topology, AbstractTopology
 using Oceananigans.Fields: interior
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
+using ..YelmoUtils: solve_tridiag!
 
 # Topology-aware neighbour helpers + 2-point Gauss-Legendre quadrature.
 # These logically belong in a shared `src/utils/` module — they are
@@ -71,7 +72,11 @@ export therm_step!,
        define_temp_linear_column!, define_temp_robin_column!,
        calc_strain_heating!, calc_strain_heating_sia!,
        calc_basal_heating_simplestagger!, calc_basal_heating_nodes!,
-       calc_basal_water_local!
+       calc_basal_water_local!,
+       calc_advec_horizontal_3D!,
+       calc_temp_column!, calc_temp_3D!,
+       define_temp_bedrock_column!, define_temp_bedrock_3D!,
+       define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
 include("properties.jl")
 include("dzeta.jl")
@@ -80,6 +85,11 @@ include("solvers_analytic.jl")
 include("strain_heating.jl")
 include("basal_heating.jl")
 include("basal_water.jl")
+include("helpers.jl")
+include("advection.jl")
+include("column_solver.jl")
+include("temp_solver.jl")
+include("bedrock.jl")
 
 """
     therm_step!(y::YelmoModel, dt) -> y
@@ -198,25 +208,35 @@ function therm_step!(y::YelmoModel, dt::Float64)
     #    call here. PR4 will reintroduce the two-stage split once the
     #    implicit solver writes `bmb_grnd`.
     if dt > 0.0
-        # 6a. Basal water layer. Fortran does an RK2-style half-then-
-        #     full update around the method dispatch; with the analytic
-        #     methods (which never touch `bmb_grnd`) the half-update is
-        #     overwritten by the full-dt update, so we collapse to one
-        #     call. PR4 will reintroduce the two-stage split for the
-        #     implicit solver.
+        # 6a. Vertical-discretisation weights for the implicit solvers.
+        #     Cheap allocation per call — could later be cached on
+        #     `y.thrm` if benchmarking shows it matters.
+        Nz_aa   = y.thrm.T_ice.grid.Nz
+        dzeta_a = Vector{Float64}(undef, Nz_aa)
+        dzeta_b = Vector{Float64}(undef, Nz_aa)
+        calc_dzeta_terms!(dzeta_a, dzeta_b,
+                          collect(Float64, zeta_aa),
+                          collect(Float64, zeta_ac))
+
+        # 6b. Basal water — RK2 split. Snapshot H_w before any update,
+        #     advance with `dt/2` using the *previous* step's
+        #     `bmb_grnd`, then restore + advance with full `dt` using
+        #     the *new* `bmb_grnd` after the method-dispatch block.
         Nx_2D = y.thrm.H_w.grid.Nx
         Ny_2D = y.thrm.H_w.grid.Ny
         bmb_w_scratch = Array{Float64}(undef, Nx_2D, Ny_2D, 1)
+        H_w_now       = copy(interior(y.thrm.H_w))
         _fill_bmb_w_scratch!(bmb_w_scratch, y.thrm.bmb_grnd,
                              c.rho_ice, c.rho_w)
         _calc_basal_water_local_kernel!(y.thrm.H_w.data, y.thrm.dHwdt.data,
                                         y.tpo.f_ice.data, y.tpo.f_grnd.data,
                                         bmb_w_scratch,
-                                        dt, Float64(par.till_rate),
+                                        0.5 * dt, Float64(par.till_rate),
                                         Float64(par.H_w_max),
                                         Nx_2D, Ny_2D)
 
-        # 6b. Method dispatch — write `T_ice` and `omega`.
+        # 6c. Method dispatch — write `T_ice`, `omega`, possibly
+        #     `bmb_grnd` (temp solver only).
         if method == "fixed"
             # Pass-through. Leave T_ice and omega alone.
         elseif method == "linear"
@@ -239,26 +259,84 @@ function therm_step!(y::YelmoModel, dt::Float64)
                                   zeta_aa, c.rho_ice, c.sec_year;
                                   cold=true)
         elseif method == "temp"
-            error("therm_step!: method=\"$(method)\" (implicit temperature " *
-                  "solver, production target) lands in the temp+bedrock " *
-                  "milestone (PR4). Use \"fixed\", \"linear\", \"robin\", " *
-                  "or \"robin-cold\" for now.")
+            # Pre-compute horizontal advection of `T_ice`.
+            calc_advec_horizontal_3D!(y.thrm.advecxy, y.thrm.T_ice,
+                                       y.dyn.ux, y.dyn.uy, _dx_thrm(y.g))
+            # Implicit cold-ice column solve.
+            calc_temp_3D!(y.thrm.enth, y.thrm.T_ice, y.thrm.omega,
+                          y.thrm.bmb_grnd, y.thrm.Q_ice_b, y.thrm.H_cts,
+                          y.thrm.T_pmp, y.thrm.cp, y.thrm.kt, y.thrm.advecxy,
+                          y.dyn.uz_star, y.thrm.Q_strn,
+                          y.thrm.Q_b, y.thrm.Q_rock,
+                          y.bnd.T_srf, y.bnd.T_shlf,
+                          y.tpo.H_ice, y.tpo.f_ice, y.thrm.H_w,
+                          y.tpo.f_grnd, y.tpo.H_grnd,
+                          zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+                          par.omega_max, c.T0, c.rho_ice, c.rho_sw,
+                          c.rho_w, c.L_ice, c.sec_year, dt)
         elseif method == "enth"
             error("therm_step!: method=\"$(method)\" (enthalpy solver) " *
                   "lands in the enth milestone (PR5). Note: enth is ported " *
                   "but not benchmarked against the Mirror — the Mirror path " *
                   "showed issues on the Fortran side. Use \"fixed\" or " *
-                  "\"temp\" (once PR4 lands) for now.")
+                  "\"temp\" for now.")
         elseif method == "enth-poly"
             error("therm_step!: method=\"$(method)\" (polythermal CTS-adaptive " *
                   "solver) is out of scope for the Yelmo.jl thrm port. The " *
                   "Fortran `ice_enthalpy_poly.f90` (~1929 lines) is not " *
-                  "planned for porting. Use \"temp\" (production) once PR4 " *
-                  "lands.")
+                  "planned for porting. Use \"temp\" (production).")
         else
             error("therm_step!: unknown method=\"$(method)\". Supported: " *
-                  "\"fixed\", \"linear\", \"robin\", \"robin-cold\" (PR2). " *
-                  "Coming: \"temp\" (PR4); \"enth\" (PR5).")
+                  "\"fixed\", \"linear\", \"robin\", \"robin-cold\", \"temp\". " *
+                  "Coming: \"enth\" (PR5).")
+        end
+
+        # 6d. Basal water — full-dt update from initial snapshot using
+        #     the (possibly updated) `bmb_grnd`.
+        Hw_int = interior(y.thrm.H_w)
+        copyto!(Hw_int, H_w_now)
+        _fill_bmb_w_scratch!(bmb_w_scratch, y.thrm.bmb_grnd,
+                             c.rho_ice, c.rho_w)
+        _calc_basal_water_local_kernel!(y.thrm.H_w.data, y.thrm.dHwdt.data,
+                                        y.tpo.f_ice.data, y.tpo.f_grnd.data,
+                                        bmb_w_scratch,
+                                        dt, Float64(par.till_rate),
+                                        Float64(par.H_w_max),
+                                        Nx_2D, Ny_2D)
+
+        # 6e. Bedrock dispatch.
+        rock_method = par.rock_method
+        if rock_method == "fixed"
+            # Pass-through; T_rock / enth_rock / Q_rock unchanged.
+        elseif rock_method == "equil"
+            zeta_aa_rock = znodes(y.gr, Center())
+            define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+                                     y.thrm.Q_rock,
+                                     y.thrm.T_ice,
+                                     y.bnd.Q_geo,
+                                     par.cp_rock, par.kt_rock, par.H_rock,
+                                     zeta_aa_rock, c.sec_year)
+        elseif rock_method == "active"
+            zeta_aa_rock = znodes(y.gr, Center())
+            zeta_ac_rock = znodes(y.gr, Face())
+            Nzr_aa       = y.thrm.T_rock.grid.Nz
+            dzeta_a_rock = Vector{Float64}(undef, Nzr_aa)
+            dzeta_b_rock = Vector{Float64}(undef, Nzr_aa)
+            calc_dzeta_terms!(dzeta_a_rock, dzeta_b_rock,
+                              collect(Float64, zeta_aa_rock),
+                              collect(Float64, zeta_ac_rock))
+            define_temp_bedrock_active_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+                                            y.thrm.Q_rock,
+                                            y.thrm.T_ice,
+                                            y.bnd.Q_geo,
+                                            par.cp_rock, par.kt_rock,
+                                            c.rho_rock, par.H_rock,
+                                            zeta_aa_rock, zeta_ac_rock,
+                                            dzeta_a_rock, dzeta_b_rock,
+                                            c.sec_year, dt)
+        else
+            error("therm_step!: unknown rock_method=\"$(rock_method)\". " *
+                  "Supported: \"fixed\", \"equil\", \"active\".")
         end
     end  # end if dt > 0
 
@@ -314,6 +392,14 @@ function _calc_T_prime_3D!(T_prime_field, T_prime_b_field,
         Tpb_d[i, j, 1] = Tp_d[i, j, 1]
     end
     return nothing
+end
+
+# Horizontal grid spacing for the thrm domain. Matches the dyn
+# convention (uniform grids only for now).
+function _dx_thrm(grid::RectilinearGrid)
+    Δx = grid.Δxᶜᵃᵃ
+    Δx isa Number || error("YelmoModelThrm requires uniform x-spacing (got $(typeof(Δx))).")
+    return abs(Δx)
 end
 
 end # module YelmoModelThrm
