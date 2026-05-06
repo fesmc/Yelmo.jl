@@ -850,6 +850,20 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
 
     dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch, diva_scratch),))
 
+    # thrm scratch (Path B commit 5a, vert-split refactor). `zeta_aa`
+    # and `zeta_ac` are concrete `Vector{Float64}` snapshots of the
+    # ice grid's Center / Face axes, materialised once at YelmoModel
+    # construction so per-`therm_step!` calls no longer
+    # `collect(znodes(...))`. Roughly 340 KB / step of allocator
+    # pressure removed (each 1D vector is small but the Field-aware
+    # solver helpers gate on a concrete `Vector{Float64}` type, so
+    # the calls happened multiple times per step).
+    thrm_scratch = (
+        zeta_aa = collect(Float64, znodes(gt, Center())),
+        zeta_ac = collect(Float64, znodes(gt, Face())),
+    )
+    thrm = merge(thrm, (scratch = thrm_scratch,))
+
     # Replace H_ice with a CenterField that carries Dirichlet H_ice = 0
     # boundary conditions on the domain edge. The upwind advection
     # operator reads these via Oceananigans' standard halo machinery

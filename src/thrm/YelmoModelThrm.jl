@@ -103,7 +103,7 @@ import ..YelmoCore: therm_step!
 export therm_step!,
        calc_specific_heat_capacity, calc_thermal_conductivity,
        calc_T_pmp,
-       calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_f_pmp!,
+       calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_T_pmp_boundaries_2D!, calc_f_pmp!,
        calc_dzeta_terms!,
        convert_to_enthalpy, convert_to_enthalpy_3D!,
        define_temp_linear_3D!, define_temp_robin_3D!,
@@ -184,8 +184,11 @@ function therm_step!(y::YelmoModel, dt::Float64)
     par     = y.p.ytherm
     method  = par.method
     c       = y.c
-    zeta_aa = znodes(y.gt, Center())
-    zeta_ac = znodes(y.gt, Face())
+    # Path B (commit 5a): use the cached `Vector{Float64}` snapshots
+    # of the ice grid axes from `y.thrm.scratch` instead of allocating
+    # a fresh `collect(znodes(...))` per `therm_step!` call.
+    zeta_aa = y.thrm.scratch.zeta_aa
+    zeta_ac = y.thrm.scratch.zeta_ac
 
     # 1. Thermal property update.
     if par.use_const_cp
@@ -200,6 +203,13 @@ function therm_step!(y::YelmoModel, dt::Float64)
     end
     calc_T_pmp_3D!(y.thrm.T_pmp, y.tpo.H_ice, zeta_aa,
                    c.T0, c.T_pmp_beta, c.rho_ice, c.g)
+    # Path B: also fill the dedicated 2D basal / surface T_pmp fields
+    # registered by `PATH_B_REGISTRY_ICE`, since `T_pmp[:,:,1]` is now
+    # the first interior layer at ζ_aa[1], not the basal boundary at
+    # ζ = 0.
+    calc_T_pmp_boundaries_2D!(y.thrm.T_pmp_b, y.thrm.T_pmp_s,
+                              y.tpo.H_ice,
+                              c.T0, c.T_pmp_beta, c.rho_ice, c.g)
 
     # 2. Heat sources — basal frictional heating Q_b.
     if par.qb_method == 1
@@ -413,9 +423,15 @@ function therm_step!(y::YelmoModel, dt::Float64)
                             y.thrm.T_pmp, y.thrm.cp, c.L_ice)
 
     # 8. Homologous-temperature + pressure-melting fraction.
-    _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b,
-                      y.thrm.T_ice, y.thrm.T_pmp)
-    calc_f_pmp!(y.thrm.f_pmp, y.thrm.T_ice, y.thrm.T_pmp, y.tpo.f_grnd;
+    #    Path B: T_prime_b / T_prime_s come from the dedicated
+    #    boundary fields (T_ice_b - T_pmp_b, T_ice_s - T_pmp_s),
+    #    not from T_prime[:, :, 1] / [:, :, end] (which are interior
+    #    layers under Path B). f_pmp reads T_ice_b / T_pmp_b.
+    _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b, y.thrm.T_prime_s,
+                      y.thrm.T_ice, y.thrm.T_pmp,
+                      y.thrm.T_ice_b, y.thrm.T_pmp_b,
+                      y.thrm.T_ice_s, y.thrm.T_pmp_s)
+    calc_f_pmp!(y.thrm.f_pmp, y.thrm.T_ice_b, y.thrm.T_pmp_b, y.tpo.f_grnd;
                 gamma=par.gamma)
 
     return y
@@ -438,23 +454,35 @@ function _fill_bmb_w_scratch!(bmb_w::AbstractArray{Float64,3},
     return bmb_w
 end
 
-# Compute T_prime = T_ice - T_pmp (3D) and T_prime_b = T_prime[:, :, 1]
-# (2D basal slice). Mirrors the two diagnostic lines in Fortran
-# `calc_ytherm` lines 248-249.
-function _calc_T_prime_3D!(T_prime_field, T_prime_b_field,
-                            T_ice_field, T_pmp_field)
-    Tp_d  = T_prime_field.data
-    Tpb_d = T_prime_b_field.data
-    Ti_d  = T_ice_field.data
-    Tm_d  = T_pmp_field.data
-    Nx    = T_ice_field.grid.Nx
-    Ny    = T_ice_field.grid.Ny
-    Nz    = T_ice_field.grid.Nz
+# Compute T_prime = T_ice - T_pmp (3D interior) plus the Path B
+# boundary fields T_prime_b = T_ice_b - T_pmp_b (basal, ζ=0) and
+# T_prime_s = T_ice_s - T_pmp_s (surface, ζ=1). Mirrors the diagnostic
+# lines in Fortran `calc_ytherm` lines 248-249, but with the boundary
+# values pulled from their dedicated 2D fields rather than from
+# `T_prime[:, :, 1]` / `T_prime[:, :, end]` (which are interior
+# layer values, not boundary values, under Path B).
+function _calc_T_prime_3D!(T_prime_field, T_prime_b_field, T_prime_s_field,
+                            T_ice_field, T_pmp_field,
+                            T_ice_b_field, T_pmp_b_field,
+                            T_ice_s_field, T_pmp_s_field)
+    Tp_d   = T_prime_field.data
+    Tpb_d  = T_prime_b_field.data
+    Tps_d  = T_prime_s_field.data
+    Ti_d   = T_ice_field.data
+    Tm_d   = T_pmp_field.data
+    Tib_d  = T_ice_b_field.data
+    Tmb_d  = T_pmp_b_field.data
+    Tis_d  = T_ice_s_field.data
+    Tms_d  = T_pmp_s_field.data
+    Nx     = T_ice_field.grid.Nx
+    Ny     = T_ice_field.grid.Ny
+    Nz     = T_ice_field.grid.Nz
     @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
         Tp_d[i, j, k] = Ti_d[i, j, k] - Tm_d[i, j, k]
     end
     @inbounds for j in 1:Ny, i in 1:Nx
-        Tpb_d[i, j, 1] = Tp_d[i, j, 1]
+        Tpb_d[i, j, 1] = Tib_d[i, j, 1] - Tmb_d[i, j, 1]
+        Tps_d[i, j, 1] = Tis_d[i, j, 1] - Tms_d[i, j, 1]
     end
     return nothing
 end
