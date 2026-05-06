@@ -61,27 +61,6 @@ Open follow-ups (not blocking thrm closeout):
     Arrhenius) gating now has the upstream therm fields available;
     enabling it is a `mat` follow-up.
 
-KNOWN VERTICAL CONVENTION ISSUE — see `.claude/PlanVerticalSplit.md`
-for the full plan. Yelmo's grid loader builds an Oceananigans
-`Center`-staggered z axis from the file's `zeta_ac` (Face values)
-and loads file `T_ice` / `enth` / `T_pmp` etc. (length Nz_file =
-file zeta length, includes endpoints 0 and 1) into Yelmo's
-`Center` Nz fields by **verbatim index copy**. Because Center cells
-are forced to be midpoints of Faces, file center positions and Yelmo
-center positions don't align — file's `T_ice[:,:,1]` (basal value at
-z=0) ends up at Yelmo's `zeta_aa[1] ≈ 0.003`, and file's
-`T_ice[:,:,Nz_file]` (surface value at z=1) ends up at Yelmo's
-`zeta_aa[Nz] ≈ 0.948` — a 5% mis-alignment at the surface. The
-implicit column solver in this module uses `T_ice[:,:,1]` and
-`T_ice[:,:,Nz]` AS basal / surface BC values, which makes the
-mis-alignment cancel for thrm's own purposes — but any other consumer
-that interprets `T_ice[:,:,1]` as an interior cell value reads
-mis-positioned data. The same issue affects dyn (`ux`, `uy`,
-`uz_star`) and mat (`visc`, `ATT`, `enh`). Path B fix (true
-interior + 2D `_b` / `_s` boundary fields) is documented in
-`.claude/PlanVerticalSplit.md`; deferred to a dedicated
-cross-cutting refactor branch.
-
 `therm_step!` does NOT advance `y.time` — that is owned by
 `topo_step!`, matching the dyn/mat convention.
 """
@@ -103,7 +82,7 @@ import ..YelmoCore: therm_step!
 export therm_step!,
        calc_specific_heat_capacity, calc_thermal_conductivity,
        calc_T_pmp,
-       calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_f_pmp!,
+       calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_T_pmp_boundaries_2D!, calc_f_pmp!,
        calc_dzeta_terms!,
        convert_to_enthalpy, convert_to_enthalpy_3D!,
        define_temp_linear_3D!, define_temp_robin_3D!,
@@ -184,8 +163,11 @@ function therm_step!(y::YelmoModel, dt::Float64)
     par     = y.p.ytherm
     method  = par.method
     c       = y.c
-    zeta_aa = znodes(y.gt, Center())
-    zeta_ac = znodes(y.gt, Face())
+    # Path B (commit 5a): use the cached `Vector{Float64}` snapshots
+    # of the ice grid axes from `y.thrm.scratch` instead of allocating
+    # a fresh `collect(znodes(...))` per `therm_step!` call.
+    zeta_aa = y.thrm.scratch.zeta_aa
+    zeta_ac = y.thrm.scratch.zeta_ac
 
     # 1. Thermal property update.
     if par.use_const_cp
@@ -200,6 +182,13 @@ function therm_step!(y::YelmoModel, dt::Float64)
     end
     calc_T_pmp_3D!(y.thrm.T_pmp, y.tpo.H_ice, zeta_aa,
                    c.T0, c.T_pmp_beta, c.rho_ice, c.g)
+    # Path B: also fill the dedicated 2D basal / surface T_pmp fields
+    # registered by `PATH_B_REGISTRY_ICE`, since `T_pmp[:,:,1]` is now
+    # the first interior layer at ζ_aa[1], not the basal boundary at
+    # ζ = 0.
+    calc_T_pmp_boundaries_2D!(y.thrm.T_pmp_b, y.thrm.T_pmp_s,
+                              y.tpo.H_ice,
+                              c.T0, c.T_pmp_beta, c.rho_ice, c.g)
 
     # 2. Heat sources — basal frictional heating Q_b.
     if par.qb_method == 1
@@ -314,7 +303,10 @@ function therm_step!(y::YelmoModel, dt::Float64)
                           y.tpo.f_grnd, y.tpo.H_grnd,
                           zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                           par.omega_max, c.T0, c.rho_ice, c.rho_sw,
-                          c.rho_w, c.L_ice, c.sec_year, dt)
+                          c.rho_w, c.L_ice, c.sec_year, dt;
+                          T_ice_b_field = y.thrm.T_ice_b,
+                          T_pmp_b_field = y.thrm.T_pmp_b,
+                          T_ice_s_field = y.thrm.T_ice_s)
         elseif method == "enth"
             # Pre-compute horizontal advection of `enth`.
             calc_advec_horizontal_3D!(y.thrm.advecxy, y.thrm.enth,
@@ -377,10 +369,12 @@ function therm_step!(y::YelmoModel, dt::Float64)
             zeta_aa_rock = znodes(y.gr, Center())
             define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
                                      y.thrm.Q_rock,
-                                     y.thrm.T_ice,
+                                     y.thrm.T_ice_b,
                                      y.bnd.Q_geo,
                                      par.cp_rock, par.kt_rock, par.H_rock,
                                      zeta_aa_rock, c.sec_year)
+            # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
+            interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         elseif rock_method == "active"
             zeta_aa_rock = znodes(y.gr, Center())
             zeta_ac_rock = znodes(y.gr, Face())
@@ -392,13 +386,15 @@ function therm_step!(y::YelmoModel, dt::Float64)
                               collect(Float64, zeta_ac_rock))
             define_temp_bedrock_active_3D!(y.thrm.enth_rock, y.thrm.T_rock,
                                             y.thrm.Q_rock,
-                                            y.thrm.T_ice,
+                                            y.thrm.T_ice_b,
                                             y.bnd.Q_geo,
                                             par.cp_rock, par.kt_rock,
                                             c.rho_rock, par.H_rock,
                                             zeta_aa_rock, zeta_ac_rock,
                                             dzeta_a_rock, dzeta_b_rock,
                                             c.sec_year, dt)
+            # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
+            interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
         else
             error("therm_step!: unknown rock_method=\"$(rock_method)\". " *
                   "Supported: \"fixed\", \"equil\", \"active\".")
@@ -413,9 +409,15 @@ function therm_step!(y::YelmoModel, dt::Float64)
                             y.thrm.T_pmp, y.thrm.cp, c.L_ice)
 
     # 8. Homologous-temperature + pressure-melting fraction.
-    _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b,
-                      y.thrm.T_ice, y.thrm.T_pmp)
-    calc_f_pmp!(y.thrm.f_pmp, y.thrm.T_ice, y.thrm.T_pmp, y.tpo.f_grnd;
+    #    Path B: T_prime_b / T_prime_s come from the dedicated
+    #    boundary fields (T_ice_b - T_pmp_b, T_ice_s - T_pmp_s),
+    #    not from T_prime[:, :, 1] / [:, :, end] (which are interior
+    #    layers under Path B). f_pmp reads T_ice_b / T_pmp_b.
+    _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b, y.thrm.T_prime_s,
+                      y.thrm.T_ice, y.thrm.T_pmp,
+                      y.thrm.T_ice_b, y.thrm.T_pmp_b,
+                      y.thrm.T_ice_s, y.thrm.T_pmp_s)
+    calc_f_pmp!(y.thrm.f_pmp, y.thrm.T_ice_b, y.thrm.T_pmp_b, y.tpo.f_grnd;
                 gamma=par.gamma)
 
     return y
@@ -438,23 +440,35 @@ function _fill_bmb_w_scratch!(bmb_w::AbstractArray{Float64,3},
     return bmb_w
 end
 
-# Compute T_prime = T_ice - T_pmp (3D) and T_prime_b = T_prime[:, :, 1]
-# (2D basal slice). Mirrors the two diagnostic lines in Fortran
-# `calc_ytherm` lines 248-249.
-function _calc_T_prime_3D!(T_prime_field, T_prime_b_field,
-                            T_ice_field, T_pmp_field)
-    Tp_d  = T_prime_field.data
-    Tpb_d = T_prime_b_field.data
-    Ti_d  = T_ice_field.data
-    Tm_d  = T_pmp_field.data
-    Nx    = T_ice_field.grid.Nx
-    Ny    = T_ice_field.grid.Ny
-    Nz    = T_ice_field.grid.Nz
+# Compute T_prime = T_ice - T_pmp (3D interior) plus the Path B
+# boundary fields T_prime_b = T_ice_b - T_pmp_b (basal, ζ=0) and
+# T_prime_s = T_ice_s - T_pmp_s (surface, ζ=1). Mirrors the diagnostic
+# lines in Fortran `calc_ytherm` lines 248-249, but with the boundary
+# values pulled from their dedicated 2D fields rather than from
+# `T_prime[:, :, 1]` / `T_prime[:, :, end]` (which are interior
+# layer values, not boundary values, under Path B).
+function _calc_T_prime_3D!(T_prime_field, T_prime_b_field, T_prime_s_field,
+                            T_ice_field, T_pmp_field,
+                            T_ice_b_field, T_pmp_b_field,
+                            T_ice_s_field, T_pmp_s_field)
+    Tp_d   = T_prime_field.data
+    Tpb_d  = T_prime_b_field.data
+    Tps_d  = T_prime_s_field.data
+    Ti_d   = T_ice_field.data
+    Tm_d   = T_pmp_field.data
+    Tib_d  = T_ice_b_field.data
+    Tmb_d  = T_pmp_b_field.data
+    Tis_d  = T_ice_s_field.data
+    Tms_d  = T_pmp_s_field.data
+    Nx     = T_ice_field.grid.Nx
+    Ny     = T_ice_field.grid.Ny
+    Nz     = T_ice_field.grid.Nz
     @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
         Tp_d[i, j, k] = Ti_d[i, j, k] - Tm_d[i, j, k]
     end
     @inbounds for j in 1:Ny, i in 1:Nx
-        Tpb_d[i, j, 1] = Tp_d[i, j, 1]
+        Tpb_d[i, j, 1] = Tib_d[i, j, 1] - Tmb_d[i, j, 1]
+        Tps_d[i, j, 1] = Tis_d[i, j, 1] - Tms_d[i, j, 1]
     end
     return nothing
 end

@@ -936,12 +936,15 @@ end
     step!(y, 1.0)
 
     # After one step of 1 yr with tau = 5 yr toward H_ref = 1000 m:
-    # dHdt = (1000 - 500) / 5 = 100 m/yr → ΔH = 100 m → H_new = 600 m.
+    # dt_method=0 → fixed-dt Heun (not forward Euler).
+    # k1 = (1000-500)/5 = 100, H_pred = 600
+    # k2 = (1000-600)/5 = 80,  H_**   = 680
+    # H_corr = 0.5*(500 + 680) = 590.
     interior_view = view(H_ice, 2:Nx-1, 2:Ny-1, 1)
-    @test all(abs.(interior_view .- 600.0) .< 1e-9)
+    @test all(abs.(interior_view .- 590.0) .< 1e-9)
 
-    # mb_relax should be exactly 100 m/yr in the interior.
-    @test all(abs.(view(interior(y.tpo.mb_relax), 2:Nx-1, 2:Ny-1, 1) .- 100.0)
+    # mb_relax is the corrector-stage rate (at H_pred=600): 80 m/yr.
+    @test all(abs.(view(interior(y.tpo.mb_relax), 2:Nx-1, 2:Ny-1, 1) .- 80.0)
               .< 1e-9)
 
     # mb_net accounting still balances (smb=bmb=fmb=dmb=mb_resid=0).
@@ -1467,7 +1470,12 @@ end
         interior(y.tpo.lsf)[target_i, j, 1] = 1.0
     end
 
-    Yelmo.step!(y, 1.0)
+    # Call topo_step! directly: this test is verifying the calving-kill
+    # physics (H→0, cmb recording) in a single forward-Euler pass.
+    # step!(y, 1.0) would go through Heun (dt_method=0 → Heun PC), whose
+    # H_corr = (H_n + H_**)/2 averaging softens the kill to H_corr=250,
+    # not the physically correct 0.
+    Yelmo.topo_step!(y, 1.0)
 
     # Column `target_i` had H = 500 with lsf > 0 ⇒ kill: H → 0, cmb < 0.
     @test all(interior(y.tpo.H_ice)[target_i, :, 1] .== 0.0)
@@ -2636,8 +2644,15 @@ end
                              z_bed, z_sl, 910.0, 1028.0,
                              "floating")
 
-    @test interior(H_ice_dyn) == interior(H_ice)
-    @test interior(f_ice_dyn) == interior(f_ice)
+    # Fully-covered cell: pass-through.
+    @test interior(H_ice_dyn)[2, 2, 1] == 100.0
+    @test interior(f_ice_dyn)[2, 2, 1] == 1.0
+    # Partial-cover cell: H_ice_dyn = H_eff = H/f; f_ice_dyn = 1 (binary).
+    @test interior(H_ice_dyn)[2, 3, 1] ≈ 100.0 atol = 1e-12   # 50/0.5
+    @test interior(f_ice_dyn)[2, 3, 1] == 1.0
+    # Ice-free cells: both zero.
+    @test interior(H_ice_dyn)[1, 1, 1] == 0.0
+    @test interior(f_ice_dyn)[1, 1, 1] == 0.0
 end
 
 @testset "tpo: calc_dynamic_ice_fields! — slab" begin

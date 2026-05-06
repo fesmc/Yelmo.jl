@@ -326,6 +326,41 @@ port branch). Suggested:
   right place), writes back, asserts the round-trip restores
   `T_ice[:,:,1] = 273`.
 
+## Resolved design decisions (2026-05-06)
+
+User decisions on the open questions below, locked before commit 1:
+
+- **Q1 — Face grid convention**: option (a). Yelmo `zeta_ac` (Face)
+  recomputed as midpoints of new Centers + endpoints {0, 1}. File
+  `zeta_ac` is no longer authoritative for the Yelmo grid; it is only
+  consulted at I/O time for the boundary slices. Stays compatible with
+  stock Oceananigans `Center` stagger.
+- **Q2 — Bedrock surface sharing**: option (c). `T_rock_s` is an alias
+  / view of `T_ice_b` (one shared surface — the bed-ice interface).
+  Comment clearly at the alias point. Reason: keeps NetCDF write of
+  `T_rock` (interior + `T_rock_b` + alias) clean and uniform without
+  duplicating storage.
+- **Q3 — Advection of `_b` / `_s`**: NO advection at the boundary
+  fields. They are pure 2D interfaces, not Center cells. Only interior
+  cells participate in `calc_advec_horizontal_3D!`. (Consistent with
+  the Fortran convention: in Fortran, `T_ice[1]` and `T_ice[Nz]` are
+  Dirichlet-driven by surface forcing / basal BC and are not advected
+  as cell-centered values.)
+- **Q4 — Solver BC discretisation**: re-derive the BC stencil. The
+  basal half-cell from z=0 to `zeta_aa[1]` uses `dz = zeta_aa[1] - 0`,
+  not `zeta_aa[2] - zeta_aa[1]`. Surface half-cell symmetric.
+- **Q5 — Per-step `collect(zeta)` allocations**: add the scratch
+  struct (`y.thrm.scratch.zeta_aa::Vector{Float64}`) populated once at
+  init. Lump into commit 5 (thrm refactor).
+- **Q6 — Backward-compat shim**: no shim. File format on disk is
+  unchanged (length-`Nz_file` slab). The new reader splits it into
+  interior + `_b` + `_s` automatically via the registry, so old
+  Mirror-generated and old Yelmo.jl-generated files load correctly.
+- **Q7 — `mat` 2D boundary fields**: option (a). Add `visc_b`,
+  `visc_s`, `ATT_b`, `ATT_s`, `enh_b`, `enh_s`. Drives the registry
+  uniformly across mat and thrm; `visc_int` integration becomes a
+  trapezoidal sum over `(_b, interior..., _s)` at known zeta positions.
+
 ## Open design questions
 
 1. **Grid Face convention**: should Yelmo's `zeta_ac` (Face) be the

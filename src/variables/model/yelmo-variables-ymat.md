@@ -26,3 +26,9 @@
 | 22 | strs_txz          | xc, yc, zeta     | Pa          | Stress tensor component txz                   |
 | 23 | strs_tyz          | xc, yc, zeta     | Pa          | Stress tensor component tyz                   |
 | 24 | strs_te           | xc, yc, zeta     | Pa          | Effective stress                              |
+| 25 | visc_b            | xc, yc           | Pa yr       | Basal ice viscosity (z=0 boundary)            |
+| 26 | visc_s            | xc, yc           | Pa yr       | Surface ice viscosity (z=1 boundary)          |
+| 27 | ATT_b             | xc, yc           | -           | Basal rate factor (z=0 boundary)              |
+| 28 | ATT_s             | xc, yc           | -           | Surface rate factor (z=1 boundary)            |
+| 29 | enh_b             | xc, yc           | -           | Basal enhancement factor (z=0 boundary)       |
+| 30 | enh_s             | xc, yc           | -           | Surface enhancement factor (z=1 boundary)     |

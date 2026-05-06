@@ -72,26 +72,48 @@ function _calc_temp_column_internal!(temp::AbstractVector{Float64},
                                      rhs::Vector{Float64},
                                      solution::Vector{Float64},
                                      cp_buf::Vector{Float64},
-                                     dp_buf::Vector{Float64})
+                                     dp_buf::Vector{Float64};
+                                     kappa_basal::Float64,
+                                     kappa_surf::Float64)
     nz_aa = length(zeta_aa)
 
     @inbounds begin
+        H2 = thickness * thickness
+
         # -- Base BC --
-        if is_basal_flux
+        if !is_basal_flux
+            # Dirichlet: `val_base` lives at z=0, `temp[1]` at zeta_aa[1]
+            # (first interior centre). Absorb the T[0]=val_base contribution
+            # into the rhs; kappa_basal is the diffusivity at the z=0 face.
+            kappa_a = kappa_basal
+            dz1     = zeta_ac[2]   - zeta_aa[1]
+            dz2     = zeta_aa[2]   - zeta_ac[2]
+            kappa_n = _calc_wtd_harmonic_mean(kappa[1], kappa[2], dz1, dz2)
+
+            fac_a = -kappa_a * dzeta_a[1] * dt / H2
+            fac_b = -kappa_n * dzeta_b[1] * dt / H2
+
+            uz_aa     = 0.5 * (uz[1] + uz[2])
+            dzeta_adv = zeta_aa[2] - 0.0
+            dz_adv    = thickness * dzeta_adv
+
+            absorb = fac_a - uz_aa * dt / dz_adv
+
+            subd[1] = 0.0
+            supd[1] = fac_b + uz_aa * dt / dz_adv
+            diag[1] = 1.0 - fac_a - fac_b
+            rhs[1]  = (temp[1] - T_ref) - dt * advecxy[1] + dt * Q_strn[1] -
+                      absorb * (val_base - T_ref)
+        else
+            # Neumann: backward-Euler flux at the base.
             dz       = thickness * (zeta_aa[2] - zeta_aa[1])
             subd[1]  = 0.0
             diag[1]  = -1.0
             supd[1]  = 1.0
             rhs[1]   = val_base * dz
-        else
-            subd[1]  = 0.0
-            diag[1]  = 1.0
-            supd[1]  = 0.0
-            rhs[1]   = val_base - T_ref
         end
 
         # -- Interior layers --
-        H2 = thickness * thickness
         for k in 2:(nz_aa - 1)
             # Harmonic-mean kappa onto ac-nodes k and k+1.
             dz1     = zeta_ac[k]   - zeta_aa[k - 1]
@@ -119,17 +141,37 @@ function _calc_temp_column_internal!(temp::AbstractVector{Float64},
         end
 
         # -- Surface BC --
-        if is_surf_flux
+        if !is_surf_flux
+            # Dirichlet: `val_srf` lives at z=1, `temp[nz_aa]` at the last
+            # interior centre. Symmetric to the basal case; kappa_surf is
+            # the diffusivity at the z=1 face.
+            dz1     = zeta_ac[nz_aa]   - zeta_aa[nz_aa - 1]
+            dz2     = zeta_aa[nz_aa]   - zeta_ac[nz_aa]
+            kappa_a = _calc_wtd_harmonic_mean(kappa[nz_aa - 1], kappa[nz_aa],
+                                              dz1, dz2)
+            kappa_n = kappa_surf
+
+            fac_a = -kappa_a * dzeta_a[nz_aa] * dt / H2
+            fac_b = -kappa_n * dzeta_b[nz_aa] * dt / H2
+
+            uz_aa     = 0.5 * (uz[nz_aa] + uz[nz_aa + 1])
+            dzeta_adv = 1.0 - zeta_aa[nz_aa - 1]
+            dz_adv    = thickness * dzeta_adv
+
+            absorb = fac_b + uz_aa * dt / dz_adv
+
+            subd[nz_aa] = fac_a - uz_aa * dt / dz_adv
+            supd[nz_aa] = 0.0
+            diag[nz_aa] = 1.0 - fac_a - fac_b
+            rhs[nz_aa]  = (temp[nz_aa] - T_ref) - dt * advecxy[nz_aa] +
+                          dt * Q_strn[nz_aa] - absorb * (val_srf - T_ref)
+        else
+            # Neumann: backward-Euler flux at the surface.
             dz             = thickness * (zeta_aa[nz_aa] - zeta_aa[nz_aa - 1])
             subd[nz_aa]    = -1.0
             diag[nz_aa]    =  1.0
             supd[nz_aa]    =  0.0
             rhs[nz_aa]     = val_srf * dz
-        else
-            subd[nz_aa]    = 0.0
-            diag[nz_aa]    = 1.0
-            supd[nz_aa]    = 0.0
-            rhs[nz_aa]     = val_srf - T_ref
         end
 
         # -- Tridiagonal solve --

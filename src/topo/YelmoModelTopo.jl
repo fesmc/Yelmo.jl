@@ -25,7 +25,7 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel,
 
 import ..YelmoCore: topo_step!
 
-export topo_step!, advect_tracer!,
+export topo_step!, apply_mask_ice_pass!, advect_tracer!,
        advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!,
        ImplicitAdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
@@ -278,7 +278,11 @@ end
 
 # Per-cell post-step pass keyed off bnd.mask_ice. Stored values are
 # Float64 representations of the Int constants from YelmoCore.
-function _apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
+#
+# Also called from `pc_step!` (timestepping.jl) after the Heun corrector
+# average to restore mask invariants that the (H_n + H_**)/2 average
+# can violate (e.g. MASK_ICE_NONE cells get H_corr = H_n/2 > 0).
+function apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
     H_ice    = interior(y.tpo.H_ice)
     mask_ice = interior(y.bnd.mask_ice)
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
@@ -293,6 +297,7 @@ function _apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
     end
     return y
 end
+const _apply_mask_ice_pass! = apply_mask_ice_pass!
 
 # Recompute Phase-10 diagnostics from current state.
 #  - Refresh `H_grnd` (flotation diagnostic), then `f_grnd` via the

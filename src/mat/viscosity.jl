@@ -14,24 +14,29 @@
 # strain-rate tensor (`y.dyn.strn.de`) plus the mat rate factor
 # (`y.mat.ATT`) to compute material-property viscosities.
 #
-# Boundary endpoint convention (deviation from Fortran):
+# Boundary endpoint convention (Path B):
 #
 # In Fortran, `visc(:,:,1:nz_aa)` is allocated on the full aa-grid
 # where `zeta_aa(1) = 0` (bed) and `zeta_aa(nz_aa) = 1` (surface), so
 # `integrate_trapezoid1D_pt` covers the full `[0, 1]` interval using
 # the per-layer values directly.
 #
-# In Yelmo.jl under the Option C convention, 3D fields use Center
-# vertical staggering — interior layer midpoints only, length `Nz`,
-# excluding the bed and surface endpoints. Mat does NOT carry
-# explicit `visc_b` / `visc_s` 2D boundary fields (unlike dyn's
-# `visc_eff_b` / `visc_eff_s` which exist for SSA matrix accuracy),
-# so the depth integral falls back to constant extrapolation: the
-# bed value is taken as `visc[k=1]` and the surface as `visc[k=Nz]`.
-# This is exact for uniform vertical viscosity and an O(Δz) error in
-# general — acceptable for diagnostic-only output. Per-field
-# benchmark tolerances cover the resulting deviation from the
-# Fortran reference.
+# Under the Path B vertical convention (commit 1+ of the vert-split
+# refactor) Yelmo.jl 3D fields use Center vertical staggering —
+# interior layer midpoints only, length `Nz`, excluding the bed and
+# surface endpoints. Mat carries explicit 2D boundary fields
+# `visc_b` / `visc_s` / `enh_b` / `enh_s` populated by the boundary
+# registry (see `PATH_B_REGISTRY_ICE` in `YelmoCore.jl`); the depth
+# integrators below take them as explicit arguments and consume the
+# real basal / surface values rather than constant-extrapolating
+# from the nearest interior layer.
+#
+# A backward-compat 3-arg / 5-arg method overload still exists for
+# call sites that have not yet been wired to pass the boundary
+# fields (notably the synthetic-state unit tests in
+# `test/test_yelmo_mat_viscosity.jl`); those overloads constant-
+# extrapolate from the interior, equivalent to the pre-Path B
+# behaviour.
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
@@ -101,19 +106,21 @@ end
 
 
 """
-    calc_visc_int!(visc_int, visc, H_ice, f_ice, zeta_aa) -> visc_int
+    calc_visc_int!(visc_int, visc, visc_b, visc_s, H_ice, f_ice, zeta_aa) -> visc_int
 
-Depth-integrated viscosity in Pa·yr·m:
+Depth-integrated viscosity in Pa·yr·m, using explicit Path B boundary
+endpoint fields:
 
     visc_int(i, j) = ∫₀¹ visc(i, j, ζ) dζ · H_ice(i, j)    if f_ice == 1
                    = 0                                       otherwise
 
-Port of `yelmo/src/physics/deformation.f90:321 calc_visc_int`.
+`visc_b` / `visc_s` are 2D `CenterField`s populated by the boundary
+registry on load and refreshed each step from the interior limits in
+`mat_step!`. Port of `yelmo/src/physics/deformation.f90:321 calc_visc_int`.
 
-Boundary endpoint values for the integration come from constant
-extrapolation off the nearest interior layer (`visc[k=1]` for the
-bed, `visc[k=Nz]` for the surface) — see file-header comment for the
-rationale.
+A 5-arg method `calc_visc_int!(visc_int, visc, H_ice, f_ice, zeta_aa)`
+constant-extrapolates the boundary values from the nearest interior
+layer; preserved for synthetic-state unit tests.
 
 Boundary halo treatment from the Fortran routine
 (`periodic` / `periodic-x` / `infinite` blocks at lines 362-383) is
@@ -124,14 +131,18 @@ staggering, and downstream callers refresh halos via
 Inputs:
   - `visc_int` (2D CenterField, output, Pa·yr·m)
   - `visc`     (3D CenterField, Pa·yr)
+  - `visc_b`   (2D CenterField, Pa·yr; basal endpoint at ζ=0)
+  - `visc_s`   (2D CenterField, Pa·yr; surface endpoint at ζ=1)
   - `H_ice`    (2D CenterField, m)
   - `f_ice`    (2D CenterField)
   - `zeta_aa`  (Vector, length Nz, dimensionless interior-Center ζ)
 """
-function calc_visc_int!(visc_int, visc, H_ice, f_ice,
+function calc_visc_int!(visc_int, visc, visc_b, visc_s, H_ice, f_ice,
                         zeta_aa::AbstractVector{<:Real})
     Vi = interior(visc_int)
     V  = interior(visc)
+    Vb = interior(visc_b)
+    Vs = interior(visc_s)
     H  = interior(H_ice)
     fi = interior(f_ice)
 
@@ -141,9 +152,6 @@ function calc_visc_int!(visc_int, visc, H_ice, f_ice,
     Nz == length(zeta_aa) || error(
         "calc_visc_int!: visc has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
 
-    # Constant-extrapolation bed/surface views — see file-header comment.
-    Vb = @view V[:, :, 1:1]
-    Vs = @view V[:, :, Nz:Nz]
     vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
 
     @inbounds for j in 1:Ny, i in 1:Nx
@@ -156,26 +164,70 @@ function calc_visc_int!(visc_int, visc, H_ice, f_ice,
     return visc_int
 end
 
+# Backward-compat: constant-extrapolation. Equivalent to the legacy
+# pre-Path B implementation. Used by synthetic-state unit tests
+# (`test/test_yelmo_mat_viscosity.jl`) that haven't been wired with
+# explicit boundary fields.
+function calc_visc_int!(visc_int, visc, H_ice, f_ice,
+                        zeta_aa::AbstractVector{<:Real})
+    V = interior(visc)
+    Nz = size(V, 3)
+    Vb = @view V[:, :, 1:1]
+    Vs = @view V[:, :, Nz:Nz]
+    Vi = interior(visc_int)
+    Nx = size(Vi, 1)
+    Ny = size(Vi, 2)
+    Nz == length(zeta_aa) || error(
+        "calc_visc_int!: visc has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
+    H  = interior(H_ice)
+    fi = interior(f_ice)
+    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        if fi[i, j, 1] == 1.0
+            Vi[i, j, 1] = Vi[i, j, 1] * H[i, j, 1]
+        else
+            Vi[i, j, 1] = 0.0
+        end
+    end
+    return visc_int
+end
+
 
 """
-    depth_average!(out2D, var3D, zeta_aa) -> out2D
+    depth_average!(out2D, var3D, var_b, var_s, zeta_aa) -> out2D
 
 Pure depth-average `∫₀¹ var(ζ) dζ` of a 3D Center-staggered field
-into a 2D Center-staggered field. Uses the same constant-extrapolation
-boundary convention as `calc_visc_int!` (the bed value is taken as
-`var3D[k=1]` and the surface as `var3D[k=Nz]`).
+into a 2D Center-staggered field, using explicit Path B boundary
+endpoint fields `var_b` (ζ=0) and `var_s` (ζ=1).
 
-Used by `mat_step!` to populate `mat.enh_bar`, `mat.ATT_bar`, and
-`mat.visc_bar` from their respective 3D fields. Fortran analog:
+Used by `mat_step!` to populate `mat.enh_bar` and `mat.visc_bar`
+from their respective 3D fields. Fortran analog:
 `calc_vertical_integrated_2D` from `yelmo/src/yelmo_tools.f90`.
+
+A 3-arg `depth_average!(out2D, var3D, zeta_aa)` overload constant-
+extrapolates `var_b` / `var_s` from the nearest interior layer;
+preserved for synthetic-state unit tests.
 """
+function depth_average!(out2D, var3D, var_b, var_s,
+                        zeta_aa::AbstractVector{<:Real})
+    Vi = interior(out2D)
+    V  = interior(var3D)
+    Vb = interior(var_b)
+    Vs = interior(var_s)
+    Nz = size(V, 3)
+    Nz == length(zeta_aa) || error(
+        "depth_average!: var3D has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
+    vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)
+    return out2D
+end
+
+# Backward-compat: constant-extrapolation.
 function depth_average!(out2D, var3D, zeta_aa::AbstractVector{<:Real})
     Vi = interior(out2D)
     V  = interior(var3D)
     Nz = size(V, 3)
     Nz == length(zeta_aa) || error(
         "depth_average!: var3D has Nz=$(Nz) but zeta_aa has length $(length(zeta_aa))")
-
     Vb = @view V[:, :, 1:1]
     Vs = @view V[:, :, Nz:Nz]
     vert_int_trapz_boundary!(Vi, V, Vb, Vs, zeta_aa)

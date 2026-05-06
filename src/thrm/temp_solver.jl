@@ -22,6 +22,14 @@
 #      (cp T_pmp + L)` for the column.
 #   9. Compute `Q_ice_b`, `bmb_grnd` (grounded only), and `H_cts`.
 #
+# The column holds only the interior layers (ζ_aa[1] > 0,
+# ζ_aa[nz_aa] < 1). Boundary temperatures at ζ = 0 and ζ = 1 live in
+# the 2D `T_ice_b` / `T_ice_s` fields and are passed as `T_ice_b_val`
+# / `T_pmp_b_val` kwargs. The BC selection and post-solve diagnostics
+# (Q_ice_b, bmb_grnd) use the boundary values; the column solver
+# stencil uses the derived `kappa_basal` / `kappa_surf` diffusivities
+# at the phantom boundary cells.
+#
 # All scratch (length-Nz_aa workspace) is owned by the caller — the
 # 3D wrapper allocates one set per call and the column kernel re-uses
 # it across (i, j).
@@ -38,12 +46,19 @@ const _H_ICE_THIN   = 10.0       # m — Fortran calc_ytherm_enthalpy_3D thresho
                       zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                       omega_max, T0, rho_ice, rho_w, L_ice, sec_year, dt,
                       kappa_buf, Q_strn_K_buf, subd, diag, supd, rhs,
-                      solution, cp_tri, dp_tri)
-        -> (Q_ice_b, bmb_grnd, H_cts)
+                      solution, cp_tri, dp_tri;
+                      T_ice_b_val, T_pmp_b_val)
+        -> (Q_ice_b, bmb_grnd, H_cts, T_ice_b_new, T_ice_s_new)
 
 Per-column implicit temperature solver. Updates `enth_col`, `T_col`,
-`omega_col` in place; returns `(Q_ice_b, bmb_grnd, H_cts)` for the
-caller to write back into the 2D fields.
+`omega_col` in place; returns `(Q_ice_b, bmb_grnd, H_cts, T_ice_b_new,
+T_ice_s_new)`.
+
+`T_ice_b_val` / `T_pmp_b_val` are the ice and pressure-melting temperatures
+at the base (ζ = 0, the 2D `_b` boundary fields). `T_ice_b_new` on return is
+the resolved basal temperature (the Dirichlet BC value, or the
+gradient-extrapolated value for the Neumann case). `T_ice_s_new` is the
+surface Dirichlet value `min(T_srf, T0)`.
 """
 function calc_temp_column!(enth_col::AbstractVector{Float64},
                            T_col::AbstractVector{Float64},
@@ -73,7 +88,9 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
                            rhs::Vector{Float64},
                            solution::Vector{Float64},
                            cp_tri::Vector{Float64},
-                           dp_tri::Vector{Float64})
+                           dp_tri::Vector{Float64};
+                           T_ice_b_val::Float64,
+                           T_pmp_b_val::Float64)
     nz_aa = length(zeta_aa)
 
     @inbounds begin
@@ -85,24 +102,43 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
             Q_strn_K_buf[k] = Q_strn_col[k] / (rho_ice * cp_col[k])
         end
 
-        # Surface BC.
+        # Surface BC (always Dirichlet in the cold-ice solver).
         val_srf      = min(T_srf, T0)
         is_surf_flux = false
 
-        # Basal BC.
-        is_basal_flux = false
+        # Boundary diffusivities from the boundary temperatures.
+        # kappa_basal uses T_ice_b_val; kappa_surf uses val_srf (the current
+        # Dirichlet surface BC, more consistent than the previous-step T_ice_s).
+        kt_b        = calc_thermal_conductivity(T_ice_b_val, sec_year)
+        cp_b        = calc_specific_heat_capacity(T_ice_b_val)
+        kappa_basal = kt_b / (rho_ice * cp_b)
+        kt_s        = calc_thermal_conductivity(val_srf, sec_year)
+        cp_s        = calc_specific_heat_capacity(val_srf)
+        kappa_surf  = kt_s / (rho_ice * cp_s)
+        kt_base     = kt_b
+
+        # Basal BC selection using the boundary values.
         local val_base::Float64
+        local T_ice_b_new::Float64
+        local is_basal_flux::Bool = false
         if f_grnd < 1.0
-            val_base = f_grnd * T_pmp_col[1] + (1.0 - f_grnd) * T_shlf
+            val_base    = f_grnd * T_pmp_b_val + (1.0 - f_grnd) * T_shlf
+            T_ice_b_new = val_base
         else
             H_w_predicted = H_w - (bmb_grnd_in * (rho_w / rho_ice)) * dt
             if H_w_predicted > 0.0
-                val_base = T_pmp_col[1]
-            elseif T_col[1] < T_pmp_col[1] || H_w_predicted < 0.0
-                val_base       = -(Q_b_now + Q_rock_now) / kt_col[1]
-                is_basal_flux  = true
+                val_base    = T_pmp_b_val
+                T_ice_b_new = val_base
+            elseif T_ice_b_val < T_pmp_b_val || H_w_predicted < 0.0
+                # Neumann flux BC. Use kt_col[1] (first interior cell kt) so
+                # that Q_ice_b computed from the cell-to-cell gradient cancels
+                # to Q_b — mirrors Fortran where boundary == first cell.
+                val_base      = -(Q_b_now + Q_rock_now) / kt_col[1]
+                is_basal_flux = true
+                T_ice_b_new   = NaN  # resolved post-solve via extrapolation
             else
-                val_base = T_pmp_col[1]
+                val_base    = T_pmp_b_val
+                T_ice_b_new = val_base
             end
         end
 
@@ -113,7 +149,9 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
                                     _T_REF_ICE, dt,
                                     is_basal_flux, is_surf_flux,
                                     subd, diag, supd, rhs, solution,
-                                    cp_tri, dp_tri)
+                                    cp_tri, dp_tri;
+                                    kappa_basal = kappa_basal,
+                                    kappa_surf  = kappa_surf)
 
         # Internal-melt cleanup, descending from surface-1 to base+1.
         melt_internal = 0.0
@@ -141,13 +179,26 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
                                                L_ice)
         end
 
-        # Q_ice_b: 1st-order upwind gradient × kt at base.
+        # Q_ice_b: heat flux from ice to bed (J a⁻¹ m⁻²).
         local Q_ice_b_now::Float64
         if H_ice > 0.0
-            dz_base     = H_ice * (zeta_aa[2] - zeta_aa[1])
-            Q_ice_b_now = -kt_col[1] * (T_col[2] - T_col[1]) / dz_base
+            if is_basal_flux
+                # Neumann: approximate from first two interior cells;
+                # extrapolate T_ice_b to ζ=0 using the prescribed gradient.
+                dz_12 = H_ice * (zeta_aa[2] - zeta_aa[1])
+                Q_ice_b_now = -kt_col[1] * (T_col[2] - T_col[1]) / dz_12
+                T_ice_b_new = T_col[1] - val_base * H_ice * zeta_aa[1]
+            else
+                # Dirichlet: gradient from boundary (T_ice_b_new = val_base)
+                # to first interior centre.
+                dz_base     = H_ice * zeta_aa[1]
+                Q_ice_b_now = -kt_base * (T_col[1] - T_ice_b_new) / dz_base
+            end
         else
             Q_ice_b_now = 0.0
+            if is_basal_flux
+                T_ice_b_new = T_pmp_b_val  # thin-ice fallback
+            end
         end
         Q_ice_b = Q_ice_b_now * 1e3 / sec_year   # → mW/m²
 
@@ -155,8 +206,8 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
         # grounded only.
         local bmb_grnd::Float64
         if f_grnd > 0.0
-            bmb_grnd = _calc_bmb_grounded(T_col[1] - T_pmp_col[1],
-                                          Q_ice_b_now, Q_b_now,
+            dT_b = T_ice_b_new - T_pmp_b_val
+            bmb_grnd = _calc_bmb_grounded(dT_b, Q_ice_b_now, Q_b_now,
                                           Q_rock_now, rho_ice, L_ice)
             bmb_grnd -= melt_internal
             bmb_grnd >  _BMB_GRND_LIM && (bmb_grnd =  _BMB_GRND_LIM)
@@ -167,9 +218,11 @@ function calc_temp_column!(enth_col::AbstractVector{Float64},
 
         H_cts = _calc_cts_height_column(enth_col, T_pmp_col, cp_col,
                                         H_ice, zeta_aa)
+
+        T_ice_s_new = val_srf
     end
 
-    return Q_ice_b, bmb_grnd, H_cts
+    return Q_ice_b, bmb_grnd, H_cts, T_ice_b_new, T_ice_s_new
 end
 
 """
@@ -181,7 +234,8 @@ end
                   H_w_field, f_grnd_field, H_grnd_field,
                   zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                   omega_max, T0, rho_ice, rho_sw, rho_w, L_ice,
-                  sec_year, dt)
+                  sec_year, dt;
+                  T_ice_b_field, T_pmp_b_field, T_ice_s_field)
 
 3D wrapper around `calc_temp_column!`. Mirrors Fortran
 `calc_ytherm_enthalpy_3D` (`yelmo_thermodynamics.f90:268`):
@@ -196,6 +250,10 @@ end
   - For floating cells (`f_grnd < 1`), `T_shlf` is computed
     locally via `_calc_T_base_shlf_approx`, overriding
     `bnd.T_shlf` (Fortran-faithful).
+
+Boundary temperatures at ζ=0 and ζ=1 live in `T_ice_b_field` /
+`T_pmp_b_field` / `T_ice_s_field`; per-column scalars are forwarded
+to `calc_temp_column!` and the solved values are written back.
 """
 function calc_temp_3D!(enth_field, T_ice_field, omega_field,
                        bmb_grnd_field, Q_ice_b_field, H_cts_field,
@@ -211,7 +269,10 @@ function calc_temp_3D!(enth_field, T_ice_field, omega_field,
                        dzeta_b::AbstractVector{<:Real},
                        omega_max::Real, T0::Real,
                        rho_ice::Real, rho_sw::Real, rho_w::Real,
-                       L_ice::Real, sec_year::Real, dt::Real)
+                       L_ice::Real, sec_year::Real, dt::Real;
+                       T_ice_b_field,
+                       T_pmp_b_field,
+                       T_ice_s_field)
     enth = enth_field.data
     T    = T_ice_field.data
     om   = omega_field.data
@@ -253,6 +314,10 @@ function calc_temp_3D!(enth_field, T_ice_field, omega_field,
     cp_tri       = Vector{Float64}(undef, Nz)
     dp_tri       = Vector{Float64}(undef, Nz)
 
+    Tib = T_ice_b_field.data
+    Tmb = T_pmp_b_field.data
+    Tis = T_ice_s_field.data
+
     return _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
                                  Tp, cp, kt, adv, uz, Qs, Qb, Qr,
                                  Ts, Tsh, H, Fi, Hw, Fg, Hg,
@@ -266,6 +331,7 @@ function calc_temp_3D!(enth_field, T_ice_field, omega_field,
                                  kappa_buf, Q_strn_K_buf,
                                  subd, diag, supd, rhs, solution,
                                  cp_tri, dp_tri,
+                                 Tib, Tmb, Tis,
                                  Nx, Ny, Nz)
 end
 
@@ -290,6 +356,9 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
                                solution::Vector{Float64},
                                cp_tri::Vector{Float64},
                                dp_tri::Vector{Float64},
+                               Tib::Array{Float64,3},
+                               Tmb::Array{Float64,3},
+                               Tis::Array{Float64,3},
                                Nx::Int, Ny::Int, Nz::Int)
     @inbounds for j in 2:(Ny - 1), i in 2:(Nx - 1)
         f_ice_ij  = Fi[i, j, 1]
@@ -299,12 +368,14 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
         # Effective thickness (Fortran calc_ytherm_enthalpy_3D:344-348).
         H_ice_now = f_ice_ij > 0.0 ? H_ice_raw / f_ice_ij : H_ice_raw
 
+        T_pmp_b_ij = Tmb[i, j, 1]
+
         # Marine-shelf basal temperature (Fortran lines 353-363).
         T_shlf_ij = if f_grnd_ij < 1.0
-            _calc_T_base_shlf_approx(H_ice_now, Tp[i, j, 1],
+            _calc_T_base_shlf_approx(H_ice_now, T_pmp_b_ij,
                                      Hg[i, j, 1], T0, rho_ice, rho_sw)
         else
-            Tp[i, j, 1]
+            T_pmp_b_ij
         end
 
         T_col       = view(T,    i, j, :)
@@ -318,7 +389,7 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
         uz_col      = view(uz,   i, j, :)
 
         if f_ice_ij == 1.0 && H_ice_now > _H_ICE_THIN
-            Q_ice_b_v, bmb_v, H_cts_v = calc_temp_column!(
+            Q_ice_b_v, bmb_v, H_cts_v, T_ice_b_v, T_ice_s_v = calc_temp_column!(
                 enth_col, T_col, omega_col,
                 T_pmp_col, cp_col, kt_col,
                 advecxy_col, uz_col, Q_strn_col,
@@ -331,15 +402,19 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
                 rho_ice, rho_w, L_ice, sec_year, dt,
                 kappa_buf, Q_strn_K_buf,
                 subd, diag, supd, rhs, solution,
-                cp_tri, dp_tri,
+                cp_tri, dp_tri;
+                T_ice_b_val = Tib[i, j, 1],
+                T_pmp_b_val = Tmb[i, j, 1],
             )
             Qib[i, j, 1]  = Q_ice_b_v
             bmg[i, j, 1]  = bmb_v
             Hcts[i, j, 1] = H_cts_v
+            Tib[i, j, 1]  = T_ice_b_v
+            Tis[i, j, 1]  = T_ice_s_v
         else
             # Marginal cell: prescribe linear T profile between
             # basal (PMP grounded / T_shlf floating) and surface.
-            T_base = f_grnd_ij < 1.0 ? T_shlf_ij : T_pmp_col[1]
+            T_base = f_grnd_ij < 1.0 ? T_shlf_ij : T_pmp_b_ij
             T_top  = min(Ts[i, j, 1], T0)
             for k in 1:Nz
                 if k == 1
@@ -357,6 +432,8 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
             bmg[i, j, 1]  = 0.0
             Qib[i, j, 1]  = 0.0
             Hcts[i, j, 1] = 0.0
+            Tib[i, j, 1]  = T_base
+            Tis[i, j, 1]  = T_top
         end
     end
     return nothing

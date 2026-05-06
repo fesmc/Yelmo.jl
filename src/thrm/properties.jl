@@ -153,41 +153,71 @@ function _calc_T_pmp_kernel!(Tp, H, zeta::Vector{Float64},
 end
 
 """
-    calc_f_pmp!(f_pmp_field, T_ice_field, T_pmp_field, f_grnd_field; gamma)
+    calc_T_pmp_boundaries_2D!(T_pmp_b, T_pmp_s, H_ice, T0, beta, rho_ice, g)
+        -> nothing
+
+Fill the 2D Path B basal (`T_pmp_b`, ζ=0) and surface (`T_pmp_s`, ζ=1)
+pressure-corrected melting-point fields. At the bed the overlying ice
+column is the full `H_ice`; at the surface it is zero, so
+`T_pmp_s ≡ T0` everywhere. Companion of [`calc_T_pmp_3D!`](@ref) for
+the boundary fields registered in `PATH_B_REGISTRY_ICE`.
+"""
+function calc_T_pmp_boundaries_2D!(T_pmp_b_field, T_pmp_s_field, H_ice_field,
+                                   T0::Real, beta::Real,
+                                   rho_ice::Real, g::Real)
+    Tpb_d = T_pmp_b_field.data
+    Tps_d = T_pmp_s_field.data
+    H_d   = H_ice_field.data
+    Nx    = T_pmp_b_field.grid.Nx
+    Ny    = T_pmp_b_field.grid.Ny
+    pref  = Float64(beta) * Float64(rho_ice) * Float64(g)
+    T0_f  = Float64(T0)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        Tpb_d[i, j, 1] = T0_f - pref * H_d[i, j, 1]   # ζ = 0 (basal)
+        Tps_d[i, j, 1] = T0_f                          # ζ = 1 (surface)
+    end
+    return nothing
+end
+
+"""
+    calc_f_pmp!(f_pmp_field, T_ice_b_field, T_pmp_b_field, f_grnd_field; gamma)
         -> f_pmp_field
 
 Compute the fraction of each basal cell at the pressure melting point
 (`f_pmp ∈ [0, 1]`):
 
   - Floating cells (`f_grnd == 0`) are temperate by default → `f_pmp = 1`.
-  - With `gamma == 0` the result is binary (`T_ice ≥ T_pmp`).
-  - With `gamma > 0` a smooth decay `exp(min(T_ice - T_pmp, 0) / gamma)`
+  - With `gamma == 0` the result is binary (`T_ice_b ≥ T_pmp_b`).
+  - With `gamma > 0` a smooth decay `exp(min(T_ice_b - T_pmp_b, 0) / gamma)`
     is applied, clamped to `[0, 1]` outside `[1e-2, 1 - 1e-2]`, with the
     inner `dT` floored at `-20 K` to avoid underflow at very cold cells.
 
 Greve (2005); Hindmarsh & Le Meur (2001). Direct port of Fortran
-`thermodynamics.f90:991-1050`. Reads only the basal layer (`k = 1`) of
-the 3D temperature fields.
+`thermodynamics.f90:991-1050`. Under Path B the basal temperature and
+pressure-melting temperature live in the dedicated 2D `T_ice_b` /
+`T_pmp_b` fields rather than in `T_ice[:, :, 1]` / `T_pmp[:, :, 1]`
+(which are the first interior layer at ζ_aa[1], not the boundary at
+ζ = 0).
 """
-function calc_f_pmp!(f_pmp_field, T_ice_field, T_pmp_field, f_grnd_field;
+function calc_f_pmp!(f_pmp_field, T_ice_b_field, T_pmp_b_field, f_grnd_field;
                      gamma::Real)
-    fp_d = f_pmp_field.data
-    Ti_d = T_ice_field.data
-    Tp_d = T_pmp_field.data
-    Fg_d = f_grnd_field.data
-    Nx   = T_ice_field.grid.Nx
-    Ny   = T_ice_field.grid.Ny
-    return _calc_f_pmp_kernel!(fp_d, Ti_d, Tp_d, Fg_d, Float64(gamma), Nx, Ny)
+    fp_d  = f_pmp_field.data
+    Tib_d = T_ice_b_field.data
+    Tpb_d = T_pmp_b_field.data
+    Fg_d  = f_grnd_field.data
+    Nx    = f_pmp_field.grid.Nx
+    Ny    = f_pmp_field.grid.Ny
+    return _calc_f_pmp_kernel!(fp_d, Tib_d, Tpb_d, Fg_d, Float64(gamma), Nx, Ny)
 end
 
-function _calc_f_pmp_kernel!(fp, Ti, Tp, Fg, gamma::Float64, Nx::Int, Ny::Int)
+function _calc_f_pmp_kernel!(fp, Tib, Tpb, Fg, gamma::Float64, Nx::Int, Ny::Int)
     @inbounds for j in 1:Ny, i in 1:Nx
         if Fg[i, j, 1] == 0.0
             fp[i, j, 1] = 1.0
         elseif gamma == 0.0
-            fp[i, j, 1] = (Ti[i, j, 1] >= Tp[i, j, 1]) ? 1.0 : 0.0
+            fp[i, j, 1] = (Tib[i, j, 1] >= Tpb[i, j, 1]) ? 1.0 : 0.0
         else
-            dT = min(Ti[i, j, 1] - Tp[i, j, 1], 0.0)
+            dT = min(Tib[i, j, 1] - Tpb[i, j, 1], 0.0)
             dT = max(dT, -20.0)
             v  = exp(dT / gamma)
             v  = (v < 1e-2)         ? 0.0 : v

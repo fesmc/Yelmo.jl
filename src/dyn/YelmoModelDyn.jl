@@ -436,31 +436,30 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #   ux_s  = ux(:, :, nz_aa);  uy_s  = uy(:, :, nz_aa)
     #   uz_s  = uz(:, :, nz_ac);  uxy_s = uxy(:, :, nz_aa)
     #
-    # Under Option C, `interior(y.dyn.ux)[:, :, end]` is the topmost
-    # Center node at zeta_c[end], NOT the surface (zeta = 1). For
-    # `solver == "sia"` the wrapper computed the actual surface value
-    # into `y.dyn.scratch.ux_i_s`; the SIA branch below overwrites
-    # `ux_s` / `uy_s` with `ux_i_s + ux_b`. For `solver == "fixed"`
-    # the diagnostic here is incorrect (pre-existing limitation under
-    # Option C) — it reports the topmost Center value rather than the
-    # surface value.
-    # TODO: fix solver=="fixed" surface diagnostic when restart-loaded
-    # ux_s gets first-class storage (e.g. milestone 3g when therm
-    # wires temperature-dependent ATT).
-    @views interior(y.dyn.uz_b)[:, :, 1]  .= interior(y.dyn.uz)[:, :, 1]
-    @views interior(y.dyn.ux_s)[:, :, 1]  .= interior(y.dyn.ux)[:, :, end]
-    @views interior(y.dyn.uy_s)[:, :, 1]  .= interior(y.dyn.uy)[:, :, end]
-    @views interior(y.dyn.uz_s)[:, :, 1]  .= interior(y.dyn.uz)[:, :, end]
-    @views interior(y.dyn.uxy_s)[:, :, 1] .= interior(y.dyn.uxy)[:, :, end]
+    # Under Path B `ux` / `uy` are interior-only (Nz_aa centers,
+    # excluding the basal and surface boundary endpoints), so
+    # `interior(y.dyn.ux)[:, :, end]` returns the topmost interior
+    # Center value, not the surface (zeta = 1) value. The 2D
+    # `ux_s` / `uy_s` fields are now true boundary storage:
+    # populated from the restart's unified `ux` / `uy` slab via the
+    # boundary registry on load, and updated by the SIA / SSA /
+    # hybrid branches below from the solver-computed surface
+    # segment.
+    #
+    # `uz` / `uz_s` / `uz_b` are ZFace 3D — under Path B the Yelmo
+    # Face axis is `[0; midpoints...; 1]` (length Nz+1) with index
+    # 1 at z=0 (basal face) and index end at z=1 (surface face).
+    # Slicing `uz[:, :, 1]` and `uz[:, :, end]` therefore continues
+    # to give the actual basal / surface vertical velocity.
+    @views interior(y.dyn.uz_b)[:, :, 1] .= interior(y.dyn.uz)[:, :, 1]
+    @views interior(y.dyn.uz_s)[:, :, 1] .= interior(y.dyn.uz)[:, :, end]
 
-    # SIA / SSA / hybrid branch correction: assemble ux_s = ux_i_s + ux_b.
-    # Under Option C the topmost Center node ≠ surface, so the generic
-    # `interior(ux)[:, :, end]` line above wrote the topmost-Center
-    # value rather than the surface value. The wrapper-produced
-    # `scratch.ux_i_s` is the actual surface segment value (zero under
-    # solver=="ssa" since the SSA branch zeros it explicitly); add
-    # `ux_b` for the hybrid / sliding contribution. For solver=="fixed"
-    # we keep the topmost-Center fallback (pre-existing limitation).
+    # `ux_s` / `uy_s` are true 2D boundary fields. For
+    # solver=="fixed" they retain whatever value was loaded from
+    # the restart (no per-step diagnostic write needed). For
+    # solver==sia/ssa/hybrid they are reassembled below from
+    # `ux_i_s + ux_b`. `uxy_s` is always re-derived from the
+    # current `ux_s` / `uy_s` magnitude.
     if solver in ("sia", "ssa", "hybrid")
         @views interior(y.dyn.ux_s)[:, :, 1] .=
             interior(y.dyn.scratch.ux_i_s)[:, :, 1] .+
@@ -468,13 +467,11 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         @views interior(y.dyn.uy_s)[:, :, 1] .=
             interior(y.dyn.scratch.uy_i_s)[:, :, 1] .+
             interior(y.dyn.uy_b)[:, :, 1]
-        # Re-derive `uxy_s` from the corrected ux_s / uy_s (the
-        # generic `interior(uxy)[:, :, end]` written above used the
-        # topmost-Center magnitude, not the surface magnitude).
-        calc_magnitude_from_staggered!(y.dyn.uxy_s,
-                                       y.dyn.ux_s, y.dyn.uy_s,
-                                       y.tpo.f_ice_dyn)
     end
+    # Re-derive `uxy_s` from the corrected ux_s / uy_s.
+    calc_magnitude_from_staggered!(y.dyn.uxy_s,
+                                   y.dyn.ux_s, y.dyn.uy_s,
+                                   y.tpo.f_ice_dyn)
 
     # Basal-to-surface velocity ratio.
     calc_vel_ratio!(y.dyn.f_vbvs, y.dyn.uxy_b, y.dyn.uxy_s)
