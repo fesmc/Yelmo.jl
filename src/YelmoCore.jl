@@ -114,6 +114,15 @@ const PATH_B_REGISTRY_ICE = (
     visc    = (b = :visc_b,    s = :visc_s),
     ATT     = (b = :ATT_b,     s = :ATT_s),
     enh     = (b = :enh_b,     s = :enh_s),
+    # 3D dyn velocity components are added with commit 3 (the dyn
+    # refactor). The existing 2D `ux_b` / `ux_s` / `uy_b` / `uy_s`
+    # fields are now true boundary storage rather than redundant
+    # slice-1 / slice-end copies of the 3D fields. On read the file's
+    # unified `ux` / `uy` slab decomposes into `_b` (slice 1),
+    # interior (slice 2:end-1), and `_s` (slice end). On write the
+    # three Yelmo fields glue back into one unified slab.
+    ux      = (b = :ux_b,      s = :ux_s),
+    uy      = (b = :uy_b,      s = :uy_s),
 )
 
 # Reverse-lookup tables built once at module load. Map every
@@ -1029,14 +1038,26 @@ function _apply_path_b_slice!(field, slab::AbstractArray{<:Real,3}, kind::Symbol
 end
 
 # 2D slice copy into a field. Mirrors `_load_into_field!` 2D handling
-# for XFace / YFace / Center fields.
+# for XFace / YFace / Center fields, plus a Yelmo-written-file shape
+# branch: the writer emits XFace / YFace fields at the full
+# `(Nx+1, Ny)` / `(Nx, Ny+1)` interior shape under Bounded topology,
+# so the loader must accept both that and the Mirror `(Nx, Ny)`
+# convention (the latter writes into `[2:end, …]` with a leading
+# slot replicate).
 function _apply_path_b_2d_slice!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
-    # 2D field on a 3D-with-singleton grid → write at z-index 1.
+    Nx_int = size(int, 1)
     if Tx === Bounded
-        int[2:end, :, 1] .= slice
-        int[1,     :, 1] .= @view slice[1, :]
+        if size(slice, 1) == Nx_int
+            int[:, :, 1] .= slice
+        elseif size(slice, 1) == Nx_int - 1
+            int[2:end, :, 1] .= slice
+            int[1,     :, 1] .= @view slice[1, :]
+        else
+            error("_apply_path_b_2d_slice!(XFaceField): slab x-dim $(size(slice, 1)) " *
+                  "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
+        end
     elseif Tx === Periodic
         int[:, :, 1] .= slice
     else
@@ -1048,9 +1069,17 @@ end
 function _apply_path_b_2d_slice!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
+    Ny_int = size(int, 2)
     if Ty === Bounded
-        int[:, 2:end, 1] .= slice
-        int[:, 1,     1] .= @view slice[:, 1]
+        if size(slice, 2) == Ny_int
+            int[:, :, 1] .= slice
+        elseif size(slice, 2) == Ny_int - 1
+            int[:, 2:end, 1] .= slice
+            int[:, 1,     1] .= @view slice[:, 1]
+        else
+            error("_apply_path_b_2d_slice!(YFaceField): slab y-dim $(size(slice, 2)) " *
+                  "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
+        end
     elseif Ty === Periodic
         int[:, :, 1] .= slice
     else
@@ -1066,13 +1095,22 @@ function _apply_path_b_2d_slice!(field::Field{Center, Center, Center}, slice::Ab
 end
 
 # 3D interior copy into a field. Z-dim of slice already trimmed to
-# the interior.
+# the interior. Same Yelmo / Mirror dual-shape handling as the 2D
+# variant above.
 function _apply_path_b_3d_interior!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
+    Nx_int = size(int, 1)
     if Tx === Bounded
-        int[2:end, :, :] .= slice
-        int[1,     :, :] .= @view slice[1, :, :]
+        if size(slice, 1) == Nx_int
+            int[:, :, :] .= slice
+        elseif size(slice, 1) == Nx_int - 1
+            int[2:end, :, :] .= slice
+            int[1,     :, :] .= @view slice[1, :, :]
+        else
+            error("_apply_path_b_3d_interior!(XFaceField): slab x-dim $(size(slice, 1)) " *
+                  "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
+        end
     elseif Tx === Periodic
         int[:, :, :] .= slice
     else
@@ -1084,9 +1122,17 @@ end
 function _apply_path_b_3d_interior!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
+    Ny_int = size(int, 2)
     if Ty === Bounded
-        int[:, 2:end, :] .= slice
-        int[:, 1,     :] .= @view slice[:, 1, :]
+        if size(slice, 2) == Ny_int
+            int[:, :, :] .= slice
+        elseif size(slice, 2) == Ny_int - 1
+            int[:, 2:end, :] .= slice
+            int[:, 1,     :] .= @view slice[:, 1, :]
+        else
+            error("_apply_path_b_3d_interior!(YFaceField): slab y-dim $(size(slice, 2)) " *
+                  "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
+        end
     elseif Ty === Periodic
         int[:, :, :] .= slice
     else
@@ -1142,10 +1188,11 @@ end
 function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Face, Center}
     # XFaceField loader. Interior shape depends on x-axis topology:
     #   - Bounded-x:  `(Nx+1, Ny[, Nz])` — Ny cells × (Nx+1) face slots.
-    #     Fixture stores face data at `(Nx, Ny[, Nz])` (Fortran cell-centred
-    #     convention); we write `data` into slots `[2:end, :, …]` and
-    #     replicate the leading slot from the first written column to
-    #     match the convention used by `load_field_from_dataset_2D`.
+    #     File slab x-dim may be either:
+    #       * `Nx` (Mirror / Fortran cell-centred convention): write
+    #         data into `[2:end, …]` and replicate the leading slot.
+    #       * `Nx+1` (Yelmo writer's full-shape convention): write
+    #         data directly with no replicate.
     #   - Periodic-x: `(Nx, Ny[, Nz])` — incoming data shape matches
     #     interior shape directly; write in place, no replicate slot.
     #
@@ -1153,12 +1200,20 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
     # related helpers in `src/dyn/topology_helpers.jl`.
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
+    Nx_int = size(int, 1)
     if _is_3d_field(int)
         data_full = _read_nc_3d(ncvar)
         data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Tx === Bounded
-            int[2:end, :, :] .= data
-            int[1, :, :]     .= @view data[1, :, :]
+            if size(data, 1) == Nx_int
+                int[:, :, :] .= data
+            elseif size(data, 1) == Nx_int - 1
+                int[2:end, :, :] .= data
+                int[1, :, :]     .= @view data[1, :, :]
+            else
+                error("_load_into_field!(XFaceField, 3D): file x-dim $(size(data, 1)) " *
+                      "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
+            end
         elseif Tx === Periodic
             int[:, :, :] .= data
         else
@@ -1167,8 +1222,15 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
     else
         data = _read_nc_2d(ncvar)
         if Tx === Bounded
-            int[2:end, :, 1] .= data
-            int[1, :, 1]     .= @view data[1, :]
+            if size(data, 1) == Nx_int
+                int[:, :, 1] .= data
+            elseif size(data, 1) == Nx_int - 1
+                int[2:end, :, 1] .= data
+                int[1, :, 1]     .= @view data[1, :]
+            else
+                error("_load_into_field!(XFaceField, 2D): file x-dim $(size(data, 1)) " *
+                      "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
+            end
         elseif Tx === Periodic
             int[:, :, 1] .= data
         else
@@ -1181,20 +1243,28 @@ end
 function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Face, Center}
     # YFaceField loader. Symmetric to the XFaceField method above —
     # interior shape depends on y-axis topology:
-    #   - Bounded-y:  `(Nx, Ny+1[, Nz])`. Fixture stores `(Nx, Ny[, Nz])`,
-    #     written into slots `[:, 2:end, …]` with the first slot
-    #     replicated.
+    #   - Bounded-y:  `(Nx, Ny+1[, Nz])`. File slab y-dim may be
+    #     either `Ny` (Mirror) or `Ny+1` (Yelmo writer); the loader
+    #     handles both cases.
     #   - Periodic-y: `(Nx, Ny[, Nz])`. Direct copy — no replicate slot,
     #     no extra face row (the `Ny+1`-th face is the `1`-st by wrap
     #     and is not stored).
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
+    Ny_int = size(int, 2)
     if _is_3d_field(int)
         data_full = _read_nc_3d(ncvar)
         data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Ty === Bounded
-            int[:, 2:end, :] .= data
-            int[:, 1, :]     .= @view data[:, 1, :]
+            if size(data, 2) == Ny_int
+                int[:, :, :] .= data
+            elseif size(data, 2) == Ny_int - 1
+                int[:, 2:end, :] .= data
+                int[:, 1, :]     .= @view data[:, 1, :]
+            else
+                error("_load_into_field!(YFaceField, 3D): file y-dim $(size(data, 2)) " *
+                      "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
+            end
         elseif Ty === Periodic
             int[:, :, :] .= data
         else
@@ -1203,8 +1273,15 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Fac
     else
         data = _read_nc_2d(ncvar)
         if Ty === Bounded
-            int[:, 2:end, 1] .= data
-            int[:, 1, 1]     .= @view data[:, 1]
+            if size(data, 2) == Ny_int
+                int[:, :, 1] .= data
+            elseif size(data, 2) == Ny_int - 1
+                int[:, 2:end, 1] .= data
+                int[:, 1, 1]     .= @view data[:, 1]
+            else
+                error("_load_into_field!(YFaceField, 2D): file y-dim $(size(data, 2)) " *
+                      "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
+            end
         elseif Ty === Periodic
             int[:, :, 1] .= data
         else

@@ -71,6 +71,25 @@ end
         interior(y0.mat.visc)[:, :, k] .= 1.0e10 * k       # 1e10 … 8e10
     end
 
+    # ux — dyn XFace field family. Use moderate magnitudes so the
+    # Float32 round-trip is exact.
+    ux_b_val = 12.5
+    ux_s_val = 87.0
+    fill!(interior(y0.dyn.ux_b), ux_b_val)
+    fill!(interior(y0.dyn.ux_s), ux_s_val)
+    @inbounds for k in 1:Nz
+        interior(y0.dyn.ux)[:, :, k] .= 30.0 + k          # 31 … 38
+    end
+
+    # uy — dyn YFace field family.
+    uy_b_val = -7.5
+    uy_s_val = 42.0
+    fill!(interior(y0.dyn.uy_b), uy_b_val)
+    fill!(interior(y0.dyn.uy_s), uy_s_val)
+    @inbounds for k in 1:Nz
+        interior(y0.dyn.uy)[:, :, k] .= -10.0 - k         # −11 … −18
+    end
+
     # ---- write to a fresh NetCDF and inspect on-disk shape ---------
     tmpfile = tempname() * "_vsplit_roundtrip.nc"
     out = init_output(y0, tmpfile)
@@ -104,6 +123,23 @@ end
             @test all(approx32.(visc_slab[:, :, 1],   visc_b_val))
             @test all(approx32.(visc_slab[:, :, end], visc_s_val))
 
+            # ux / uy — XFace / YFace registered fields. Slab is
+            # `(Nx+1, Ny, Nz+2)` / `(Nx, Ny+1, Nz+2)` for Bounded
+            # topology (the leading Bounded face slot replicate is
+            # included in Yelmo's writer output).
+            ux_slab = ds["ux"][:, :, :, 1]
+            @test size(ux_slab, 3) == Nz + 2
+            @test all(approx32.(ux_slab[:, :, 1],   ux_b_val))
+            @test all(approx32.(ux_slab[:, :, end], ux_s_val))
+            @inbounds for k in 1:Nz
+                @test all(approx32.(ux_slab[:, :, k + 1], 30.0 + k))
+            end
+
+            uy_slab = ds["uy"][:, :, :, 1]
+            @test size(uy_slab, 3) == Nz + 2
+            @test all(approx32.(uy_slab[:, :, 1],   uy_b_val))
+            @test all(approx32.(uy_slab[:, :, end], uy_s_val))
+
             # Registered _b / _s 2D fields should NOT appear as
             # separate variables — they are written as part of the
             # unified slab.
@@ -111,20 +147,26 @@ end
             @test !haskey(ds, "T_ice_s")
             @test !haskey(ds, "visc_b")
             @test !haskey(ds, "visc_s")
+            @test !haskey(ds, "ux_b")
+            @test !haskey(ds, "ux_s")
+            @test !haskey(ds, "uy_b")
+            @test !haskey(ds, "uy_s")
         finally
             close(ds)
         end
     end
 
     # ---- load a fresh model from the written file ------------------
-    # Restrict to (:thrm, :mat) groups so we exercise the registry
-    # round-trip without tripping on the pre-existing XFace 2D
-    # dyn-side mismatch between the Yelmo writer ((Nx+1, Ny) shape)
-    # and the load_state! reader ((Nx, Ny) Mirror-shape expectation).
-    # That dyn-side I/O bug predates Path B and is out of scope for
-    # commit 2.
+    # Restrict to the groups whose path-B-registered fields we set
+    # sentinels on. Other groups (bnd, dta, tpo) have unregistered
+    # fields whose Yelmo-written XFace 2D shape (`Nx+1, Ny`) tripped
+    # on the legacy reader's Mirror-shape (`Nx, Ny`) expectation in
+    # `_load_into_field!` — that pre-Path B I/O bug is out of scope
+    # for commit 3. The Path B helpers (`_apply_path_b_2d_slice!`
+    # and `_apply_path_b_3d_interior!`) handle both shapes, so
+    # registered dyn fields (ux / uy) load cleanly here.
     y1 = YelmoModel(tmpfile, 0.0; alias="vsplit-rt", strict=false,
-                    groups=(:thrm, :mat))
+                    groups=(:thrm, :mat, :dyn))
 
     @testset "round-trip preserves boundary + interior values" begin
         # NetCDF stores fields as Float32. Use a Float32-precision
@@ -143,6 +185,21 @@ end
         @test all(approx32.(interior(y1.mat.visc_s), visc_s_val))
         @inbounds for k in 1:Nz
             @test all(approx32.(interior(y1.mat.visc)[:, :, k], 1.0e10 * k))
+        end
+
+        # dyn ux / uy round-trip via the registry. XFace / YFace
+        # interior shapes are `(Nx+1, Ny, Nz)` / `(Nx, Ny+1, Nz)`
+        # under Bounded topology — the helper accepts both Yelmo
+        # `(Nx+1, Ny)` and Mirror `(Nx, Ny)` slab shapes.
+        @test all(approx32.(interior(y1.dyn.ux_b), ux_b_val))
+        @test all(approx32.(interior(y1.dyn.ux_s), ux_s_val))
+        @inbounds for k in 1:Nz
+            @test all(approx32.(interior(y1.dyn.ux)[:, :, k], 30.0 + k))
+        end
+        @test all(approx32.(interior(y1.dyn.uy_b), uy_b_val))
+        @test all(approx32.(interior(y1.dyn.uy_s), uy_s_val))
+        @inbounds for k in 1:Nz
+            @test all(approx32.(interior(y1.dyn.uy)[:, :, k], -10.0 - k))
         end
     end
 
