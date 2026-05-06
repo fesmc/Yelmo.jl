@@ -331,6 +331,16 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     # Set state to corrector. Time advances by dt (not 2·dt) — the
     # second FE stage was a virtual lookahead, not a real step.
     copyto!(H_now, scratch.H_corr)
+
+    # Re-apply the mask_ice pass to the corrected H_ice. The Heun average
+    # H_corr = (H_n + H_**)/2 can violate mask invariants: if a
+    # MASK_ICE_NONE cell had H_n > 0 before the step, the average gives
+    # H_corr > 0 even though H_** = 0 (both FE stages apply the mask).
+    # Using snap.H_ice (= H_n) as the MASK_ICE_FIXED reference restores
+    # the start-of-step thickness for fixed cells, matching Fortran's
+    # mask-pass-at-end-of-PC-corrector convention.
+    apply_mask_ice_pass!(y, snap.H_ice)
+
     y.time = snap.time + dt
     Yelmo.update_diagnostics!(y)
 
