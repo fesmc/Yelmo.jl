@@ -36,8 +36,14 @@ Fortran. Items 8–10 are larger efforts.
      real refactor — leave for a future commit.
    - Out of scope: convergence-norm reductions
      (`picard_calc_convergence_l2`) need per-thread accumulators.
-6. **Ice age / passive tracer** — port `ice_tracer.f90` (3D advection,
-   column solvers, BMB coupling).
+6. **Ice age / passive tracer** — partial port (scope A).
+   Done: `calc_tracer_3D!` driver + implicit Crank-Nicolson column
+   solver + horizontal 2nd-order upwind + Rybak-Huybrechts basal BC
+   + per-column rate-of-change limiter, wired into `mat_step!` for
+   `calc_age = true && tracer_method = "impl"` (`y.mat.dep_time`).
+   Out of scope (deferred): explicit solver `tracer_method = "expl"`,
+   `calc_isochrones` (`depth_iso` diagnostic), and the
+   `enh_method ∈ {*-tracer}` paths.
 7. **Regions infrastructure** — port `yelmo_regions.f90` (regional masks,
    regional analysis utilities).
 8. **Enthalpy solver validation** — benchmark the current port against

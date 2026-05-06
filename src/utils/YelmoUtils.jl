@@ -25,10 +25,12 @@
 module YelmoUtils
 
 export solve_tridiag!
+export calc_dzeta_terms!
 export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 
 include("tridiag.jl")
 include("topology.jl")
 include("quadrature.jl")
+include("dzeta.jl")
 
 end # module YelmoUtils

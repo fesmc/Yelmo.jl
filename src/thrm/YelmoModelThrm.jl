@@ -72,6 +72,7 @@ using Oceananigans.Fields: interior
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
 using ..YelmoUtils: solve_tridiag!,
+                    calc_dzeta_terms!,
                     gq2d_nodes_2pt, gq2d_interp_to_node,
                     _neighbor_im1, _neighbor_ip1,
                     _neighbor_jm1, _neighbor_jp1,
@@ -98,7 +99,6 @@ export therm_step!,
        define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
 include("properties.jl")
-include("dzeta.jl")
 include("enthalpy.jl")
 include("solvers_analytic.jl")
 include("strain_heating.jl")
