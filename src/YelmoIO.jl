@@ -4,7 +4,9 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using NCDatasets
 using ..YelmoMeta
-using ..YelmoCore: AbstractYelmoModel, matches_patterns
+using ..YelmoCore: AbstractYelmoModel, matches_patterns,
+                   PATH_B_REGISTRY_ICE, is_path_b_registered,
+                   path_b_slice_kind
 
 export init_output
 export OutputSelection
@@ -111,6 +113,44 @@ function _spatial_dims(field::Field{X,Y,Z}, ylmo) where {X,Y,Z}
 end
 
 # ---------------------------------------------------------------------------
+# Path B helpers
+# ---------------------------------------------------------------------------
+
+# Glue a 2D basal slice + 3D interior + 2D surface slice along the
+# z-axis into a length-(Nz+2) slab matching the file's Path B
+# convention. Result is `Float64` (matched to the existing
+# `_get_data` element type) and is allocated fresh per call;
+# this only runs at file-write time so allocation is not on a
+# hot path.
+function _path_b_glue(b2d::AbstractArray{<:Real,2},
+                      interior3d::AbstractArray{<:Real,3},
+                      s2d::AbstractArray{<:Real,2})
+    Nx, Ny, Nz = size(interior3d)
+    size(b2d) == (Nx, Ny) || error("_path_b_glue: basal slice size $(size(b2d)) ≠ ($Nx, $Ny)")
+    size(s2d) == (Nx, Ny) || error("_path_b_glue: surface slice size $(size(s2d)) ≠ ($Nx, $Ny)")
+    out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
+    @inbounds out[:, :, 1]              .= b2d
+    @inbounds out[:, :, 2:Nz + 1]       .= interior3d
+    @inbounds out[:, :, Nz + 2]         .= s2d
+    return out
+end
+
+# NaN-pad a 3D Yelmo-interior slab (length Nz) into a length-(Nz+2)
+# file-convention slab with `NaN` at the basal (z=0) and surface
+# (z=1) slots. Used for non-registered 3D Center fields (cp, kt,
+# Q_strn, dQsdT, omega, advecxy, ...) so the file format stays
+# consistent with the registered fields. The NaN values are dropped
+# again on read by the Path B interior-slice helper.
+function _path_b_nan_pad(interior3d::AbstractArray{<:Real,3})
+    Nx, Ny, Nz = size(interior3d)
+    out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
+    @inbounds out[:, :, 1]            .= NaN
+    @inbounds out[:, :, 2:Nz + 1]     .= interior3d
+    @inbounds out[:, :, Nz + 2]       .= NaN
+    return out
+end
+
+# ---------------------------------------------------------------------------
 # Data extraction — no allocation
 # ---------------------------------------------------------------------------
 
@@ -204,19 +244,43 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     defDim(ds, "x_f",         x_f_size)
     defDim(ds, "y_c",         ylmo.g.Ny)
     defDim(ds, "y_f",         y_f_size)
-    defDim(ds, "zeta",         ylmo.gt.Nz)
+    # Path B convention: the on-disk `zeta` axis includes the basal
+    # (z=0) and surface (z=1) boundary endpoints alongside the
+    # interior centres, so its length is Yelmo's `gt.Nz + 2` (i.e.
+    # the file's pre-Path B `Nz_file`). This keeps the file format
+    # round-trippable with Mirror-style restarts: the Path B reader
+    # inverts `Yelmo Nz = length(file zeta) − 2`. Registered fields
+    # (T_ice, enth, ...) glue _b + interior + _s into this slab on
+    # write; non-registered 3D Center fields NaN-pad the boundary
+    # slots.
+    defDim(ds, "zeta",         ylmo.gt.Nz + 2)
+    # `zeta_ac` keeps the Yelmo-internal Face length for now (commit
+    # 2). ZFace fields (uz, uz_star, ...) write at this length;
+    # round-trip with Mirror's length-`Nz_file+1` `zeta_ac` slab is
+    # not yet supported — see commit 2.5 / Mirror Path B alignment.
     defDim(ds, "zeta_ac",      ylmo.gt.Nz + 1)
     defDim(ds, "zeta_rock",    ylmo.gr.Nz)
     defDim(ds, "zeta_rock_ac", ylmo.gr.Nz + 1)
     defDim(ds, "time",         Inf)
 
     # ---- coordinate variables ---------------------------------------------
+    # Both `xc` (Mirror-style, no underscore) and `x_c` (Yelmo.jl
+    # style) are emitted so files written here round-trip back
+    # through `load_grids_from_restart` (which reads `xc` / `yc`).
     _defcoord(ds, "x_c", Float64, ("x_c",), xnodes(ylmo.g, Center()), "m", "x-coordinate, center")
     _defcoord(ds, "x_f", Float64, ("x_f",), xnodes(ylmo.g, Face()),   "m", "x-coordinate, face")
     _defcoord(ds, "y_c", Float64, ("y_c",), ynodes(ylmo.g, Center()), "m", "y-coordinate, center")
     _defcoord(ds, "y_f", Float64, ("y_f",), ynodes(ylmo.g, Face()),   "m", "y-coordinate, face")
+    _defcoord(ds, "xc",  Float64, ("x_c",), xnodes(ylmo.g, Center()), "m", "x-coordinate, center (Mirror alias)")
+    _defcoord(ds, "yc",  Float64, ("y_c",), ynodes(ylmo.g, Center()), "m", "y-coordinate, center (Mirror alias)")
+    # `zeta` includes the basal (0) and surface (1) endpoints —
+    # length Nz+2. Round-trips with Mirror-format restarts.
+    # Interior values are the Oceananigans-derived Center positions
+    # (commit 5 will replace these with the file's exact pre-Path B
+    # interior centers via the thrm scratch struct).
     _defcoord(ds, "zeta",         Float64, ("zeta",),
-              znodes(ylmo.gt, Center()), "1", "normalised ice layer midpoint")
+              vcat(0.0, collect(znodes(ylmo.gt, Center())), 1.0),
+              "1", "normalised ice layer (basal endpoint, interior centers, surface endpoint)")
     _defcoord(ds, "zeta_ac",      Float64, ("zeta_ac",),
               znodes(ylmo.gt, Face()),   "1", "normalised ice layer interface")
     _defcoord(ds, "zeta_rock",    Float64, ("zeta_rock",),
@@ -244,6 +308,14 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
             group_nt[fname] isa Field || continue
             name = String(fname)
             _selected(name, gname, selection) || continue
+            # Path B: skip `_b` / `_s` of registered fields — they
+            # are written as part of the unified-name interior slab
+            # into the `zeta` axis (which is now length Nz_file =
+            # Nz + 2 with basal/surface endpoints).
+            if is_path_b_registered(fname)
+                kind = path_b_slice_kind(fname)
+                kind === :interior || continue
+            end
             dims = _spatial_dims(group_nt[fname], ylmo)
             dims === nothing && continue
             push!(selected, (gname, fname, dims))
@@ -324,13 +396,39 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             nc_name === nothing && continue
             haskey(ds, nc_name) || continue
 
+            # Path B: registered `_b` / `_s` fields are skipped by
+            # `init_output` — they don't have an `nc_name` entry and
+            # the `nc_name === nothing` check above already filtered
+            # them. Registered interior fields glue with the matching
+            # `_b` / `_s` 2D fields into a unified slab here.
+            if is_path_b_registered(fname) && path_b_slice_kind(fname) === :interior
+                bs = PATH_B_REGISTRY_ICE[fname]
+                interior_data = _get_data(group_nt[fname])
+                b_data        = _get_data(group_nt[bs.b])
+                s_data        = _get_data(group_nt[bs.s])
+                glued = _path_b_glue(b_data, interior_data, s_data)
+                ds[nc_name][1:size(glued, 1), 1:size(glued, 2), 1:size(glued, 3), t_idx] = glued
+                continue
+            end
+
             data = _get_data(group_nt[fname])
             sz   = size(data)
 
             if ndims(data) == 2
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
-                ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+                # Path B: non-registered 3D Center fields on the
+                # `zeta` axis need NaN-padding at the basal and
+                # surface slots so the file slab matches the
+                # length-(Nz+2) `zeta` dim. ZFace fields stay on
+                # `zeta_ac` (Yelmo-internal length Nz+1) — no padding
+                # needed yet.
+                if sz[3] == ylmo.gt.Nz
+                    padded = _path_b_nan_pad(data)
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
+                else
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+                end
             end
         end
     end

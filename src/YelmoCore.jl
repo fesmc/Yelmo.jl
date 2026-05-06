@@ -27,6 +27,7 @@ export make_field, matches_patterns, yelmo_define_grids
 export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
 export fill_halo_regions!, fill_corner_halos!
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
+export PATH_B_REGISTRY_ICE, is_path_b_registered, path_b_slice_kind, path_b_unified_name
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
@@ -69,6 +70,99 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 # Per-cell ice evolution mask values (`bnd.mask_ice`) — defined in
 # YelmoConst and re-exported here for back-compat with existing call
 # sites that import from YelmoCore.
+
+# ---------------------------------------------------------------------------
+# Path B boundary-fields registry
+# ---------------------------------------------------------------------------
+#
+# Under the Path B vertical convention (commit 1+ of the vert-split
+# refactor), the file format on disk stays unchanged: a 3D ice
+# variable like `T_ice` is stored as a length-`Nz_file` slab whose
+# first and last z-slices are the basal (z=0) and surface (z=1)
+# boundary values respectively, and whose interior `[:, :, 2:end-1]`
+# is the cell-centred interior.
+#
+# Inside Yelmo, that single file slab decomposes into three fields:
+#   - `<name>_b` — 2D, basal boundary value (z=0).
+#   - `<name>`   — 3D, length-Nz interior (Nz = Nz_file − 2).
+#   - `<name>_s` — 2D, surface boundary value (z=1).
+#
+# This registry is the single source of truth for the basal /
+# interior / surface decomposition. It drives:
+#   - restart load (`load_state!`): split the unified slab on read.
+#   - output write (`init_output` / `write_output!`): glue the
+#     three fields back into a unified slab on write so the file
+#     format remains Mirror-compatible.
+#   - YelmoMirror C-API marshalling (`yelmo_get_var3D!` /
+#     `yelmo_set_var3D!`): same glue/split when bridging Yelmo
+#     fields to the Fortran-side length-`Nz_file` buffers.
+#
+# Only ice-grid fields are registered in commit 2. Bedrock fields
+# (`T_rock`, `enth_rock`) join the registry in commit 5 once the
+# bedrock grid adopts Path B. `T_rock_s` will be aliased to
+# `T_ice_b` (Q2(c)) — encoded via a special-case entry rather than
+# its own storage.
+#
+# Registry shape: a `NamedTuple` keyed by the unified-name `Symbol`,
+# each entry is `(b = <basal sym>, s = <surface sym>)`. The
+# unified key itself is the interior-field symbol.
+const PATH_B_REGISTRY_ICE = (
+    T_ice   = (b = :T_ice_b,   s = :T_ice_s),
+    enth    = (b = :enth_b,    s = :enth_s),
+    T_pmp   = (b = :T_pmp_b,   s = :T_pmp_s),
+    T_prime = (b = :T_prime_b, s = :T_prime_s),
+    visc    = (b = :visc_b,    s = :visc_s),
+    ATT     = (b = :ATT_b,     s = :ATT_s),
+    enh     = (b = :enh_b,     s = :enh_s),
+)
+
+# Reverse-lookup tables built once at module load. Map every
+# registered symbol (interior, _b, _s) to:
+#   - its slice kind (`:basal`, `:interior`, `:surface`)
+#   - the unified file-variable name (always the interior sym as
+#     a `String`).
+const _PATH_B_KIND      = let d = Dict{Symbol, Symbol}()
+    for (interior_sym, bs) in pairs(PATH_B_REGISTRY_ICE)
+        d[interior_sym] = :interior
+        d[bs.b]         = :basal
+        d[bs.s]         = :surface
+    end
+    d
+end
+const _PATH_B_UNIFIED   = let d = Dict{Symbol, String}()
+    for (interior_sym, bs) in pairs(PATH_B_REGISTRY_ICE)
+        d[interior_sym] = String(interior_sym)
+        d[bs.b]         = String(interior_sym)
+        d[bs.s]         = String(interior_sym)
+    end
+    d
+end
+
+"""
+    is_path_b_registered(sym::Symbol) -> Bool
+
+True iff `sym` is one of the interior, basal, or surface symbols of
+a Path B-registered field.
+"""
+@inline is_path_b_registered(sym::Symbol) = haskey(_PATH_B_KIND, sym)
+
+"""
+    path_b_slice_kind(sym::Symbol) -> Symbol
+
+Return `:basal`, `:interior`, or `:surface` for a registered `sym`.
+Throws `KeyError` if `sym` is not registered — guard with
+`is_path_b_registered`.
+"""
+@inline path_b_slice_kind(sym::Symbol) = _PATH_B_KIND[sym]
+
+"""
+    path_b_unified_name(sym::Symbol) -> String
+
+Return the unified disk / Fortran variable name for a registered
+`sym` (i.e. the name of the file slab that combines basal + interior
++ surface). Throws `KeyError` if `sym` is not registered.
+"""
+@inline path_b_unified_name(sym::Symbol) = _PATH_B_UNIFIED[sym]
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -857,6 +951,13 @@ Populate fields in `y`'s component groups from variables of the same name
 in `restart_file`. `groups` selects which groups to load (default: all six);
 `strict=true` (default) errors on any missing variable in a loaded group,
 `strict=false` skips missing variables. Grids are not re-read.
+
+Path B vertical convention (Path B-registered fields like `T_ice`,
+`enth`, `T_pmp`, `T_prime`, `visc`, `ATT`, `enh`): the unified file
+slab is read once per group and decomposed into the basal `_b` 2D
+field (slice 1), the interior 3D field (slice 2:end-1), and the
+surface `_s` 2D field (slice end). Non-registered fields are loaded
+by direct name as before.
 """
 function load_state!(y::YelmoModel, restart_file::AbstractString;
                      groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
@@ -866,22 +967,137 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
         for gname in groups
             group_nt = getfield(y, gname)
             metas    = getfield(y.v, gname)
+            # Cache the unified slab read for each Path B-registered
+            # interior name so we don't read the same NetCDF variable
+            # three times (once each for _b, interior, _s).
+            slab_cache = Dict{String, Array{Float64,3}}()
             for k in keys(metas)
                 meta = metas[k]
-                name_str = String(meta.name)
-                if !haskey(ds, name_str)
-                    strict && error(
-                        "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
-                        "file $(restart_file). Pass `strict=false` to skip missing variables.")
-                    continue
+                if is_path_b_registered(meta.name)
+                    unified = path_b_unified_name(meta.name)
+                    if !haskey(ds, unified)
+                        strict && error(
+                            "Path B-registered variable `$(meta.name)` (group " *
+                            "`$(gname)`) requires unified slab `$(unified)` in restart " *
+                            "file $(restart_file); not found. Pass `strict=false` to skip.")
+                        continue
+                    end
+                    slab = get!(slab_cache, unified) do
+                        Array{Float64,3}(_read_nc_3d(ds[unified]))
+                    end
+                    _apply_path_b_slice!(group_nt[k], slab, path_b_slice_kind(meta.name))
+                else
+                    name_str = String(meta.name)
+                    if !haskey(ds, name_str)
+                        strict && error(
+                            "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
+                            "file $(restart_file). Pass `strict=false` to skip missing variables.")
+                        continue
+                    end
+                    _load_into_field!(group_nt[k], ds[name_str])
                 end
-                _load_into_field!(group_nt[k], ds[name_str])
             end
         end
     finally
         close(ds)
     end
     return y
+end
+
+# Apply a Path B slice (`:basal`, `:interior`, `:surface`) of a
+# unified file slab into a Yelmo field. `slab` has shape
+# `(Nx, Ny, Nz_file)` with `Nz_file = Nz_yelmo + 2`. Center fields
+# absorb the slice directly; XFace / YFace fields (e.g. `ux`) write
+# into `[2:end, ...]` slots and replicate the leading slot, matching
+# the convention used by `_load_into_field!`.
+function _apply_path_b_slice!(field, slab::AbstractArray{<:Real,3}, kind::Symbol)
+    nz_file = size(slab, 3)
+    nz_file >= 3 || error("_apply_path_b_slice!: slab z-dim $nz_file < 3 (need ≥ 3 to split _b/interior/_s).")
+    if kind === :basal
+        slice = view(slab, :, :, 1)
+        _apply_path_b_2d_slice!(field, slice)
+    elseif kind === :surface
+        slice = view(slab, :, :, nz_file)
+        _apply_path_b_2d_slice!(field, slice)
+    elseif kind === :interior
+        slice = view(slab, :, :, 2:nz_file - 1)
+        _apply_path_b_3d_interior!(field, slice)
+    else
+        error("_apply_path_b_slice!: unknown kind $kind.")
+    end
+    return field
+end
+
+# 2D slice copy into a field. Mirrors `_load_into_field!` 2D handling
+# for XFace / YFace / Center fields.
+function _apply_path_b_2d_slice!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
+    Tx, _Ty, _Tz = topology(field.grid)
+    int = interior(field)
+    # 2D field on a 3D-with-singleton grid → write at z-index 1.
+    if Tx === Bounded
+        int[2:end, :, 1] .= slice
+        int[1,     :, 1] .= @view slice[1, :]
+    elseif Tx === Periodic
+        int[:, :, 1] .= slice
+    else
+        error("_apply_path_b_2d_slice!(XFaceField): unsupported x-topology $Tx")
+    end
+    return field
+end
+
+function _apply_path_b_2d_slice!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
+    _Tx, Ty, _Tz = topology(field.grid)
+    int = interior(field)
+    if Ty === Bounded
+        int[:, 2:end, 1] .= slice
+        int[:, 1,     1] .= @view slice[:, 1]
+    elseif Ty === Periodic
+        int[:, :, 1] .= slice
+    else
+        error("_apply_path_b_2d_slice!(YFaceField): unsupported y-topology $Ty")
+    end
+    return field
+end
+
+function _apply_path_b_2d_slice!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,2}) where {Center}
+    int = interior(field)
+    int[:, :, 1] .= slice
+    return field
+end
+
+# 3D interior copy into a field. Z-dim of slice already trimmed to
+# the interior.
+function _apply_path_b_3d_interior!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
+    Tx, _Ty, _Tz = topology(field.grid)
+    int = interior(field)
+    if Tx === Bounded
+        int[2:end, :, :] .= slice
+        int[1,     :, :] .= @view slice[1, :, :]
+    elseif Tx === Periodic
+        int[:, :, :] .= slice
+    else
+        error("_apply_path_b_3d_interior!(XFaceField): unsupported x-topology $Tx")
+    end
+    return field
+end
+
+function _apply_path_b_3d_interior!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
+    _Tx, Ty, _Tz = topology(field.grid)
+    int = interior(field)
+    if Ty === Bounded
+        int[:, 2:end, :] .= slice
+        int[:, 1,     :] .= @view slice[:, 1, :]
+    elseif Ty === Periodic
+        int[:, :, :] .= slice
+    else
+        error("_apply_path_b_3d_interior!(YFaceField): unsupported y-topology $Ty")
+    end
+    return field
+end
+
+function _apply_path_b_3d_interior!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,3}) where {Center}
+    interior(field) .= slice
+    return field
 end
 
 # Field-shape-aware copy from NetCDF variable to a pre-allocated Field's
