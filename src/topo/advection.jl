@@ -13,7 +13,7 @@
 #       in space, solved as a 5-point sparse linear system per outer
 #       step. CFL-unconstrained. Mirrors Fortran Yelmo's `impl-lis`
 #       (solver_advection.f90:86–102), with `WOVI = 1.0` (pure
-#       backward Euler). Requires a persistent `ImplicitAdvectionCache`
+#       backward Euler). Requires a persistent `AdvectionCache`
 #       passed via the `cache` keyword. The cache holds the sparse
 #       operator, RHS / solution buffers, the GMRES workspace, and
 #       the (lazily-refactored) ILU0 preconditioner. Allocate once at
@@ -21,6 +21,10 @@
 #       refreshed once per outer step (`update_advection_operator!`)
 #       and reused for every tracer advected with the same velocity /
 #       timestep / mask (`solve_advection!`).
+#
+# The same `AdvectionCache` also carries a preallocated `tend` buffer
+# used by the explicit scheme to avoid per-call allocation of the
+# tendency array.
 #
 # Used in `topo_step!` for both ice thickness `H_ice` (advected at
 # the depth-averaged ice velocity `(ux_bar, uy_bar)`) and the
@@ -38,7 +42,7 @@ using KrylovPreconditioners: KrylovPreconditioners as KP
 
 export advect_tracer!, advect_tracer_upwind_explicit!,
        advect_tracer_upwind_implicit!,
-       ImplicitAdvectionCache, init_advection_cache,
+       AdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
        solve_advection!,
        parse_advection_scheme
@@ -79,9 +83,9 @@ function parse_advection_scheme(solver::AbstractString)
 end
 
 """
-    ImplicitAdvectionCache
+    AdvectionCache
 
-Persistent state for the implicit upwind tracer-advection solver.
+Persistent state for the upwind tracer-advection solvers.
 
 One cache is shared across every tracer advected at the same velocity
 field, timestep, and ice-mask within a given outer step (currently
@@ -89,7 +93,7 @@ field, timestep, and ice-mask within a given outer step (currently
 mask)` only — not on the tracer — so a single refresh per outer step
 amortises across all solves.
 
-Lifecycle inside one outer step:
+Implicit-scheme lifecycle inside one outer step:
 
   1. `update_advection_operator!(cache, ux, uy, dt; mask=...)` — once.
      Refills `A.nzval` in place using the upwind-flux switch and the
@@ -99,6 +103,10 @@ Lifecycle inside one outer step:
      tracer values plus any explicit source into `b`, calls
      `bicgstab!(work, A, b; M=P, …)` into preallocated `x`, unpacks
      back into `c`. Zero allocation per call.
+
+The explicit scheme uses only `tend`, the preallocated tendency buffer
+sized `(Nx, Ny, 1)`. All implicit-only fields are inert when the
+explicit scheme is in use.
 
 Fields:
 
@@ -120,9 +128,11 @@ Fields:
               The `Ref{Any}` indirection mirrors `ssa_amg_cache` and
               keeps the concrete preconditioner type out of the
               struct signature (preserves precompilation).
+  - `tend`  — tendency buffer for the explicit scheme,
+              `Array{Float64,3}` of size `(Nx, Ny, 1)`.
   - `Nx`, `Ny` — grid sizes (sanity checks at solve time).
 """
-struct ImplicitAdvectionCache
+struct AdvectionCache
     A::SparseMatrixCSC{Float64, Int}
     b::Vector{Float64}
     x::Vector{Float64}
@@ -138,6 +148,7 @@ struct ImplicitAdvectionCache
     nz_west::Matrix{Int}
     nz_north::Matrix{Int}
     nz_south::Matrix{Int}
+    tend::Array{Float64, 3}
     periodic_x::Bool
     periodic_y::Bool
     Nx::Int
@@ -145,7 +156,7 @@ struct ImplicitAdvectionCache
 end
 
 """
-    init_advection_cache(grid::RectilinearGrid) -> ImplicitAdvectionCache
+    init_advection_cache(grid::RectilinearGrid) -> AdvectionCache
 
 Allocate the persistent cache for the implicit advection solver,
 sized for `grid` and with the 5-point stencil sparsity pattern of
@@ -175,13 +186,15 @@ function init_advection_cache(grid)
                             A, Nx, Ny, periodic_x, periodic_y)
 
     N = Nx * Ny
-    return ImplicitAdvectionCache(
+    tend = Array{Float64, 3}(undef, Nx, Ny, 1)
+    return AdvectionCache(
         A,
         Vector{Float64}(undef, N),
         Vector{Float64}(undef, N),
         GmresWorkspace(N, N, Vector{Float64}; memory = 20),
         Ref{Any}(nothing),
         nz_self, nz_east, nz_west, nz_north, nz_south,
+        tend,
         periodic_x, periodic_y,
         Nx, Ny,
     )
@@ -314,10 +327,12 @@ Advance a 2D cell-centred tracer `c` (CenterField) by `dt` years.
 
   - `:upwind_explicit` (default) — forward Euler with first-order
     upwind in space; CFL-limited internal substepping. See
-    `advect_tracer_upwind_explicit!`. `cache` is ignored.
+    `advect_tracer_upwind_explicit!`. When a `cache` is provided the
+    explicit kernel reuses `cache.tend` (zero per-call allocation);
+    otherwise it allocates a fresh tendency buffer.
   - `:upwind_implicit` — backward Euler with first-order upwind,
     solved as a single linear system per outer step. CFL-unconstrained.
-    Requires `cache::ImplicitAdvectionCache`. See
+    Requires `cache::AdvectionCache`. See
     `advect_tracer_upwind_implicit!`.
 
 Velocities `ux` (XFaceField) and `uy` (YFaceField) are held fixed
@@ -337,11 +352,16 @@ function advect_tracer!(c, ux, uy, dt::Real;
                         rtol::Real = 1e-12,
                         itmax::Int = 1000)
     if scheme === :upwind_explicit
+        # Cache is optional for the explicit scheme — when provided it
+        # supplies a preallocated `tend` buffer and the path is
+        # zero-alloc; when absent the kernel allocates per call.
+        cache_inst = _resolve_advection_cache(cache, c.grid; required = false)
         advect_tracer_upwind_explicit!(c, ux, uy, dt;
+            cache = cache_inst,
             cfl_safety = cfl_safety,
             fill_velocity_halos = fill_velocity_halos)
     elseif scheme === :upwind_implicit
-        cache_inst = _resolve_implicit_cache(cache, c.grid)
+        cache_inst = _resolve_advection_cache(cache, c.grid; required = true)
         advect_tracer_upwind_implicit!(c, ux, uy, dt, cache_inst;
             source = source, mask = mask,
             fill_velocity_halos = fill_velocity_halos,
@@ -353,30 +373,41 @@ function advect_tracer!(c, ux, uy, dt::Real;
     return c
 end
 
-# Resolve the `cache` argument of `advect_tracer!` for the implicit
-# scheme. Accepts an `ImplicitAdvectionCache` directly, or a
-# `Ref{Any}` that holds one (lazily allocating on first use). The
-# `Ref{Any}` form is what `y.tpo.scratch.adv_cache` carries —
-# YelmoCore can't construct an `ImplicitAdvectionCache` eagerly because
-# the type lives in a later-included module.
-_resolve_implicit_cache(cache::ImplicitAdvectionCache, grid) = cache
-function _resolve_implicit_cache(cache::Base.RefValue, grid)
+# Resolve the `cache` argument of `advect_tracer!`. Accepts an
+# `AdvectionCache` directly, or a `Ref{Any}` that holds one (lazily
+# allocating on first use). The `Ref{Any}` form is what
+# `y.tpo.scratch.adv_cache` carries — YelmoCore can't construct an
+# `AdvectionCache` eagerly because the type lives in a later-included
+# module. `required` controls behaviour when no cache is supplied:
+# `true` errors (implicit scheme — cache is non-optional), `false`
+# returns `nothing` (explicit scheme — kernel will allocate).
+_resolve_advection_cache(cache::AdvectionCache, grid; required::Bool = true) = cache
+function _resolve_advection_cache(cache::Base.RefValue, grid; required::Bool = true)
     cache[] === nothing && (cache[] = init_advection_cache(grid))
-    return cache[]::ImplicitAdvectionCache
+    return cache[]::AdvectionCache
 end
-_resolve_implicit_cache(::Nothing, grid) = error(
-    "advect_tracer!: scheme=:upwind_implicit requires `cache=...` " *
-    "(an `ImplicitAdvectionCache`, typically `y.tpo.scratch.adv_cache`).")
+function _resolve_advection_cache(::Nothing, grid; required::Bool = true)
+    required && error(
+        "advect_tracer!: scheme=:upwind_implicit requires `cache=...` " *
+        "(an `AdvectionCache`, typically `y.tpo.scratch.adv_cache`).")
+    return nothing
+end
 
 """
     advect_tracer_upwind_explicit!(c, ux, uy, dt;
-                                   cfl_safety, fill_velocity_halos) -> c
+                                   cache, cfl_safety, fill_velocity_halos) -> c
 
 Forward Euler + first-order upwind tracer advection. Substeps
 internally with `dt_sub ≤ cfl_safety * min(dx/|u|_max, dy/|v|_max)`
 until `dt` is reached. Mirrors Fortran Yelmo's `expl-upwind`.
+
+When `cache::AdvectionCache` is supplied the tendency array is taken
+from `cache.tend` (zero allocation per call). When `cache === nothing`
+a fresh tendency array is allocated on entry — convenient for one-off
+calls (tests, scripts) at the cost of one allocation per outer step.
 """
 function advect_tracer_upwind_explicit!(c, ux, uy, dt::Real;
+                                        cache = nothing,
                                         cfl_safety::Real = 0.1,
                                         fill_velocity_halos::Bool = true)
     grid = c.grid
@@ -387,7 +418,7 @@ function advect_tracer_upwind_explicit!(c, ux, uy, dt::Real;
         fill_halo_regions!(uy)
     end
 
-    tend = similar(interior(c))
+    tend = cache === nothing ? similar(interior(c)) : cache.tend
     elapsed = 0.0
     while elapsed < dt
         cfl_dt = _cfl_dt(grid, ux, uy, cfl_safety)
@@ -430,7 +461,7 @@ edges are handled by Dirichlet rows in the matrix), so the flag
 is currently a no-op.
 """
 function advect_tracer_upwind_implicit!(c, ux, uy, dt::Real,
-                                        cache::ImplicitAdvectionCache;
+                                        cache::AdvectionCache;
                                         source = nothing,
                                         mask = nothing,
                                         fill_velocity_halos::Bool = true,
@@ -502,7 +533,7 @@ preconditioner-refresh helper).
 
 `dx`, `dy` are the cell sizes in metres.
 """
-function update_advection_matrix!(cache::ImplicitAdvectionCache,
+function update_advection_matrix!(cache::AdvectionCache,
                                   ux, uy, dt::Real, dx::Real, dy::Real;
                                   mask = nothing)
     # Outer wrapper that extracts concrete `interior` arrays then
@@ -539,7 +570,7 @@ converges in 1–2 iterations on our 5-point M-matrix. For a
 future GPU port, swap this call for `KP.kp_ilu0(cache.A_gpu)` —
 same preconditioner role, different backend.
 """
-function update_advection_operator!(cache::ImplicitAdvectionCache,
+function update_advection_operator!(cache::AdvectionCache,
                                     ux, uy, dt::Real, dx::Real, dy::Real;
                                     mask = nothing)
     update_advection_matrix!(cache, ux, uy, dt, dx, dy; mask = mask)
@@ -547,7 +578,7 @@ function update_advection_operator!(cache::ImplicitAdvectionCache,
     return cache
 end
 
-function _update_advection_operator_kernel!(cache::ImplicitAdvectionCache,
+function _update_advection_operator_kernel!(cache::AdvectionCache,
                                             Ux::AbstractArray{Float64, 3},
                                             Uy::AbstractArray{Float64, 3},
                                             dt::Float64, dx::Float64, dy::Float64,
@@ -654,7 +685,7 @@ Tolerances default to the Fortran `impl-lis` defaults
 Returns `c` modified in place, plus solver `stats` are stored in
 `cache.work` (GMRES workspace).
 """
-function solve_advection!(cache::ImplicitAdvectionCache, c, dt::Real;
+function solve_advection!(cache::AdvectionCache, c, dt::Real;
                           source = nothing,
                           atol::Real = 1e-12,
                           rtol::Real = 1e-12,

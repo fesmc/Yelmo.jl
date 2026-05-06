@@ -72,7 +72,7 @@ end
     )
     cache = init_advection_cache(grid)
 
-    @test cache isa ImplicitAdvectionCache
+    @test cache isa AdvectionCache
     @test cache.Nx == Nx
     @test cache.Ny == Ny
 
@@ -134,6 +134,43 @@ end
     @test all(==(1.0), interior(c))
 end
 
+@testset "tpo: advect_tracer! — explicit reuses cache.tend" begin
+    # When a cache is supplied, the explicit path must reuse
+    # `cache.tend` (zero-alloc inner loop) rather than allocating a
+    # fresh tendency array per call. This is the production code
+    # path through `topo_step!` / `lsf_update!`, where a cache
+    # comes in via `y.tpo.scratch.adv_cache`.
+    Nx, Ny = 8, 8
+    grid = RectilinearGrid(CPU();
+        size = (Nx, Ny, 1),
+        x = (0, Nx * 1e3),
+        y = (0, Ny * 1e3),
+        z = (0, 1),
+        topology = (Bounded, Bounded, Bounded),
+    )
+
+    c     = CenterField(grid); fill!(interior(c), 1.0)
+    u     = XFaceField(grid);  fill!(interior(u), 0.0)
+    v     = YFaceField(grid);  fill!(interior(v), 0.0)
+    cache = init_advection_cache(grid)
+
+    @test cache.tend isa Array{Float64, 3}
+    @test size(cache.tend) == (Nx, Ny, 1)
+
+    # Cache ref form (the form the production scratch uses).
+    cache_ref = Ref{Any}(cache)
+    advect_tracer!(c, u, v, 1.0;
+        scheme = :upwind_explicit, cache = cache_ref)
+    @test all(==(1.0), interior(c))
+
+    # Lazy ref form: `nothing` sentinel resolves to a fresh cache on
+    # first call, exactly like the implicit path.
+    lazy_ref = Ref{Any}(nothing)
+    advect_tracer!(c, u, v, 1.0;
+        scheme = :upwind_explicit, cache = lazy_ref)
+    @test lazy_ref[] isa AdvectionCache
+end
+
 @testset "tpo: advect_tracer! — implicit dispatch requires cache" begin
     Nx, Ny = 6, 6
     grid = RectilinearGrid(CPU();
@@ -159,10 +196,10 @@ end
     @test all(==(1.0), interior(c))
 
     # Lazy `Ref{Any}` cache — first call allocates the
-    # `ImplicitAdvectionCache`, then runs the solve.
+    # `AdvectionCache`, then runs the solve.
     cache_ref = Ref{Any}(nothing)
     advect_tracer!(c, u, v, 1.0; scheme = :upwind_implicit, cache = cache_ref)
-    @test cache_ref[] isa ImplicitAdvectionCache
+    @test cache_ref[] isa AdvectionCache
     @test cache_ref[].Nx == Nx
     @test cache_ref[].Ny == Ny
     @test all(==(1.0), interior(c))
