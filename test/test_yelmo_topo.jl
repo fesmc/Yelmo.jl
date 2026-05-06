@@ -1555,18 +1555,19 @@ end
     @test all(interior(y_vm.tpo.cmb_flt_acx) .== 0.0)
     @test all(interior(y_vm.tpo.cmb_flt_acy) .== 0.0)
 
-    p_bogus = YelmoModelParameters("calv-bogus";
-        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
-                             dmb_method=0, topo_rel=0),
-        ycalv = ycalv_params(use_lsf=true, calv_flt_method="bogus"),
-        ydyn  = ydyn_params(solver="fixed"),
-        ytherm = ytherm_params(method="fixed"),
-    )
-    y_b = YelmoModel(RESTART_PATH, 0.0; alias="calv-bogus",
-                    p=p_bogus, strict=false)
-    lsf_init!(y_b.tpo.lsf, y_b.tpo.H_ice, y_b.bnd.z_bed, y_b.bnd.z_sl)
-    fill!(interior(y_b.bnd.smb_ref), 0.0)
-    @test_throws ErrorException Yelmo.step!(y_b, 1.0)
+    # Unrecognised calving method now fails at parameter construction
+    # (use_lsf = true triggers the validator), not deep inside step!.
+    @test_throws ErrorException ycalv_params(use_lsf=true, calv_flt_method="bogus")
+
+    # Known-but-unported Fortran method (`vm-l19`) likewise errors at
+    # construction with a clear "not yet ported" message.
+    @test_throws ErrorException ycalv_params(use_lsf=true, calv_flt_method="vm-l19")
+
+    # When use_lsf = false the validator is dormant — the default
+    # `calv_flt_method = "vm-l19"` (Fortran default) must round-trip
+    # without error since calving never runs.
+    p_dormant = ycalv_params(use_lsf=false)
+    @test p_dormant.calv_flt_method == "vm-l19"
 end
 
 @testset "model: YelmoConstants plumbing" begin

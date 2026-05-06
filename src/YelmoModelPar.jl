@@ -150,6 +150,22 @@ ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ycalv
 # ---------------------------------------------------------------------------
+"""
+Calving methods that are supported by Yelmo.jl's `_dispatch_calving!`
+(see `src/topo/calving.jl`). Used by `ycalv_params` to fail fast at
+parameter construction when `use_lsf = true` and the requested
+method is not implemented in the Julia port.
+"""
+const SUPPORTED_CALV_METHODS = ("none", "zero", "equil", "threshold", "vm-m16")
+
+"""
+Calving methods that exist in Fortran Yelmo (`yelmo/src/yelmo_topography.f90`)
+but are not yet ported to Yelmo.jl. Listed separately so the validator
+can produce a "known but unported" error message — distinct from the
+"unrecognised method" error, which signals a typo or namelist drift.
+"""
+const KNOWN_UNPORTED_CALV_METHODS = ("vm-l19", "simple", "flux", "kill", "kill-pos")
+
 Base.@kwdef struct YcalvParams
     use_lsf         ::Bool    = false
     dt_lsf          ::Float64 = -1.0
@@ -173,7 +189,44 @@ Base.@kwdef struct YcalvParams
     zb_deep_1       ::Float64 = -1500.0
     zb_sigma        ::Float64 = 0.0
 end
-ycalv_params(; kwargs...) = YcalvParams(; kwargs...)
+"""
+    _validate_calv_method(method, label)
+
+Throw a descriptive error if `method` is not in
+`SUPPORTED_CALV_METHODS`. The two failure modes are reported
+separately:
+
+  - `method ∈ KNOWN_UNPORTED_CALV_METHODS` — a real Fortran-Yelmo
+    method that has not yet been ported to Yelmo.jl. The error
+    points at the unported list.
+  - Otherwise — likely a typo or namelist drift; the error lists
+    the supported set.
+"""
+function _validate_calv_method(method::AbstractString, label::AbstractString)
+    method in SUPPORTED_CALV_METHODS && return nothing
+    if method in KNOWN_UNPORTED_CALV_METHODS
+        error("ycalv_params: $label = \"$method\" is a Fortran-Yelmo " *
+              "calving method that has not been ported to Yelmo.jl. " *
+              "Supported here: $(SUPPORTED_CALV_METHODS).")
+    else
+        error("ycalv_params: $label = \"$method\" is not recognised. " *
+              "Supported: $(SUPPORTED_CALV_METHODS); " *
+              "known-but-unported (Fortran-only): $(KNOWN_UNPORTED_CALV_METHODS).")
+    end
+end
+
+# Factory function: validates calving method names before returning the
+# struct. Validation only fires when `use_lsf = true` — otherwise the
+# calving methods are dormant (the default `vm-l19` is the Fortran
+# default and is harmless when `use_lsf = false`).
+function ycalv_params(; kwargs...)
+    p = YcalvParams(; kwargs...)
+    if p.use_lsf
+        _validate_calv_method(p.calv_flt_method,  "calv_flt_method")
+        _validate_calv_method(p.calv_grnd_method, "calv_grnd_method")
+    end
+    return p
+end
 # ---------------------------------------------------------------------------
 # &ydyn
 # ---------------------------------------------------------------------------

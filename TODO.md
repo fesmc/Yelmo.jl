@@ -18,8 +18,11 @@ Fortran. Items 8–10 are larger efforts.
    was replaced with a faithful port of Fortran's
    `calc_calving_rate_vonmises_m16` and threaded through
    `calving_step!` via `_dispatch_calving!`.
-4. **Calving parameter dispatch** — validate calving method names at init
-   time so unsupported choices fail fast (currently runtime error).
+4. ~~**Calving parameter dispatch**~~ — done. `ycalv_params(...)` now
+   validates `calv_flt_method` / `calv_grnd_method` at construction
+   when `use_lsf = true`, with separate error messages for unknown
+   names vs known-but-unported Fortran methods (`vm-l19`, `simple`,
+   `flux`, `kill`, `kill-pos`).
 5. **Thread Picard / matrix assembly loops** in SSA/DIVA solvers.
 6. **Ice age / passive tracer** — port `ice_tracer.f90` (3D advection,
    column solvers, BMB coupling).
