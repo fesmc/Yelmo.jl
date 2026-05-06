@@ -13,9 +13,11 @@ Fortran. Items 8–10 are larger efforts.
    passing). The leftover sub-task was to add the `"diva-noslip"`
    variant, which mirrors Fortran's `solver = "diva-noslip"` keyword
    (forces `no_slip = true` regardless of `y.p.ydyn.no_slip`).
-3. **Principal stresses → von-Mises (`vm-m16`) calving** — export principal
-   stresses from `mat`/`dyn` so the existing `calc_calving_vonmises_m16_ac!`
-   path can be enabled.
+3. ~~**Principal stresses → von-Mises (`vm-m16`) calving**~~ — done.
+   `mat_step!` already computes `strs2D_tau_eig_1`; the calving stub
+   was replaced with a faithful port of Fortran's
+   `calc_calving_rate_vonmises_m16` and threaded through
+   `calving_step!` via `_dispatch_calving!`.
 4. **Calving parameter dispatch** — validate calving method names at init
    time so unsupported choices fail fast (currently runtime error).
 5. **Thread Picard / matrix assembly loops** in SSA/DIVA solvers.
