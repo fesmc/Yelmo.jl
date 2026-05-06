@@ -28,6 +28,23 @@ are at Oceananigans `Center()` vertical staggering — interior layer
 midpoints, length `Nz_aa`. Bed (zeta = 0) and surface (zeta = 1)
 boundary values live in 2D fields (`ux_b`, `ux_s`,
 `scratch.ux_i_s`) per Option C.
+
+KNOWN VERTICAL CONVENTION ISSUE — see `.claude/PlanVerticalSplit.md`.
+The documented convention above (interior + 2D boundary fields) is
+NOT actually what the current grid loader implements. Empirically
+`ux[:,:,1] == ux_b` and `ux[:,:,Nz] == ux_s` exactly, because the
+loader builds the grid from file `zeta_ac` (Face), then copies file
+`ux` (length Nz_file, includes boundary endpoint values at z=0 and
+z=1) into Yelmo's `Center` field of length Nz_aa = Nz_file by
+verbatim index. Center positions (forced to be Face midpoints) and
+file's center positions diverge — file's z=1 surface value lands at
+Yelmo's `zeta_aa[Nz] ≈ 0.948` (~5% below surface). `ux_b` / `ux_s`
+are presently redundant slice-shortcuts of the boundary-loaded
+3D field, not separately-stored boundary values per Option C. Path B
+fix (true interior + 2D `_b` / `_s` separation, file format
+unchanged via load-split / write-recombine) is documented in
+`.claude/PlanVerticalSplit.md`; deferred to a dedicated
+cross-cutting refactor branch.
 """
 module YelmoModelDyn
 

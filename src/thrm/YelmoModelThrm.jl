@@ -61,6 +61,27 @@ Open follow-ups (not blocking thrm closeout):
     Arrhenius) gating now has the upstream therm fields available;
     enabling it is a `mat` follow-up.
 
+KNOWN VERTICAL CONVENTION ISSUE — see `.claude/PlanVerticalSplit.md`
+for the full plan. Yelmo's grid loader builds an Oceananigans
+`Center`-staggered z axis from the file's `zeta_ac` (Face values)
+and loads file `T_ice` / `enth` / `T_pmp` etc. (length Nz_file =
+file zeta length, includes endpoints 0 and 1) into Yelmo's
+`Center` Nz fields by **verbatim index copy**. Because Center cells
+are forced to be midpoints of Faces, file center positions and Yelmo
+center positions don't align — file's `T_ice[:,:,1]` (basal value at
+z=0) ends up at Yelmo's `zeta_aa[1] ≈ 0.003`, and file's
+`T_ice[:,:,Nz_file]` (surface value at z=1) ends up at Yelmo's
+`zeta_aa[Nz] ≈ 0.948` — a 5% mis-alignment at the surface. The
+implicit column solver in this module uses `T_ice[:,:,1]` and
+`T_ice[:,:,Nz]` AS basal / surface BC values, which makes the
+mis-alignment cancel for thrm's own purposes — but any other consumer
+that interprets `T_ice[:,:,1]` as an interior cell value reads
+mis-positioned data. The same issue affects dyn (`ux`, `uy`,
+`uz_star`) and mat (`visc`, `ATT`, `enh`). Path B fix (true
+interior + 2D `_b` / `_s` boundary fields) is documented in
+`.claude/PlanVerticalSplit.md`; deferred to a dedicated
+cross-cutting refactor branch.
+
 `therm_step!` does NOT advance `y.time` — that is owned by
 `topo_step!`, matching the dyn/mat convention.
 """
