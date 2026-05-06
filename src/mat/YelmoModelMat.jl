@@ -140,15 +140,26 @@ function mat_step!(y::YelmoModel, dt::Float64)
               "\"simple\", \"shear2D\", \"shear3D\".")
     end
 
-    # 3. Depth-averaged enhancement.
-    depth_average!(y.mat.enh_bar, y.mat.enh, zeta_aa)
+    # 3a. Path B: refresh enh_b / enh_s from the recomputed 3D enh
+    #     by constant extrapolation off the nearest interior layer.
+    #     Equivalent to the pre-Path B convention used by `enh_bar`'s
+    #     trapezoidal rule, but now stored explicitly so the registry
+    #     has authoritative boundary values (and so future commits
+    #     can replace this with a physically derived rule without
+    #     changing the integration call site).
+    _path_b_constant_extrapolate!(y.mat.enh_b, y.mat.enh_s, y.mat.enh)
+
+    # 3b. Depth-averaged enhancement (explicit boundaries).
+    depth_average!(y.mat.enh_bar, y.mat.enh, y.mat.enh_b, y.mat.enh_s, zeta_aa)
 
     # 4. Rate factor.
     if par.rf_method == -1
-        # External — leave ATT and ATT_bar at their loaded values.
+        # External — leave ATT, ATT_bar, ATT_b / ATT_s at their loaded values.
     elseif par.rf_method == 0
         fill!(interior(y.mat.ATT),     par.rf_const)
         fill!(interior(y.mat.ATT_bar), par.rf_const)
+        fill!(interior(y.mat.ATT_b),   par.rf_const)
+        fill!(interior(y.mat.ATT_s),   par.rf_const)
     elseif par.rf_method == 1
         error("mat_step!: rf_method=1 (temperature-coupled Arrhenius) " *
               "requires the therm port for live T_ice / T_pmp / omega. " *
@@ -163,6 +174,8 @@ function mat_step!(y::YelmoModel, dt::Float64)
         att_val = 1.0 / (2.0 * par_dyn.visc_const)
         fill!(interior(y.mat.ATT),     att_val)
         fill!(interior(y.mat.ATT_bar), att_val)
+        fill!(interior(y.mat.ATT_b),   att_val)
+        fill!(interior(y.mat.ATT_s),   att_val)
     else
         error("mat_step!: unknown rf_method=$(par.rf_method). " *
               "Supported: -1, 0, 2 (rf_method=1 deferred to therm).")
@@ -173,11 +186,35 @@ function mat_step!(y::YelmoModel, dt::Float64)
                          n_glen=par.n_glen, visc_min=par.visc_min,
                          eps_0=par_dyn.eps_0)
 
-    # 6. Depth-averaged and depth-integrated viscosity.
-    depth_average!(y.mat.visc_bar, y.mat.visc, zeta_aa)
-    calc_visc_int!(y.mat.visc_int, y.mat.visc, y.tpo.H_ice, y.tpo.f_ice, zeta_aa)
+    # 5b. Path B: refresh visc_b / visc_s from interior limits — see
+    #     comment at step 3a.
+    _path_b_constant_extrapolate!(y.mat.visc_b, y.mat.visc_s, y.mat.visc)
+
+    # 6. Depth-averaged and depth-integrated viscosity (explicit
+    #    boundaries).
+    depth_average!(y.mat.visc_bar, y.mat.visc, y.mat.visc_b, y.mat.visc_s, zeta_aa)
+    calc_visc_int!(y.mat.visc_int, y.mat.visc,
+                   y.mat.visc_b, y.mat.visc_s,
+                   y.tpo.H_ice, y.tpo.f_ice, zeta_aa)
 
     return y
+end
+
+# Path B helper: refresh a pair of 2D `_b` / `_s` boundary fields
+# from the basal / surface interior layers of a 3D Center field by
+# constant extrapolation. Used by `mat_step!` to keep the boundary
+# registry in sync with the recomputed interior viscosity / enh
+# fields. Equivalent to the pre-Path B `view(V, :, :, 1:1)` /
+# `view(V, :, :, Nz:Nz)` shortcut, but persisted into the registry's
+# 2D fields so I/O and downstream consumers see authoritative values.
+@inline function _path_b_constant_extrapolate!(field_b, field_s, field_3d)
+    V  = interior(field_3d)
+    Vb = interior(field_b)
+    Vs = interior(field_s)
+    Nz = size(V, 3)
+    @inbounds Vb[:, :, 1] .= @view V[:, :, 1]
+    @inbounds Vs[:, :, 1] .= @view V[:, :, Nz]
+    return nothing
 end
 
 
