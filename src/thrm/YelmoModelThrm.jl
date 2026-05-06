@@ -75,6 +75,8 @@ export therm_step!,
        calc_basal_water_local!,
        calc_advec_horizontal_3D!,
        calc_temp_column!, calc_temp_3D!,
+       calc_enth_column!, calc_enth_3D!,
+       calc_enth_diffusivity!, convert_from_enthalpy_column!,
        define_temp_bedrock_column!, define_temp_bedrock_3D!,
        define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
@@ -89,6 +91,7 @@ include("helpers.jl")
 include("advection.jl")
 include("column_solver.jl")
 include("temp_solver.jl")
+include("enth_solver.jl")
 include("bedrock.jl")
 
 """
@@ -275,11 +278,21 @@ function therm_step!(y::YelmoModel, dt::Float64)
                           par.omega_max, c.T0, c.rho_ice, c.rho_sw,
                           c.rho_w, c.L_ice, c.sec_year, dt)
         elseif method == "enth"
-            error("therm_step!: method=\"$(method)\" (enthalpy solver) " *
-                  "lands in the enth milestone (PR5). Note: enth is ported " *
-                  "but not benchmarked against the Mirror — the Mirror path " *
-                  "showed issues on the Fortran side. Use \"fixed\" or " *
-                  "\"temp\" for now.")
+            # Pre-compute horizontal advection of `enth`.
+            calc_advec_horizontal_3D!(y.thrm.advecxy, y.thrm.enth,
+                                       y.dyn.ux, y.dyn.uy, _dx_thrm(y.g))
+            calc_enth_3D!(y.thrm.enth, y.thrm.T_ice, y.thrm.omega,
+                           y.thrm.bmb_grnd, y.thrm.Q_ice_b, y.thrm.H_cts,
+                           y.thrm.T_pmp, y.thrm.cp, y.thrm.kt, y.thrm.advecxy,
+                           y.dyn.uz_star, y.thrm.Q_strn,
+                           y.thrm.Q_b, y.thrm.Q_rock,
+                           y.bnd.T_srf, y.bnd.T_shlf,
+                           y.tpo.H_ice, y.tpo.f_ice, y.thrm.H_w,
+                           y.tpo.f_grnd, y.tpo.H_grnd,
+                           zeta_aa, zeta_ac, dzeta_a, dzeta_b,
+                           par.enth_cr, par.omega_max, c.T0,
+                           c.rho_ice, c.rho_sw, c.rho_w,
+                           c.L_ice, c.sec_year, dt)
         elseif method == "enth-poly"
             error("therm_step!: method=\"$(method)\" (polythermal CTS-adaptive " *
                   "solver) is out of scope for the Yelmo.jl thrm port. The " *
