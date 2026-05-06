@@ -99,7 +99,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
@@ -152,6 +152,9 @@ function _mismip3d_yelmo_params()
         # ytopo defaults are fine. The y-direction is periodic but
         # z_bed is y-invariant -> dzsdy_periodic_offset stays at 0.
         ytopo = ytopo_params(),
+        # Mirror the Fortran namelist: MISMIP3D runs `ytherm.method =
+        # "fixed"`, so `therm_step!` is a no-op in the integration loop.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 

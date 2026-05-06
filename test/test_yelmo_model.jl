@@ -16,7 +16,7 @@ import Pkg; Pkg.activate(".")
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: ydyn_params
+using Yelmo.YelmoModelPar: ydyn_params, ytherm_params
 using Oceananigans: interior
 using NCDatasets
 
@@ -38,7 +38,8 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # physics — leaving the solver at its default `"diva"` would error
     # in `dyn_step!`.
     p = YelmoModelParameters("ymodel-v0";
-                             ydyn = ydyn_params(solver="fixed"))
+                             ydyn   = ydyn_params(solver="fixed"),
+                             ytherm = ytherm_params(method="fixed"))
 
     y = YelmoModel(
         RESTART_PATH, 0.0;
@@ -122,7 +123,8 @@ end
     out_path = joinpath(rundir, "yelmo_scratch.nc")
 
     p = YelmoModelParameters("ymodel-scratch";
-                             ydyn = ydyn_params(solver="fixed"))
+                             ydyn   = ydyn_params(solver="fixed"),
+                             ytherm = ytherm_params(method="fixed"))
 
     y = YelmoModel(
         RESTART_PATH, 0.0;

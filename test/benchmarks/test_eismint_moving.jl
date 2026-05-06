@@ -46,7 +46,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -90,6 +90,10 @@ function _eismint_moving_params()
             enh_stream = 1.0,
             enh_shlf   = 1.0,
         ),
+        # therm decoupled — Fortran configures `ytherm.method = "fixed"`
+        # for the EISMINT-moving benchmark; mirror that here so
+        # `therm_step!` is a no-op in the integration loop.
+        ytherm = ytherm_params(method = "fixed"),
     )
 end
 

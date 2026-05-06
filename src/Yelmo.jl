@@ -9,6 +9,7 @@ include("YelmoConst.jl")
 # modules so they can use `@timed_section` at their call sites.
 include("timing.jl")
 include("YelmoPar.jl")
+include("utils/YelmoUtils.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
 include("YelmoModelPar.jl")
@@ -18,11 +19,13 @@ include("YelmoMirrorCoreFields.jl")
 include("topo/YelmoModelTopo.jl")
 include("dyn/YelmoModelDyn.jl")
 include("mat/YelmoModelMat.jl")
+include("thrm/YelmoModelThrm.jl")
 # Adaptive timestepping (predictor-corrector): must be loaded AFTER
-# topo + dyn + mat modules since it calls `topo_step!`, `mat_step!`,
-# `dyn_step!`, and `update_diagnostics!`. Methods land into the
-# top-level `Yelmo` namespace; `step!` (defined in YelmoCore.jl)
-# dispatches into them at runtime via `_select_step!`.
+# topo + dyn + mat + thrm modules since it calls `topo_step!`,
+# `mat_step!`, `dyn_step!`, `therm_step!`, and `update_diagnostics!`.
+# Methods land into the top-level `Yelmo` namespace; `step!` (defined
+# in YelmoCore.jl) dispatches into them at runtime via
+# `_select_step!`.
 include("timestep_log.jl")
 include("timestepping.jl")
 include("YelmoIO.jl")
@@ -31,6 +34,7 @@ using .YelmoMeta
 using .YelmoConst
 using .YelmoTiming
 using .YelmoPar
+using .YelmoUtils
 using .YelmoSolvers
 using .YelmoIntegration
 using .YelmoModelPar
@@ -39,6 +43,7 @@ using .YelmoMirrorCore
 using .YelmoModelTopo
 using .YelmoModelDyn
 using .YelmoModelMat
+using .YelmoModelThrm
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -60,6 +65,10 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
 export write_nml
 export read_nml
 export compare
+
+# YelmoUtils
+export solve_tridiag!
+export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 
 # YelmoSolvers
 export Solver, SSASolver
@@ -140,6 +149,24 @@ export calc_rate_factor!, calc_rate_factor_eismint!
 export scale_rate_factor_water!
 export define_enhancement_factor_2D!, define_enhancement_factor_3D!
 export calc_stress_tensor_2D!, calc_2D_eigen_values_pt
+
+# YelmoModelThrm
+export therm_step!
+export calc_specific_heat_capacity, calc_thermal_conductivity, calc_T_pmp
+export calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_f_pmp!
+export calc_dzeta_terms!
+export convert_to_enthalpy, convert_to_enthalpy_3D!
+export define_temp_linear_3D!, define_temp_robin_3D!
+export define_temp_linear_column!, define_temp_robin_column!
+export calc_strain_heating!, calc_strain_heating_sia!
+export calc_basal_heating_simplestagger!, calc_basal_heating_nodes!
+export calc_basal_water_local!
+export calc_advec_horizontal_3D!
+export calc_temp_column!, calc_temp_3D!
+export calc_enth_column!, calc_enth_3D!
+export calc_enth_diffusivity!, convert_from_enthalpy_column!
+export define_temp_bedrock_column!, define_temp_bedrock_3D!
+export define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
 # YelmoIO
 export init_output

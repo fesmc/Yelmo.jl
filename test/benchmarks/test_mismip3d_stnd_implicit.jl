@@ -47,7 +47,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
@@ -85,6 +85,9 @@ function _params_with_solver(solver_str::String, alias::String)
             enh_shlf   = 1.0,
         ),
         ytopo = ytopo_params(solver = solver_str),
+        # Mirror MISMIP3D namelist: `ytherm.method = "fixed"` keeps
+        # `therm_step!` a no-op for this benchmark.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 

@@ -37,7 +37,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -87,6 +87,9 @@ function _adaptive_params()
             enh_shlf   = 1.0,
         ),
         ytopo = ytopo_params(),
+        # Mirror MISMIP3D namelist: `ytherm.method = "fixed"` keeps
+        # `therm_step!` a no-op for the adaptive-dt benchmark too.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 
@@ -94,9 +97,10 @@ function _fixed_params()
     p = _adaptive_params()
     # Override the &yelmo block to disable adaptive PC.
     return YelmoModelParameters(p.name;
-        yelmo = yelmo_params(dt_method = 0),
-        ydyn  = p.ydyn, yneff = p.yneff, ytill = p.ytill,
-        ymat  = p.ymat, ytopo = p.ytopo,
+        yelmo  = yelmo_params(dt_method = 0),
+        ydyn   = p.ydyn, yneff = p.yneff, ytill = p.ytill,
+        ymat   = p.ymat, ytopo = p.ytopo,
+        ytherm = p.ytherm,
     )
 end
 

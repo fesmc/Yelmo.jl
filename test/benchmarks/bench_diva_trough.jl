@@ -32,7 +32,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 using Yelmo.YelmoSolvers: SSASolver
@@ -98,6 +98,11 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             n_glen = 3.0, rf_const = 3.1536e-18,
             de_max = 0.5, enh_shear = 1.0, enh_stream = 1.0, enh_shlf = 1.0,
         ),
+        # The TROUGH namelist runs `ytherm.method = "temp"`, which is
+        # not yet ported to Yelmo.jl (lands in PR4). This benchmark is
+        # dyn-side (DIVA) only — pin therm to "fixed" so `therm_step!`
+        # is a no-op.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 

@@ -283,16 +283,19 @@ end
 
 # ===== PC step (per scheme) =====
 
-# Plain forward-Euler step: one (topo, dyn, mat) chain. Used by Heun as
-# its stage primitive and by the `dt_method = 0` branch of the
+# Plain forward-Euler step: one (topo, dyn, mat, thrm) chain. Used by
+# Heun as its stage primitive and by the `dt_method = 0` branch of the
 # dispatcher. Phase order matches the Fortran per-step loop
 # (`yelmo_ice.f90:268-286`): `calc_ydyn` reads the previous step's
 # `mat.ATT`, then `calc_ymat` computes a fresh `ATT` from the
-# just-solved velocity field for the next step.
+# just-solved velocity field for the next step, then `calc_ytherm`
+# updates ice/bed temperatures using the just-solved velocity and
+# stress fields.
 function _step_fe!(y, dt::Float64)
     @timed_section y :topo Yelmo.topo_step!(y, dt)
     @timed_section y :dyn  Yelmo.dyn_step!(y, dt)
     @timed_section y :mat  Yelmo.mat_step!(y, dt)
+    @timed_section y :thrm Yelmo.therm_step!(y, dt)
     return y
 end
 

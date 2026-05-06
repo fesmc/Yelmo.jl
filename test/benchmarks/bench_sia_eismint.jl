@@ -33,7 +33,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -67,6 +67,9 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
         ymat  = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3, de_max=0.5,
                             enh_method="shear3D", enh_shear=1.0,
                             enh_stream=1.0, enh_shlf=1.0),
+        # Mirror Fortran's EISMINT-moving config: `ytherm.method = "fixed"`,
+        # so `therm_step!` is a no-op for this benchmark.
+        ytherm = ytherm_params(method="fixed"),
     )
 end
 
