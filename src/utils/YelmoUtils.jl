@@ -24,13 +24,17 @@
 
 module YelmoUtils
 
+using NCDatasets
+
 export solve_tridiag!
 export calc_dzeta_terms!
 export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
+export gen_map_filename, map_scrip_load, map_scrip_field, vec_stat
 
 include("tridiag.jl")
 include("topology.jl")
 include("quadrature.jl")
 include("dzeta.jl")
+include("scrip_map.jl")
 
 end # module YelmoUtils

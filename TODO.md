@@ -53,7 +53,15 @@ Fortran. Items 8–10 are larger efforts.
    time-series scalar variables (units mirror the Fortran writer).
 8. **Enthalpy solver validation** — benchmark the current port against
    reference data.
-9. **Regridding infrastructure** — port `yelmo_regridding.f90`.
+9. ~~**Regridding infrastructure**~~ — done. `src/utils/scrip_map.jl`
+   vendors the core of `palma-ice/ScripMap.jl` (load + apply, no
+   fill / filter helpers) so the YelmoModel restart loader can
+   regrid SCRIP-format weights generated externally by CDO. The
+   `YelmoModel(restart_file, time; target_grid_file, maps_dir,
+   regrid_method)` kwargs build the model on the target grid and
+   apply the SCRIP map per variable on read. When ScripMap.jl is
+   registered upstream the vendored copy can be deleted in favour
+   of `using ScripMap` — the API is byte-identical.
 10. **Predictor–corrector schemes FE-SBE / AB-SAM** — finish the timestepping
     extension (Lever 1 in the PC refactor design).
 
