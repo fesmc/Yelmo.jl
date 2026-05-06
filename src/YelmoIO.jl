@@ -150,6 +150,20 @@ function _path_b_nan_pad(interior3d::AbstractArray{<:Real,3})
     return out
 end
 
+# Extend a ZFace ice field slab from Yelmo-internal length-(Nz+1) to
+# Mirror-format length-(Nz+3) by replicating the boundary face values.
+# The 2 extra face slots correspond to the Fortran-convention faces
+# extrapolated beyond the z=0 / z=1 boundary centers; their values are
+# unused by the Fortran solver (ZFace fields are recomputed on restart).
+function _zface_extend(face3d::AbstractArray{<:Real,3})
+    Nx, Ny, Nf = size(face3d)
+    out = Array{Float64,3}(undef, Nx, Ny, Nf + 2)
+    @inbounds out[:, :, 1]        .= view(face3d, :, :, 1)
+    @inbounds out[:, :, 2:Nf + 1] .= face3d
+    @inbounds out[:, :, Nf + 2]   .= view(face3d, :, :, Nf)
+    return out
+end
+
 # ---------------------------------------------------------------------------
 # Data extraction — no allocation
 # ---------------------------------------------------------------------------
@@ -254,11 +268,11 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     # write; non-registered 3D Center fields NaN-pad the boundary
     # slots.
     defDim(ds, "zeta",         ylmo.gt.Nz + 2)
-    # `zeta_ac` keeps the Yelmo-internal Face length for now (commit
-    # 2). ZFace fields (uz, uz_star, ...) write at this length;
-    # round-trip with Mirror's length-`Nz_file+1` `zeta_ac` slab is
-    # not yet supported — see commit 2.5 / Mirror Path B alignment.
-    defDim(ds, "zeta_ac",      ylmo.gt.Nz + 1)
+    # `zeta_ac` uses Mirror convention (commit 2.5): Nz_file+1 = Nz+3
+    # face levels. ZFace fields (uz, uz_star, ...) are extended with 1
+    # replicated boundary face at each end on write (`_zface_extend`)
+    # and stripped back to Yelmo-internal Nz+1 on read.
+    defDim(ds, "zeta_ac",      ylmo.gt.Nz + 3)
     defDim(ds, "zeta_rock",    ylmo.gr.Nz)
     defDim(ds, "zeta_rock_ac", ylmo.gr.Nz + 1)
     defDim(ds, "time",         Inf)
@@ -282,7 +296,12 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
               vcat(0.0, collect(znodes(ylmo.gt, Center())), 1.0),
               "1", "normalised ice layer (basal endpoint, interior centers, surface endpoint)")
     _defcoord(ds, "zeta_ac",      Float64, ("zeta_ac",),
-              znodes(ylmo.gt, Face()),   "1", "normalised ice layer interface")
+              let zf = znodes(ylmo.gt, Face())
+                  # Extend to Mirror-format Nz+3 by extrapolating 1 face
+                  # beyond each boundary (mirrors Fortran's ζ_ac convention).
+                  vcat(2*zf[1] - zf[2], collect(Float64, zf), 2*zf[end] - zf[end-1])
+              end,
+              "1", "normalised ice layer interface (Mirror-extended: Nz_file+1 levels)")
     _defcoord(ds, "zeta_rock",    Float64, ("zeta_rock",),
               znodes(ylmo.gr, Center()), "1", "normalised bedrock layer midpoint")
     _defcoord(ds, "zeta_rock_ac", Float64, ("zeta_rock_ac",),
@@ -417,16 +436,18 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             if ndims(data) == 2
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
-                # Path B: non-registered 3D Center fields on the
-                # `zeta` axis need NaN-padding at the basal and
-                # surface slots so the file slab matches the
-                # length-(Nz+2) `zeta` dim. ZFace fields stay on
-                # `zeta_ac` (Yelmo-internal length Nz+1) — no padding
-                # needed yet.
                 if sz[3] == ylmo.gt.Nz
+                    # 3D Center ice field: NaN-pad at the basal/surface
+                    # boundary slots to fill the length-(Nz+2) `zeta` dim.
                     padded = _path_b_nan_pad(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
+                elseif sz[3] == ylmo.gt.Nz + 1
+                    # ZFace ice field: extend to Mirror-format Nz+3 by
+                    # replicating the boundary face at each end.
+                    extended = _zface_extend(data)
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:size(extended, 3), t_idx] = extended
                 else
+                    # Bedrock field or other: write as-is.
                     ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
                 end
             end
@@ -449,7 +470,15 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             if ndims(data) == 2
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
-                ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+                if sz[3] == ylmo.gt.Nz
+                    padded = _path_b_nan_pad(data)
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
+                elseif sz[3] == ylmo.gt.Nz + 1
+                    extended = _zface_extend(data)
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:size(extended, 3), t_idx] = extended
+                else
+                    ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
+                end
             end
         end
     end

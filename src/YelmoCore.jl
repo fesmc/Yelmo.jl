@@ -1315,19 +1315,15 @@ function _load_into_field!(field::Field{Center, Center, Face}, ncvar) where {Fac
         if nz_file == nz_field
             int[:, :, :] .= data
         elseif nz_file == nz_field + 2
-            # Path B transitional state (commit 1, pre-registry): the
-            # restart's `zeta_ac` slab still has the file's full
-            # length-`Nz_file+1` axis, but the Yelmo Face axis is
-            # length `Nz_yelmo+1 = Nz_file - 1`. The interior face
-            # positions are *different* between file and Yelmo (file
-            # uses half-cell faces; Yelmo uses midpoints between
-            # interior centers), so a verbatim slice would store
-            # values at the wrong z. Skip the load — the velocity
-            # solver recomputes ZFace fields like `uz` / `uz_star`
-            # in `init_state!` anyway. Commit 2's boundary registry
-            # / interpolating loader will handle this properly.
-            @warn "Skipping Path B z-face load (dim mismatch nz_file=$nz_file vs " *
-                  "nz_field=$nz_field; field stays at default until registry lands)" maxlog=4
+            # Mirror-format file: Nz_file+1 = Nz+3 face levels. The 2 extra
+            # slots are the extrapolated boundary faces written by
+            # `_zface_extend` (commit 2.5). Strip them to recover the
+            # Yelmo-internal Nz+1 = Nz_file-1 values.
+            # Note: ZFace fields (uz, uz_star, ...) are recomputed by the
+            # velocity solver at init_state! — this load only seeds the
+            # initial guess, so the 1-face boundary replication used on write
+            # is a safe approximation.
+            int[:, :, :] .= view(data, :, :, 2:nz_file - 1)
         else
             error("_load_into_field!(ZFaceField, 3D): unexpected z-dim mismatch " *
                   "(file=$nz_file, field=$nz_field).")
