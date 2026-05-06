@@ -377,20 +377,44 @@ function load_grids_from_restart(filename::AbstractString;
                              x=xlims, y=ylims,
                              topology=(Tx, Ty, Flat))
 
-    grid3d_ice = _build_3d_grid(ds, "zeta", "zeta_ac", Nx, Ny, xlims, ylims, Tx, Ty)
-    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty)
+    # Path B vertical convention applies to the ICE grid only (commit
+    # 1 of the vertical-split refactor). Bedrock continues using the
+    # legacy convention until the bedrock thrm refactor (commit 5).
+    grid3d_ice  = _build_3d_grid(ds, "zeta",      "zeta_ac",      Nx, Ny, xlims, ylims, Tx, Ty; path_b=true)
+    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty; path_b=false)
 
     close(ds)
     return grid2d, grid3d_ice, grid3d_rock
 end
 
-# Build a 3D RectilinearGrid using face-coordinates from `face_var` if
-# present, otherwise reconstruct them from cell-center coordinates in
-# `center_var` (`zeta_ac[i] = (zeta[i-1] + zeta[i]) / 2` for interior
-# faces, with the boundary faces clamped to the first/last center).
+# Build a 3D RectilinearGrid for one of the vertical axes in `ds`.
+#
+# Two conventions are supported via `path_b`:
+#
+#   - Legacy (`path_b=false`): file `zeta` is treated as the Yelmo
+#     `Center` axis (length Nz) and `zeta_ac` as the `Face` axis
+#     (length Nz+1). Yelmo's grid Nz equals the file's `zeta` length.
+#     This is the historical Yelmo.jl behaviour and remains in force
+#     for the bedrock grid until the bedrock refactor.
+#
+#   - Path B (`path_b=true`): file `zeta` is interpreted as
+#     `[0; centers...; 1]` (length Nz_file) — i.e. the basal and
+#     surface boundary endpoints are stored alongside the interior
+#     centers. Yelmo's interior grid takes file `zeta[2:end-1]` as the
+#     `Center` axis (length Nz = Nz_file - 2). Yelmo's `Face` axis is
+#     constructed as midpoints between consecutive interior centers,
+#     with endpoints clamped to {0, 1}.
+#
+# Under Path B the file's `zeta_ac` is *not* authoritative for the
+# Yelmo grid; it is only consulted at I/O time for the boundary
+# slices via the boundary-fields registry (commit 2).
 function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims,
-                        Tx::DataType, Ty::DataType)
-    if haskey(ds, face_var)
+                        Tx::DataType, Ty::DataType; path_b::Bool=false)
+    if path_b
+        haskey(ds, center_var) || return nothing
+        z_center_file = Vector{Float64}(ds[center_var][:])
+        z_face = _path_b_faces_from_centers(z_center_file)
+    elseif haskey(ds, face_var)
         z_face = Vector{Float64}(ds[face_var][:])
     elseif haskey(ds, center_var)
         z_center = Vector{Float64}(ds[center_var][:])
@@ -410,6 +434,34 @@ function _faces_from_centers(zc::AbstractVector)
     zf[end] = zc[end]
     for i in 2:N
         zf[i] = 0.5 * (zc[i-1] + zc[i])
+    end
+    return zf
+end
+
+# Path B Face construction: file `zeta` is `[0; interior_centers...; 1]`.
+# Yelmo Nz = length(zeta) - 2, with `zeta_aa = zeta[2:end-1]`. The
+# returned `Face` axis (length Nz + 1) takes `Face[1] = 0`,
+# `Face[end] = 1`, and interior `Face[k] = (zeta_aa[k-1] + zeta_aa[k])/2`.
+#
+# Note (over-determined system): there is no Face configuration that
+# simultaneously hits {0, 1} at the endpoints AND has every
+# Oceananigans-derived Center (which is the midpoint of consecutive
+# Faces) equal the file's interior `zeta` value. This construction
+# preserves the endpoints exactly; Oceananigans-derived Centers will
+# differ from the file's interior `zeta` by up to a half-cell at the
+# basal and surface cells. Yelmo solvers that need exact center
+# positions should consult a separately-stored `zeta_aa` (introduced
+# with the thrm scratch struct in commit 5), not `znodes(grid, Center())`.
+function _path_b_faces_from_centers(zeta_file::AbstractVector)
+    N = length(zeta_file)
+    N >= 3 || error("_path_b_faces_from_centers: need length ≥ 3, got $N. " *
+                    "File `zeta` must include both the z=0 and z=1 endpoints.")
+    Nz = N - 2
+    zf = Vector{Float64}(undef, Nz + 1)
+    zf[1]   = 0.0
+    zf[end] = 1.0
+    @inbounds for k in 2:Nz
+        zf[k] = 0.5 * (zeta_file[k] + zeta_file[k+1])
     end
     return zf
 end
@@ -846,6 +898,31 @@ _read_nc_3d(ncvar) = ndims(ncvar) == 3 ? ncvar[:, :, :] : ncvar[:, :, :, 1]
 
 @inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
+# Transitional Path B vertical-slice helper.
+#
+# Under Path B (commit 1) the ice grid `Nz` drops to `Nz_file − 2`.
+# Until the boundary-fields registry lands (commit 2), restart files
+# whose 3D ice slabs still carry the basal (z=0) and surface (z=1)
+# endpoint slices need to have those endpoints stripped on load so
+# the interior of the field can absorb the centred values. Boundary
+# `_b` / `_s` 2D fields remain at their constructed default until the
+# registry properly populates them.
+#
+# The helper is a no-op on the legacy-convention rock grid (whose
+# field `Nz` equals the file slab `Nz_file`).
+@inline function _path_b_interior_slice_3d(data::AbstractArray{T,3}, field_nz::Integer) where {T}
+    nz_file = size(data, 3)
+    if nz_file == field_nz
+        return data
+    elseif nz_file == field_nz + 2
+        return view(data, :, :, 2:nz_file - 1)
+    else
+        error("_path_b_interior_slice_3d: file z-dim $nz_file does not match " *
+              "field z-dim $field_nz (legacy) or $field_nz + 2 (Path B with " *
+              "boundary endpoints). Likely a grid / restart-file mismatch.")
+    end
+end
+
 function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Face, Center}
     # XFaceField loader. Interior shape depends on x-axis topology:
     #   - Bounded-x:  `(Nx+1, Ny[, Nz])` — Ny cells × (Nx+1) face slots.
@@ -861,7 +938,8 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
     if _is_3d_field(int)
-        data = _read_nc_3d(ncvar)
+        data_full = _read_nc_3d(ncvar)
+        data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Tx === Bounded
             int[2:end, :, :] .= data
             int[1, :, :]     .= @view data[1, :, :]
@@ -896,7 +974,8 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Fac
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
     if _is_3d_field(int)
-        data = _read_nc_3d(ncvar)
+        data_full = _read_nc_3d(ncvar)
+        data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Ty === Bounded
             int[:, 2:end, :] .= data
             int[:, 1, :]     .= @view data[:, 1, :]
@@ -922,7 +1001,29 @@ end
 function _load_into_field!(field::Field{Center, Center, Face}, ncvar) where {Face, Center}
     int = interior(field)
     if _is_3d_field(int)
-        int[:, :, :] .= _read_nc_3d(ncvar)
+        data = _read_nc_3d(ncvar)
+        nz_file  = size(data, 3)
+        nz_field = size(int, 3)
+        if nz_file == nz_field
+            int[:, :, :] .= data
+        elseif nz_file == nz_field + 2
+            # Path B transitional state (commit 1, pre-registry): the
+            # restart's `zeta_ac` slab still has the file's full
+            # length-`Nz_file+1` axis, but the Yelmo Face axis is
+            # length `Nz_yelmo+1 = Nz_file - 1`. The interior face
+            # positions are *different* between file and Yelmo (file
+            # uses half-cell faces; Yelmo uses midpoints between
+            # interior centers), so a verbatim slice would store
+            # values at the wrong z. Skip the load — the velocity
+            # solver recomputes ZFace fields like `uz` / `uz_star`
+            # in `init_state!` anyway. Commit 2's boundary registry
+            # / interpolating loader will handle this properly.
+            @warn "Skipping Path B z-face load (dim mismatch nz_file=$nz_file vs " *
+                  "nz_field=$nz_field; field stays at default until registry lands)" maxlog=4
+        else
+            error("_load_into_field!(ZFaceField, 3D): unexpected z-dim mismatch " *
+                  "(file=$nz_file, field=$nz_field).")
+        end
     else
         int[:, :, 1] .= _read_nc_2d(ncvar)
     end
@@ -932,7 +1033,9 @@ end
 function _load_into_field!(field::Field{Center, Center, Center}, ncvar) where {Center}
     int = interior(field)
     if _is_3d_field(int)
-        int[:, :, :] .= _read_nc_3d(ncvar)
+        data_full = _read_nc_3d(ncvar)
+        data = _path_b_interior_slice_3d(data_full, size(int, 3))
+        int[:, :, :] .= data
     else
         int[:, :, 1] .= _read_nc_2d(ncvar)
     end
