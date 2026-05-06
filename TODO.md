@@ -24,6 +24,18 @@ Fortran. Items 8–10 are larger efforts.
    names vs known-but-unported Fortran methods (`vm-l19`, `simple`,
    `flux`, `kill`, `kill-pos`).
 5. **Thread Picard / matrix assembly loops** in SSA/DIVA solvers.
+   - Done (scope A): four hot per-cell kernels with no shared writes
+     are now `@threads` on the row axis: `_picard_relax_visc_kernel!`,
+     `_picard_relax_vel_kernel!`, `set_inactive_margins!`,
+     `calc_basal_stress!`.
+   - Out of scope (deferred): the SSA matrix assembly itself
+     (`_assemble_ssa_matrix_kernel!` line 591) uses a shared
+     monotonic counter `k` for COO triplet writes, and the COO→CSC
+     reduction sums duplicate entries into the same `nzval` slot.
+     Threading either requires a per-cell offset pre-scan and is a
+     real refactor — leave for a future commit.
+   - Out of scope: convergence-norm reductions
+     (`picard_calc_convergence_l2`) need per-thread accumulators.
 6. **Ice age / passive tracer** — port `ice_tracer.f90` (3D advection,
    column solvers, BMB coupling).
 7. **Regions infrastructure** — port `yelmo_regions.f90` (regional masks,
