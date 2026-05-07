@@ -198,19 +198,17 @@ end
         H_int[i, j, 1] = (zb < b.z_bed_floor) ? 0.0 : max(0.0, 1000.0 - 0.9 * zb)
     end
 
-    # Materialise diagnostics (z_srf, dzsdx/y, f_ice, f_grnd, mask_ice
-    # references) from the freshly-loaded H_ice / z_bed / z_sl.
-    Yelmo.update_diagnostics!(y)
-
-    # Initialise the thermodynamic state (T_ice + boundary fields) via
-    # the analytic Robin solver. Mirrors Fortran's `yelmo_init_state`
-    # call in `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`).
-    # Without this, `therm_step!`'s step-5 T_prime_b recompute reads
-    # zero-default T_ice_b vs ~272 K T_pmp_b, and `calc_c_bed!`'s
-    # thermal-scaling branch (scale_T = 1) collapses c_bed to
-    # `ytill.cf_ref · N_eff = 0.8`, saturating SSA at the velocity
-    # clamp. See the bisect in PR #66 for the regression history.
-    Yelmo.init_state!(y, 0.0; thrm_method = "robin")
+    # Run the Fortran-faithful initialisation cycle (topo sync → analytic
+    # thermal init → mat → β-safety-net → initial SSA solve → mat refresh
+    # → final topo sync). Mirrors `yelmo_init_state` in
+    # `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`). Without
+    # the analytic thermal init, `therm_step!`'s step-5 T_prime_b
+    # recompute reads zero-default T_ice_b vs ~272 K T_pmp_b, and
+    # `calc_c_bed!`'s thermal-scaling branch (`scale_T = 1`) collapses
+    # `c_bed` to `ytill.cf_ref · N_eff = 0.8`, saturating SSA at the
+    # velocity clamp. See the bisect in PR #66 for the regression
+    # history.
+    init_state!(y, 0.0; thrm_method = "robin")
 
     if _SMOKE_ONLY
         @info "MISMIP3D_SMOKE_ONLY=1 set; skipping 500-yr time loop."

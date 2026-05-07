@@ -481,6 +481,6 @@ function _dx_thrm(grid::RectilinearGrid)
     return abs(Δx)
 end
 
-include("init_state.jl")
+include("init_thrm.jl")
 
 end # module YelmoModelThrm

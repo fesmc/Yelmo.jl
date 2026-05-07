@@ -94,14 +94,13 @@ function _build(b, p)
         H_int[i, j, 1] = (zb < b.z_bed_floor) ? 0.0 :
                                                  max(0.0, 1000.0 - 0.9 * zb)
     end
-    Yelmo.update_diagnostics!(y)
-
-    # Initialise the thermodynamic state (T_ice + boundary fields) via
-    # an analytic solver. Mirrors Fortran's `yelmo_init_state` call
-    # in `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`).
-    # Without this the basal-friction thermal-scaling branch
-    # (calc_c_bed!, scale_T = 1) reads T_prime_b = 0 - T_pmp_b ≈ -272 K,
-    # collapses c_bed → ytill.cf_ref · N_eff = 0.8, and the SSA
+    # Run the Fortran-faithful initialisation cycle (topo sync → analytic
+    # thermal init → mat → β-safety-net → initial SSA solve → mat refresh
+    # → final topo sync). Mirrors `yelmo_init_state` in
+    # `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`). Without
+    # the analytic thermal init the basal-friction thermal-scaling branch
+    # (`calc_c_bed!`, `scale_T = 1`) reads `T_prime_b ≈ -272 K`,
+    # collapses `c_bed` to `ytill.cf_ref · N_eff = 0.8`, and the SSA
     # solver saturates at the velocity clamp.
     Yelmo.init_state!(y, 0.0; thrm_method = "robin")
     return y

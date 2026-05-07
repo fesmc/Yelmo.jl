@@ -1526,11 +1526,113 @@ end
 # init_state! and step! — abstract-interface methods for YelmoModel
 # ---------------------------------------------------------------------------
 
-# `init_state!` forward declaration. The actual method body lives in
-# `YelmoModelThrm` (`src/thrm/init_state.jl`) so the analytic temperature
-# solvers it invokes don't have to be visible at YelmoCore scope.
-# Mirrors Fortran's `yelmo_init_state` (yelmo_ice.f90:1262).
-function init_state! end
+# Forward declarations for `update_diagnostics!` (defined in
+# YelmoModelTopo) and `init_thrm!` (defined in YelmoModelThrm). YelmoCore
+# can't depend on either phase module, so we declare the generics here
+# and the phase modules `import ..YelmoCore` to add their methods.
+function update_diagnostics! end
+function init_thrm! end
+
+"""
+    init_state!(y::YelmoModel, time::Float64;
+                 thrm_method::AbstractString = "robin") -> y
+
+Initialise a `YelmoModel`'s state — the Fortran-faithful port of
+`yelmo_init_state` (yelmo_ice.f90:1262-1362), called after topography
+and boundary fields are externally prescribed and before the time
+loop. Drives a deterministic equilibration cycle:
+
+  1. `update_diagnostics!`           — sync masks / `f_ice` / `f_grnd` /
+                                        `z_srf` / etc. from the loaded
+                                        H_ice + z_bed + z_sl.
+  2. `init_thrm!`                    — analytic temperature
+                                        initialisation via `thrm_method`
+                                        (writes `T_ice`, `T_ice_b`,
+                                        `T_ice_s`, derived diagnostics).
+  3. `mat_step!(y, 0.0)`             — material properties (stress
+                                        tensor, enhancement, ATT,
+                                        viscosity) from the new T_ice.
+  4. β safety net                    — if both `dyn.beta` and
+                                        `dyn.cb_ref` are zero, seed
+                                        `cb_ref = 1`, `c_bed = 1e5`,
+                                        `beta = 1e5` (mirrors Fortran
+                                        yelmo_ice.f90:1332-1338).
+  5. `dyn_step!(y, 0.0)`             — initial velocity solve.
+  6. `mat_step!(y, 0.0)`             — material refresh with new
+                                        velocities (strain rates feed
+                                        the enh / visc kernels).
+  7. `update_diagnostics!`           — final sync.
+
+Sets `y.time = time`. Mirrors Fortran's `thrm_method ∈ {"linear",
+"robin", "robin-cold"}` validation; the analytic-only constraint
+ensures the initial temperature field is set explicitly rather than
+left at the Field-allocation default. Default `"robin"` matches the
+Fortran convention used by every Yelmo benchmark program.
+
+Restart-file callers should typically skip this — `T_ice`, velocity,
+and material state are already prescribed by the loaded snapshot.
+"""
+function init_state!(y::YelmoModel, time::Float64;
+                       thrm_method::AbstractString = "robin")
+    y.time = time
+
+    # 1. Topography sync (Fortran calc_ytopo_pc(...,topo_fixed=.TRUE.,
+    #    pc_step="none")). Refreshes `f_ice`, `f_grnd`, `z_srf`, masks,
+    #    etc. from the externally loaded `H_ice` / `z_bed` / `z_sl`
+    #    without advancing time.
+    update_diagnostics!(y)
+
+    # 2. Thermal initialisation via the chosen analytic solver.
+    init_thrm!(y; thrm_method = thrm_method)
+
+    # 3. First material pass (no dynamics yet) — populates the
+    #    deviatoric stress tensor and rate factor / viscosity from the
+    #    freshly initialised T_ice. Mirrors Fortran calc_ymat call
+    #    at yelmo_ice.f90:1324.
+    mat_step!(y, 0.0)
+
+    # 4. β safety net (Fortran yelmo_ice.f90:1332-1338). Only kicks in
+    #    if dyn.beta and dyn.cb_ref are both still zero — i.e. nothing
+    #    upstream supplied a friction coefficient. Seeds a high-β state
+    #    so the SSA solver doesn't see a fully-frictionless system on
+    #    the first call. Will be overwritten by `dyn_step!`'s normal
+    #    cb_ref / beta calculation when those are method-driven.
+    _init_state_beta_safety_net!(y)
+
+    # 5. Initial dynamic state. Mirrors Fortran calc_ydyn call at
+    #    yelmo_ice.f90:1340. With `dt = 0.0` the SSA Picard loop
+    #    just produces a steady-state velocity for the current
+    #    geometry; the `duxydt` post-pass is guarded against `dt = 0`.
+    dyn_step!(y, 0.0)
+
+    # 6. Material refresh with the newly-solved velocities — strain
+    #    rates and stress tensor are now populated, so enhancement
+    #    and viscosity reflect the actual flow regime. Mirrors
+    #    Fortran calc_ymat call at yelmo_ice.f90:1344.
+    mat_step!(y, 0.0)
+
+    # 7. Final topography sync. Mirrors Fortran calc_ytopo_pc call at
+    #    yelmo_ice.f90:1355.
+    update_diagnostics!(y)
+
+    return y
+end
+
+# β safety net helper. Inlined into init_state! call site; kept
+# separate so `init_state!` reads as a clear sequence of phase calls.
+@inline function _init_state_beta_safety_net!(y::YelmoModel)
+    beta_int   = interior(y.dyn.beta)
+    cb_ref_int = interior(y.dyn.cb_ref)
+    c_bed_int  = interior(y.dyn.c_bed)
+    if maximum(beta_int) == 0.0
+        if maximum(cb_ref_int) == 0.0
+            fill!(cb_ref_int, 1.0)
+        end
+        @. c_bed_int = cb_ref_int * 1e5
+        @. beta_int  = c_bed_int
+    end
+    return y
+end
 
 # ---------------------------------------------------------------------------
 # Per-component time-stepping generics
