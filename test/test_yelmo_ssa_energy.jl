@@ -75,7 +75,8 @@ function _write_slab_s06_fixture!(path::AbstractString;
 end
 
 function _build_slab_model(path; method::Symbol, linear_method::Symbol,
-                                  precond::Symbol = :jacobi)
+                                  precond::Symbol = :jacobi,
+                                  boundaries::Symbol = :bounded)
     p = YelmoModelParameters("ssa_slab_energy";
         ydyn = ydyn_params(
             solver         = "ssa",
@@ -104,7 +105,7 @@ function _build_slab_model(path; method::Symbol, linear_method::Symbol,
                    rundir     = tdir,
                    alias      = "ssa_slab_energy_$(method)",
                    p          = p,
-                   boundaries = :bounded,
+                   boundaries = boundaries,
                    strict     = false)
     fill!(interior(y.mat.ATT), 1e-16)
     fill!(interior(y.dyn.cb_ref), 1.0)
@@ -150,5 +151,43 @@ end
     diff_rel = diff_abs / max(maximum(abs, ux_res), eps())
     @info "ux_bar equivalence" diff_abs diff_rel
     @test diff_abs < 1e-3            # m/yr
+    @test diff_rel < 1e-4
+end
+
+@testset "SSA energy_quadratic vs residual: SLAB-S06 free-slip x-edges (:periodic_y)" begin
+    # `boundaries = :periodic_y` → SSA palette
+    # `(:free_slip, :periodic, :free_slip, :periodic)`. The slab fixture
+    # has slope in x (non-periodic in x) and is uniform in y (periodic-y
+    # is consistent), so this BC palette is geometrically self-
+    # consistent. Free-slip at left/right (i=1, i=Nx) exercises the
+    # symmetric κ-penalty branches in `_assemble_ssa_matrix_energy!`.
+    Nx, Ny = 51, 41
+    dx = 2_000.0
+    fdir = mktempdir(; prefix="ssa_slab_s06_freeslip_")
+    path = joinpath(fdir, "restart.nc")
+    _write_slab_s06_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
+                             H_const=1000.0, alpha=1e-3, Nz=4)
+
+    y_res = _build_slab_model(path; method = :residual,
+                                     linear_method = :bicgstab,
+                                     precond = :jacobi,
+                                     boundaries = :periodic_y)
+    Yelmo.YelmoModelDyn.dyn_step!(y_res, 1.0)
+    ux_res = copy(interior(y_res.dyn.ux_bar))
+    @info "residual :periodic_y" ux_max_res=maximum(abs, ux_res) iters=y_res.dyn.scratch.ssa_iter_now[]
+
+    y_eng = _build_slab_model(path; method = :energy_quadratic,
+                                     linear_method = :cg,
+                                     precond = :jacobi,
+                                     boundaries = :periodic_y)
+    Yelmo.YelmoModelDyn.dyn_step!(y_eng, 1.0)
+    ux_eng = copy(interior(y_eng.dyn.ux_bar))
+    @info "energy :periodic_y" ux_max_eng=maximum(abs, ux_eng) iters=y_eng.dyn.scratch.ssa_iter_now[]
+
+    @test all(isfinite, ux_eng)
+    diff_abs = maximum(abs.(ux_eng .- ux_res))
+    diff_rel = diff_abs / max(maximum(abs, ux_res), eps())
+    @info "free-slip equivalence" diff_abs diff_rel
+    @test diff_abs < 1e-3
     @test diff_rel < 1e-4
 end

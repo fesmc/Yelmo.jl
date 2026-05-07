@@ -62,11 +62,25 @@
 #     scalar indexing into structured Field objects inside the kernel.
 # ----------------------------------------------------------------------
 
-# κ default: dominate the natural inner-stencil scale by 10 orders of
-# magnitude. Inner diag is O(η·H·dy/dx + β·dx·dy); for ice-sheet scales
-# this is O(1e10 .. 1e12). κ = 1e25 sits well above that without
-# blowing up double-precision arithmetic.
-const _SSA_ENERGY_KAPPA = 1.0e25
+# κ default: ~1e5 above the natural inner-stencil scale.
+#
+# Inner-row diagonal scale is O(η·H·dy/dx + β·dx·dy); for typical ice-
+# sheet parameters this is O(1e10 .. 1e12). Free-slip BCs add a
+# *symmetric* κ-penalty that contributes both to the boundary row and
+# to the inner-neighbour row's diagonal. If κ·dx·dy ≫ inner_diag by
+# more than ~10 orders of magnitude, the inner stencil entries on
+# that neighbour row get rounded off the CSC sum (ULP-lost), which
+# silently drops the inner-row physics and makes the system
+# under-constrained.
+#
+# κ = 1e15 keeps κ·dx·dy ~ 4e21 (with dx·dy ~ 4e6 m²); inner ULP at
+# that scale is ~1e6, well below typical inner_diag ~1e10. Constraint
+# leak is O(b / κ) ~ 1e-9 m/yr, well below the Picard tolerance.
+#
+# For pure-Dirichlet BCs (mask = 0, mask = -1, no-slip edges) only
+# the boundary row gets a κ entry — no precision risk there — so
+# this same value is fine.
+const _SSA_ENERGY_KAPPA = 1.0e15
 
 """
     _assemble_ssa_matrix_energy!(I_idx, J_idx, vals, b_vec, nnz_ref,
@@ -220,44 +234,72 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
             if bcs[3] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[3] === :free_slip
+                # Symmetric κ-penalty for `u(1, j) = u(2, j)`:
+                #   E_pen = ½κ(u_n - u_{n-1})² · dx · dy
+                # Boundary row writes its own diag/off-diag pair; the
+                # symmetric contribution to the inner row at i=2 is
+                # appended as extra COO triplets (CSC builder sums
+                # duplicates). Keeps K symmetric → CG-compatible.
+                nc_in = _row_ux(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[3] = $(bcs[3]) at " *
-                      "left edge not yet implemented for method = " *
-                      ":energy_quadratic. Currently supports :no_slip and " *
-                      ":periodic. Free-slip lands in a follow-up commit.")
+                      "left edge not supported for method = :energy_quadratic. " *
+                      "Expected :no_slip, :free_slip, or :periodic.")
             end
 
         elseif i == Nx && bcs[1] !== :periodic
             if bcs[1] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[1] === :free_slip
+                # Right edge: u(Nx, j) = u(Nx-1, j) via symmetric κ-penalty.
+                nc_in = _row_ux(Nx - 1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[1] = $(bcs[1]) at " *
-                      "right edge not yet implemented for method = " *
-                      ":energy_quadratic. Currently supports :no_slip and " *
-                      ":periodic.")
+                      "right edge not supported for method = :energy_quadratic.")
             end
 
         elseif j == 1 && bcs[4] !== :periodic
             if bcs[4] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[4] === :free_slip
+                nc_in = _row_ux(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[4] = $(bcs[4]) at " *
-                      "bottom edge not yet implemented for method = " *
-                      ":energy_quadratic. Currently supports :no_slip and " *
-                      ":periodic.")
+                      "bottom edge not supported for method = :energy_quadratic.")
             end
 
         elseif j == Ny && bcs[2] !== :periodic
             if bcs[2] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[2] === :free_slip
+                nc_in = _row_ux(i, Ny - 1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[2] = $(bcs[2]) at " *
-                      "top edge not yet implemented for method = " *
-                      ":energy_quadratic. Currently supports :no_slip and " *
-                      ":periodic.")
+                      "top edge not supported for method = :energy_quadratic.")
             end
 
         elseif ssa_mask_x == 3
@@ -356,36 +398,64 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
             if bcs[4] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[4] === :free_slip
+                nc_in = _row_uy(i, jp1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[4] = $(bcs[4]) at " *
-                      "bottom edge not yet implemented (v-row).")
+                      "bottom edge not supported (v-row).")
             end
 
         elseif j == Ny && bcs[2] !== :periodic
             if bcs[2] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[2] === :free_slip
+                nc_in = _row_uy(i, Ny - 1, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[2] = $(bcs[2]) at " *
-                      "top edge not yet implemented (v-row).")
+                      "top edge not supported (v-row).")
             end
 
         elseif i == 1 && bcs[3] !== :periodic
             if bcs[3] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[3] === :free_slip
+                nc_in = _row_uy(ip1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[3] = $(bcs[3]) at " *
-                      "left edge not yet implemented (v-row).")
+                      "left edge not supported (v-row).")
             end
 
         elseif i == Nx && bcs[1] !== :periodic
             if bcs[1] === :no_slip
                 k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr, κ * s_dx_dy)
                 b_vec[nr] = 0.0
+            elseif bcs[1] === :free_slip
+                nc_in = _row_uy(Nx - 1, j, Nx)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nr,    κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nr, nc_in, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nr, -κ * s_dx_dy)
+                k += 1; _push_coo!(I_idx, J_idx, vals, k, nc_in, nc_in, κ * s_dx_dy)
+                b_vec[nr] = 0.0
             else
                 error("_assemble_ssa_matrix_energy!: bcs[1] = $(bcs[1]) at " *
-                      "right edge not yet implemented (v-row).")
+                      "right edge not supported (v-row).")
             end
 
         elseif ssa_mask_y == 3
