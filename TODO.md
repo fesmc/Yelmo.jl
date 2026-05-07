@@ -1,71 +1,80 @@
 # Yelmo.jl porting & improvement TODO
 
-Items to bring Yelmo.jl closer to feature parity with Fortran Yelmo, in priority
-order. Items 1–7 are straightforward ports or already-operational features in
-Fortran. Items 8–10 are larger efforts.
+Items to bring Yelmo.jl closer to feature parity with Fortran Yelmo,
+in priority order. Items 1–7, 9 and the bonus scope are done on this
+branch; items 8 and 10 are deferred.
 
-## Planned
+## Status
 
-1. **Advection allocation cleanup** — apply the wrapper + parametric-kernel
-   template to `src/topo/advection.jl` to drop per-timestep allocations.
-2. ~~**Hybrid solver dispatch**~~ — *already operational* (`dyn_step!`
-   handles `"hybrid"` and the SIA+SSA additivity test was already
-   passing). The leftover sub-task was to add the `"diva-noslip"`
-   variant, which mirrors Fortran's `solver = "diva-noslip"` keyword
-   (forces `no_slip = true` regardless of `y.p.ydyn.no_slip`).
-3. ~~**Principal stresses → von-Mises (`vm-m16`) calving**~~ — done.
-   `mat_step!` already computes `strs2D_tau_eig_1`; the calving stub
-   was replaced with a faithful port of Fortran's
-   `calc_calving_rate_vonmises_m16` and threaded through
-   `calving_step!` via `_dispatch_calving!`.
-4. ~~**Calving parameter dispatch**~~ — done. `ycalv_params(...)` now
+- ✅ 1, 2, 3, 4, 5, 6, 7, 9 + bonus (fill / filter helpers,
+  aligned-resolution remapping)
+- ⏸ 8 (enthalpy validation), 10 (FE-SBE / AB-SAM PC schemes) —
+  deferred to a separate effort
+
+## Done on this branch
+
+1. ~~**Advection allocation cleanup**~~ — renamed
+   `ImplicitAdvectionCache` → `AdvectionCache`, lifted the
+   explicit-path `tend` buffer into the cache so the production
+   `advect_tracer!` path is zero-alloc on both schemes.
+2. ~~**Hybrid solver dispatch**~~ — already operational; added the
+   `"diva-noslip"` variant that mirrors Fortran's solver-keyword
+   override of the `no_slip` flag.
+3. ~~**Principal stresses → vm-m16 calving**~~ — kernel ported
+   (Morlighem 2016) and threaded through `calving_step!` via
+   `y.mat.strs2D_tau_eig_1`.
+4. ~~**Calving parameter dispatch validation**~~ — `ycalv_params(...)`
    validates `calv_flt_method` / `calv_grnd_method` at construction
-   when `use_lsf = true`, with separate error messages for unknown
-   names vs known-but-unported Fortran methods (`vm-l19`, `simple`,
-   `flux`, `kill`, `kill-pos`).
-5. **Thread Picard / matrix assembly loops** in SSA/DIVA solvers.
-   - Done (scope A): four hot per-cell kernels with no shared writes
-     are now `@threads` on the row axis: `_picard_relax_visc_kernel!`,
-     `_picard_relax_vel_kernel!`, `set_inactive_margins!`,
-     `calc_basal_stress!`.
-   - Out of scope (deferred): the SSA matrix assembly itself
-     (`_assemble_ssa_matrix_kernel!` line 591) uses a shared
-     monotonic counter `k` for COO triplet writes, and the COO→CSC
-     reduction sums duplicate entries into the same `nzval` slot.
-     Threading either requires a per-cell offset pre-scan and is a
-     real refactor — leave for a future commit.
-   - Out of scope: convergence-norm reductions
-     (`picard_calc_convergence_l2`) need per-thread accumulators.
-6. **Ice age / passive tracer** — partial port (scope A).
-   Done: `calc_tracer_3D!` driver + implicit Crank-Nicolson column
-   solver + horizontal 2nd-order upwind + Rybak-Huybrechts basal BC
-   + per-column rate-of-change limiter, wired into `mat_step!` for
-   `calc_age = true && tracer_method = "impl"` (`y.mat.dep_time`).
-   Out of scope (deferred): explicit solver `tracer_method = "expl"`,
-   `calc_isochrones` (`depth_iso` diagnostic), and the
-   `enh_method ∈ {*-tracer}` paths.
-7. ~~**Regions infrastructure**~~ — full port. `src/regions/`
-   provides `init_regions`, `add_region!`, `update_regions!`,
-   `write_regions!`, and `calc_region_diagnostics!`. Each region
-   is `(name, mask, outfile, diag)`; `init_regions` auto-creates a
-   whole-domain region by default. NetCDF output is one file per
+   when `use_lsf = true`, with separate "unknown" vs
+   "known-but-unported" error messages.
+5. ~~**Thread SSA Picard kernels (scope A)**~~ — `@threads` on four
+   hot per-cell kernels with no shared writes:
+   `_picard_relax_visc_kernel!`, `_picard_relax_vel_kernel!`,
+   `set_inactive_margins!`, `calc_basal_stress!`. The matrix
+   assembly itself (shared COO counter) and the L2 reduction
+   (per-thread accumulators) stay single-threaded — flagged as
+   future work.
+6. ~~**Ice age tracer (scope A)**~~ — `calc_tracer_3D!` + implicit
+   Crank-Nicolson column solver + 2nd-order upwind horizontal
+   advection + Rybak-Huybrechts basal BC + per-column rate-of-change
+   limiter. Wired into `mat_step!` for `calc_age = true &&
+   tracer_method = "impl"`. The explicit solver, isochrones, and
+   the `enh_method ∈ {*-tracer}` paths are deferred.
+7. ~~**Regions infrastructure (full port)**~~ — `src/regions/` with
+   `init_regions`, `add_region!`, `update_regions!`,
+   `write_regions!`, and `calc_region_diagnostics!`. Default
+   whole-domain region auto-created. NetCDF output is one file per
    region with the mask written as a static 2D variable plus 39
    time-series scalar variables (units mirror the Fortran writer).
-8. **Enthalpy solver validation** — benchmark the current port against
-   reference data.
-9. ~~**Regridding infrastructure**~~ — done. `src/utils/scrip_map.jl`
-   vendors the core of `palma-ice/ScripMap.jl` (load + apply, no
-   fill / filter helpers) so the YelmoModel restart loader can
-   regrid SCRIP-format weights generated externally by CDO. The
-   `YelmoModel(restart_file, time; target_grid_file, maps_dir,
-   regrid_method)` kwargs build the model on the target grid and
-   apply the SCRIP map per variable on read. When ScripMap.jl is
-   registered upstream the vendored copy can be deleted in favour
-   of `using ScripMap` — the API is byte-identical.
-10. **Predictor–corrector schemes FE-SBE / AB-SAM** — finish the timestepping
-    extension (Lever 1 in the PC refactor design).
+9. ~~**Regridding infrastructure**~~ — `src/utils/scrip_map.jl`
+   vendors the core of `palma-ice/ScripMap.jl` (load + apply, plus
+   pure-Julia replacements for `fill_weighted!` / `fill_nearest!` /
+   `gaussian_filter!`) so the YelmoModel restart loader can
+   regrid SCRIP-format weights generated externally by CDO. New
+   constructor kwargs: `target_grid_file`, `maps_dir`,
+   `regrid_method`. When ScripMap.jl is registered upstream the
+   vendored copy can be deleted in favour of `using ScripMap` —
+   the API is held byte-identical.
 
-## Explicitly out of scope
+### Bonus (not on the original list)
+
+- ~~**Aligned-resolution conservative remapping**~~ —
+  `src/utils/grid_scale.jl` adds `GridScaleWeights` plus
+  `map_field_to_lo` / `map_field_to_hi` for the special case where
+  one grid is an integer refinement of another. Stencil helpers +
+  `@threads` outer loop. Plus `refine_grid` / `coarsen_grid` for
+  one-line construction of a companion grid from an existing one.
+
+## Deferred
+
+8. **Enthalpy solver validation** — benchmark the current port
+   against reference data. Requires running the model and comparing
+   against YelmoMirror — defer to a dedicated validation campaign.
+10. **Predictor–corrector schemes FE-SBE / AB-SAM** — finish the
+    timestepping extension (Lever 1 in the PC refactor design memo).
+    Larger-than-one-commit refactor.
+
+## Explicitly out of scope (not planned)
 
 - L1L2 solver
 - `calving_aa` (vertical-MB calving on aa-cells)
