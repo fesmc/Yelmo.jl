@@ -114,7 +114,23 @@ function init_thrm!(y::YelmoModel; thrm_method::AbstractString = "robin")
     _init_thrm_boundary_extrapolate!(y.thrm.T_ice_b, y.thrm.T_ice_s,
                                        y.thrm.T_ice, y.bnd.T_srf)
 
-    # 5. Update derived diagnostics: enth + T_prime + f_pmp.
+    # 5. Bedrock equilibrium init. Mirrors Fortran's hard-coded
+    #    `dom%thrm%par%rock_method = "equil"` override during
+    #    `yelmo_init_state` (yelmo_ice.f90:1309). Seeds `T_rock`,
+    #    `enth_rock`, and `Q_rock` to the analytic linear profile
+    #    anchored at `T_ice_b` with deep slope from `Q_geo` —
+    #    regardless of the user's chosen `par.rock_method`. Without
+    #    this seed, `rock_method = "active"` cold-start runs would
+    #    advance from a zero-T_rock IC and take ~10 kyr to relax.
+    zeta_aa_rock = znodes(y.gr, Center())
+    define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+                             y.thrm.Q_rock,
+                             y.thrm.T_ice_b, y.bnd.Q_geo,
+                             par.cp_rock, par.kt_rock, par.H_rock,
+                             zeta_aa_rock, c.sec_year)
+    interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
+
+    # 6. Update derived diagnostics: enth + T_prime + f_pmp.
     convert_to_enthalpy_3D!(y.thrm.enth, y.thrm.T_ice, y.thrm.omega,
                             y.thrm.T_pmp, y.thrm.cp, c.L_ice)
     _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b, y.thrm.T_prime_s,
