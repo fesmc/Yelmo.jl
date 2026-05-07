@@ -20,7 +20,8 @@ using Yelmo.YelmoModelPar: YdynParams, ydyn_params, YelmoModelParameters
 
 @testset "SSASolver: default field values" begin
     s = SSASolver()
-    @test s.method          === :bicgstab
+    @test s.method          === :residual
+    @test s.linear_method   === :auto
     @test s.precond         === :jacobi
     @test s.smoother        === :gauss_seidel
     @test s.rtol            == 1e-6
@@ -31,11 +32,13 @@ using Yelmo.YelmoModelPar: YdynParams, ydyn_params, YelmoModelParameters
 end
 
 @testset "SSASolver: kwarg overrides" begin
-    s = SSASolver(method = :gmres, precond = :amg_sa, smoother = :jacobi,
+    s = SSASolver(method = :energy_quadratic, linear_method = :gmres,
+                   precond = :amg_sa, smoother = :jacobi,
                    rtol = 1e-8, itmax = 500,
                    picard_tol = 5e-3, picard_relax = 0.5,
                    picard_iter_max = 100)
-    @test s.method          === :gmres
+    @test s.method          === :energy_quadratic
+    @test s.linear_method   === :gmres
     @test s.precond         === :amg_sa
     @test s.smoother        === :jacobi
     @test s.rtol            == 1e-8
@@ -43,6 +46,18 @@ end
     @test s.picard_tol      == 5e-3
     @test s.picard_relax    == 0.5
     @test s.picard_iter_max == 100
+end
+
+@testset "SSASolver: method/linear_method validation + auto resolution" begin
+    @test_throws ErrorException SSASolver(method = :bogus)
+    @test_throws ErrorException SSASolver(linear_method = :bogus)
+    # Auto resolution
+    @test resolve_linear_method(SSASolver(method = :residual))         === :bicgstab
+    @test resolve_linear_method(SSASolver(method = :energy_quadratic)) === :cg
+    # Explicit override returns unchanged
+    @test resolve_linear_method(SSASolver(linear_method = :bicgstab))  === :bicgstab
+    @test resolve_linear_method(SSASolver(method = :energy_quadratic,
+                                          linear_method = :bicgstab))  === :bicgstab
 end
 
 @testset "SSASolver: precond field defaults and overrides" begin

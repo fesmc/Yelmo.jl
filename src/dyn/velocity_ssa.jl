@@ -1128,9 +1128,10 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
     # `scratch.ssa_jacobi_d_inv`.
     M, ldiv_flag = _build_ssa_precond(scratch, A, ssa)
 
-    # Run the configured Krylov method. Currently only :bicgstab is
-    # implemented; future expansion to :gmres / :cg goes here.
-    if ssa.method === :bicgstab
+    # Resolve `linear_method = :auto` against the chosen assembly
+    # `method` (`:residual` → `:bicgstab`, `:energy_quadratic` → `:cg`).
+    linmeth = resolve_linear_method(ssa)
+    if linmeth === :bicgstab
         workspace = scratch.ssa_solver_workspace
         if M === nothing
             bicgstab!(workspace, A, b;
@@ -1151,8 +1152,9 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
         end
         return x_dest
     else
-        error("_solve_ssa_linear!: method=$(ssa.method) not yet implemented. " *
-              "Currently only :bicgstab is supported.")
+        error("_solve_ssa_linear!: linear_method=$(linmeth) not yet implemented. " *
+              "Currently only :bicgstab is supported. (CG support lands with " *
+              "method = :energy_quadratic in a follow-up.)")
     end
 end
 

@@ -53,7 +53,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
-using ..YelmoSolvers: Solver, SSASolver
+using ..YelmoSolvers: Solver, SSASolver, resolve_linear_method
 using ..YelmoIntegration: vert_int_trapz_boundary!
 using ..YelmoTiming: @timed_section
 
@@ -83,7 +83,7 @@ export dyn_step!,
        calc_strain_rate_tensor_jac_quad3D!,
        calc_uz_3D_jac!, calc_uz_3D!, calc_uz_3D_aa!,
        set_ssa_masks!, _assemble_ssa_matrix!,
-       Solver, SSASolver,
+       Solver, SSASolver, resolve_linear_method,
        _solve_ssa_linear!,
        picard_relax_visc!, picard_relax_vel!,
        picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
