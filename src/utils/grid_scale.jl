@@ -29,9 +29,39 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Grids: RectilinearGrid
+using Base.Threads: @threads
 
 export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
        map_field_to_hi, map_field_to_hi!
+
+# ----------------------------------------------------------------------
+# Stencil helpers — explicit s×s block access patterns. Inlined so the
+# call sites are zero-overhead. Each helper operates on a single
+# block of the high-resolution grid; the outer kernel drives them
+# over (i, j) lo-cells.
+# ----------------------------------------------------------------------
+
+# Sum over an s×s block of `src` rooted at `(i0+1, j0+1)`. The inner
+# loop is over the column-major fast axis (`ii`) so it can SIMD-vectorise.
+@inline function _block_sum(src::AbstractMatrix, i0::Int, j0::Int, s::Int)
+    acc = zero(eltype(src))
+    @inbounds for jj in 1:s
+        @simd for ii in 1:s
+            acc += src[i0 + ii, j0 + jj]
+        end
+    end
+    return acc
+end
+
+# Replicate a scalar value into an s×s block of `dst`.
+@inline function _block_replicate!(dst::AbstractMatrix, v, i0::Int, j0::Int, s::Int)
+    @inbounds for jj in 1:s
+        @simd for ii in 1:s
+            dst[i0 + ii, j0 + jj] = v
+        end
+    end
+    return nothing
+end
 
 """
     GridScaleWeights(Nx_lo, Ny_lo, s)
@@ -131,14 +161,18 @@ function map_field_to_lo!(dst::AbstractMatrix, src::AbstractMatrix,
               "weights' (Nx_lo, Ny_lo) = ($(w.Nx_lo), $(w.Ny_lo)).")
     s = w.s
     inv_s2 = 1.0 / (s * s)
-    @inbounds for j in 1:w.Ny_lo, i in 1:w.Nx_lo
-        acc = 0.0
-        i0 = (i - 1) * s
-        j0 = (j - 1) * s
-        for jj in 1:s, ii in 1:s
-            acc += src[i0 + ii, j0 + jj]
+    Nx_lo = w.Nx_lo
+    Ny_lo = w.Ny_lo
+    # Each lo-cell `(i, j)` reads from a disjoint `s × s` stencil
+    # block of `src` and writes to a single slot in `dst`. Threading
+    # on the outer `j` axis is race-free — different `j` strips of
+    # `dst` belong to different threads.
+    @threads for j in 1:Ny_lo
+        @inbounds for i in 1:Nx_lo
+            i0 = (i - 1) * s
+            j0 = (j - 1) * s
+            dst[i, j] = _block_sum(src, i0, j0, s) * inv_s2
         end
-        dst[i, j] = acc * inv_s2
     end
     return dst
 end
@@ -193,12 +227,18 @@ function map_field_to_hi!(dst::AbstractMatrix, src::AbstractMatrix,
         error("map_field_to_hi!: dst shape $(size(dst)) does not match " *
               "weights' (Nx_hi, Ny_hi) = ($(w.Nx_hi), $(w.Ny_hi)).")
     s = w.s
-    @inbounds for j in 1:w.Ny_lo, i in 1:w.Nx_lo
-        v  = src[i, j]
-        i0 = (i - 1) * s
-        j0 = (j - 1) * s
-        for jj in 1:s, ii in 1:s
-            dst[i0 + ii, j0 + jj] = v
+    Nx_lo = w.Nx_lo
+    Ny_lo = w.Ny_lo
+    # Each lo-cell `(i, j)` writes to a disjoint `s × s` stencil
+    # block of `dst`. Different `j` strips of lo-cells map to
+    # different `j` strips of hi-cells, so threading on `j` is
+    # race-free.
+    @threads for j in 1:Ny_lo
+        @inbounds for i in 1:Nx_lo
+            v  = src[i, j]
+            i0 = (i - 1) * s
+            j0 = (j - 1) * s
+            _block_replicate!(dst, v, i0, j0, s)
         end
     end
     return dst
