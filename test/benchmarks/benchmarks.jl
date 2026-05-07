@@ -192,7 +192,7 @@ function Yelmo.YelmoModel(b::AbstractBenchmark, t::Real;
     y = Yelmo.YelmoCore.YelmoModel(alias, rundir, Float64(t), p, c,
                                    g, gt, gr, v_meta,
                                    bnd, dta, dyn, mat, thrm, tpo, timer,
-                                   Yelmo.YelmoHooks())
+                                   Yelmo.YelmoHooks.YelmoHooks())
 
     # Default mask_ice to all-dynamic (the file-based loader does the
     # same before calling load_state!).

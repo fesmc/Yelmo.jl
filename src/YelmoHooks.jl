@@ -37,6 +37,8 @@
 # hook.
 # ----------------------------------------------------------------------
 
+module YelmoHooks
+
 export YelmoHooks
 
 """
@@ -52,3 +54,5 @@ mutable struct YelmoHooks
     calv_grnd ::Union{Nothing, Function}
     YelmoHooks() = new(nothing, nothing)
 end
+
+end # module YelmoHooks

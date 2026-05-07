@@ -18,6 +18,7 @@ using ..YelmoConst: YelmoConstants,
 using ..YelmoModelPar: YelmoModelParameters
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
+using ..YelmoHooks: YelmoHooks
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
