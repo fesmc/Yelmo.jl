@@ -32,6 +32,7 @@ analytical references, see `test/benchmarks/` instead.
 | Benchmark                           | Status   | Description |
 | ----------------------------------- | -------- | ----------- |
 | [`eismint1-moving`](eismint1-moving)| ✅       | EISMINT-1 moving-margin (Huybrechts et al. 1996), SIA + adaptive PC. |
+| [`mismip3d-stnd`](mismip3d-stnd)    | ✅       | MISMIP3D Stnd (Pattyn et al. 2013), SSA + grounding-line dynamics on a sloped marine bed. |
 
 ## Running a benchmark
 

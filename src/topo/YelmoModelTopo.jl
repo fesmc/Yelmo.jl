@@ -23,7 +23,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 
-import ..YelmoCore: topo_step!
+import ..YelmoCore: topo_step!, update_diagnostics!
 
 export topo_step!, apply_mask_ice_pass!, advect_tracer!,
        advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!,

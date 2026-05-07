@@ -27,6 +27,7 @@ model implementation can consume them.
 | Benchmark                  | Status |
 | -------------------------- | ------ |
 | `EISMINT1MovingBenchmark`  | ✅     |
+| `MISMIP3DBenchmark(:Stnd)` | ✅     |
 
 ## Yelmo glue
 

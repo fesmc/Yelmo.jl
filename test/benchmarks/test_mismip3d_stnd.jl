@@ -47,13 +47,13 @@ import Pkg; Pkg.activate("..")
 #   for fidelity (and could be re-enabled in a future test once the
 #   adaptive-dt / topo_fixed-phase infrastructure lands in Yelmo.jl).
 #
-# OBSERVED TRAJECTORY (with thicker IC, dt=1.0 yr, 500 yr):
+# OBSERVED TRAJECTORY (with thicker IC + init_state!(thrm_method="robin"),
+# dt=1.0 yr, 500 yr):
 #
-#   t=10:  mean(f_grnd)=0.49  max(H)=1404 m  max|ux|=254 m/yr
-#   t=100: mean(f_grnd)=0.49  max(H)=1420 m  max|ux|=222 m/yr
-#   t=500: mean(f_grnd)=0.49  max(H)=1574 m  max|ux|=175 m/yr
-#   max|uy_centerline| < 2e-6 m/yr throughout (perfect y-symmetry).
-#   sym_violations = 0 across all 50 checks.
+#   t=10:  mean(f_grnd)=0.49  max(H)~1404 m  max|ux|~508 m/yr
+#   t=100: mean(f_grnd)=0.49  max(H)~1420 m  max|ux|~222 m/yr
+#   t=500: mean(f_grnd)=0.49  max(H)~1574 m  max|ux|~175 m/yr
+#   max|uy_centerline| ≪ max|ux| (y-symmetry preserved up to BiCGStab tol).
 #
 # DIAGNOSTICS:
 #
@@ -198,9 +198,17 @@ end
         H_int[i, j, 1] = (zb < b.z_bed_floor) ? 0.0 : max(0.0, 1000.0 - 0.9 * zb)
     end
 
-    # Materialise diagnostics (z_srf, dzsdx/y, f_ice, f_grnd, mask_ice
-    # references) from the freshly-loaded H_ice / z_bed / z_sl.
-    Yelmo.update_diagnostics!(y)
+    # Run the Fortran-faithful initialisation cycle (topo sync → analytic
+    # thermal init → mat → β-safety-net → initial SSA solve → mat refresh
+    # → final topo sync). Mirrors `yelmo_init_state` in
+    # `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`). Without
+    # the analytic thermal init, `therm_step!`'s step-5 T_prime_b
+    # recompute reads zero-default T_ice_b vs ~272 K T_pmp_b, and
+    # `calc_c_bed!`'s thermal-scaling branch (`scale_T = 1`) collapses
+    # `c_bed` to `ytill.cf_ref · N_eff = 0.8`, saturating SSA at the
+    # velocity clamp. See the bisect in PR #66 for the regression
+    # history.
+    init_state!(y, 0.0; thrm_method = "robin")
 
     if _SMOKE_ONLY
         @info "MISMIP3D_SMOKE_ONLY=1 set; skipping 500-yr time loop."

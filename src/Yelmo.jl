@@ -161,7 +161,7 @@ export define_enhancement_factor_2D!, define_enhancement_factor_3D!
 export calc_stress_tensor_2D!, calc_2D_eigen_values_pt
 
 # YelmoModelThrm
-export therm_step!
+export therm_step!, init_thrm!
 export calc_specific_heat_capacity, calc_thermal_conductivity, calc_T_pmp
 export calc_cp_3D!, calc_kt_3D!, calc_T_pmp_3D!, calc_f_pmp!
 export calc_dzeta_terms!
