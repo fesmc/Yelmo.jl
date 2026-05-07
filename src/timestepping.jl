@@ -6,7 +6,7 @@
 #
 #   - `dt_method`     : 0 = fixed forward Euler (default),
 #                       2 = adaptive predictor-corrector.
-#   - `pc_method`     : "HEUN" (default), "FE-SBE", "AB-SAM" (stub).
+#   - `pc_method`     : "HEUN" (default), "FE-SBE", "AB-SAM".
 #   - `pc_controller` : "PI42" (this PR), other Söderlind variants future.
 #   - `pc_tol`        : rejection threshold on truncation-error proxy
 #                       `eta` (m/yr).
@@ -20,7 +20,7 @@
 # Architecture:
 #
 #   - `PCScheme`      : abstract type. Concrete: `HEUN` (default),
-#                       `FE_SBE`; `AB_SAM` is a stub.
+#                       `FE_SBE`, `AB_SAM`.
 #   - `PIController`  : abstract type. Concrete: `PI42`; further
 #                       controllers (H312b, H321PID, …) plug in via
 #                       methods on `_dt_ratio`.
@@ -155,9 +155,34 @@ struct FE_SBE <: PCScheme end
     AB_SAM
 
 Adams-Bashforth predictor + Semi-implicit Adams-Moulton corrector
-(Fortran's `pc_method = "AB-SAM"` default). Stub — implementation
-deferred until we want to plug in dt-history-dependent error
-formulas. The PI42 controller already maintains the dt-history ring.
+(Fortran's `pc_method = "AB-SAM"` default).
+
+Yelmo.jl-style implementation: structurally identical to `HEUN` (2×
+`_step_fe!` with corrector identity `H_corr = (H_n + H_**)/2`), but
+the predictor's `H_pred` is replaced by an Adams-Bashforth
+extrapolation using the previous accepted outer step's full ΔH:
+
+    ΔH_AB = (1 + ζ/2)·ΔH_FE − (ζ²/2)·ΔH_prev
+    H_pred = H_n + ΔH_AB
+
+where `ΔH_FE = H_n + dt·k_n` (the result of stage-1 `_step_fe!`),
+`ΔH_prev = H_corr_{n−1} − H_n_{n−1}` (saved in `PCScratch.ΔH_prev`),
+and `ζ = dt_n / dt_{n−1}`. Bootstrap (first outer step, no history):
+fall back to HEUN behaviour (β2 = 0).
+
+Truncation-error proxy is dt-history-dependent
+(`yelmo_timesteps.f90:357`):
+
+    eta = ζ / (3·(ζ+1)·dt) · |H_corr − H_pred|
+
+**Caveat.** This mixes the *full-cascade* tendency (advection +
+mass balance + calving + relaxation) with the previous step's
+full-cascade ΔH, not just the advective component as Fortran does.
+For configurations without active mass balance / calving the schemes
+are mathematically equivalent. With those kernels active, the
+results will differ — same architectural caveat that applies to
+Yelmo.jl's `HEUN`. Faithful Fortran-AB-SAM equivalence requires the
+deferred `topo_step!` refactor that exposes `dHidt_dyn` directly.
 """
 struct AB_SAM <: PCScheme end
 
@@ -170,8 +195,12 @@ pc_order(::PCScheme) = 2
 # Matches Fortran `yelmo_timesteps.f90:329 / 357 / 381`.
 pc_error_factor(::HEUN)   = 1.0 / 6.0
 pc_error_factor(::FE_SBE) = 1.0 / 2.0
-pc_error_factor(::AB_SAM) =
-    error("AB-SAM requires dt-history-dependent factor; Step 2 PR.")
+# AB-SAM's error factor is dt-history-dependent (`yelmo_timesteps.f90:357`):
+#   tau = ζ / (3·(ζ+1)·dt) · |H_corr − H_pred|, ζ = dt_n / dt_{n-1}.
+# Computed inline inside `pc_step!(::AB_SAM, …)` since the constant-factor
+# signature can't carry ζ. Kept as a method so callers asking for a default
+# (constant-dt) factor still get a sensible number.
+pc_error_factor(::AB_SAM) = 1.0 / 6.0   # ζ → 1 limit
 
 # Number of past `dt` / `eta` samples the scheme needs in addition to
 # the current step. Heun is self-starting (no history); AB-SAM needs 1.
@@ -196,10 +225,9 @@ struct PI42 <: PIController end
 function _resolve_pc_scheme(name::AbstractString)
     name == "HEUN"   && return HEUN()
     name == "FE-SBE" && return FE_SBE()
-    name == "AB-SAM" && error(
-        "pc_method=\"AB-SAM\" is declared but not implemented. " *
-        "Supported: \"HEUN\", \"FE-SBE\" (default).")
-    error("Unknown pc_method=\"$name\". Supported: \"HEUN\", \"FE-SBE\" (default).")
+    name == "AB-SAM" && return AB_SAM()
+    error("Unknown pc_method=\"$name\". " *
+          "Supported: \"HEUN\" (default), \"FE-SBE\", \"AB-SAM\".")
 end
 
 function _resolve_pc_controller(name::AbstractString)
@@ -318,6 +346,13 @@ mutable struct PCScratch
     snap::PCSnapshot
     H_pred::Array{Float64,3}
     H_corr::Array{Float64,3}
+    # Accepted-step ΔH = H_corr − H_n from the previous outer accepted
+    # step. Used by AB-SAM's predictor for the Adams-Bashforth
+    # extrapolation; ignored by HEUN / FE-SBE. `is_bootstrapped` is
+    # `false` until the first accept; AB-SAM falls back to HEUN-style
+    # predictor while `false`.
+    ΔH_prev::Array{Float64,3}
+    is_bootstrapped::Bool
     eta_history::Vector{Float64}   # newest at end; capped to history_max
     dt_history::Vector{Float64}    # likewise
     n_steps_taken::Int
@@ -332,6 +367,8 @@ function _alloc_pc_scratch(y)
         _alloc_pc_snapshot(y),
         zeros(Float64, size(H)),
         zeros(Float64, size(H)),
+        zeros(Float64, size(H)),
+        false,
         Float64[],
         Float64[],
         0, 0,
@@ -378,7 +415,7 @@ captured `y_n` into `scratch.snap`, and that `y` currently holds that
 same `y_n` state. Returns the truncation-error proxy `eta` (m/yr).
 The model state on return is the corrector result.
 
-Dispatches on `PCScheme`. Concrete methods: `HEUN`, `FE_SBE`.
+Dispatches on `PCScheme`. Concrete methods: `HEUN`, `FE_SBE`, `AB_SAM`.
 """
 function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
@@ -492,6 +529,71 @@ function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
     diff_max = 0.0
     @inbounds @simd for i in eachindex(H_corr)
         d = abs(H_corr[i] - scratch.H_pred[i])
+        diff_max = max(diff_max, d)
+    end
+    return factor * diff_max / dt
+end
+
+"""
+    pc_step!(::AB_SAM, y, dt, scratch) -> eta::Float64
+
+Adams-Bashforth predictor + Semi-implicit Adams-Moulton corrector,
+implemented in the Yelmo.jl HEUN style (full-cascade tendency,
+Heun corrector identity). See `AB_SAM` docstring for the caveat.
+
+Bootstrap: when `!scratch.is_bootstrapped` (no previous accepted
+outer step yet), fall back to a HEUN step. After the first accept
+the bootstrap flag is flipped by `_adaptive_step!`.
+"""
+function pc_step!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
+    # Bootstrap path: no previous accepted ΔH yet → run HEUN.
+    if !scratch.is_bootstrapped || isempty(scratch.dt_history)
+        return pc_step!(HEUN(), y, dt, scratch)
+    end
+
+    snap = scratch.snap
+    dt_prev = scratch.dt_history[end]
+    ζ = dt / dt_prev
+    half_ζ  = 0.5 * ζ
+    half_ζ2 = 0.5 * ζ^2
+
+    # Stage 1a: full FE step y_n → y_pred_FE.
+    @timed_section y :pc_predictor _step_fe!(y, dt)
+
+    # Stage 1b: replace H_pred_FE with the AB-extrapolated predictor.
+    # Algebra: ΔH_AB = (1 + ζ/2)·ΔH_FE − (ζ²/2)·ΔH_prev,
+    # where ΔH_FE = H_pred_FE − H_n, ΔH_prev = H_corr_{n-1} − H_n_{n-1}.
+    H_now = interior(y.tpo.H_ice)
+    @inbounds @simd for i in eachindex(H_now)
+        ΔH_FE = H_now[i] - snap.H_ice[i]
+        H_now[i] = snap.H_ice[i] +
+                   (1.0 + half_ζ) * ΔH_FE -
+                   half_ζ2 * scratch.ΔH_prev[i]
+    end
+    # Diagnostics (f_grnd, z_srf, …) computed by stage-1 `_step_fe!`
+    # reflect H_pred_FE; refresh from the AB-extrapolated H_pred.
+    Yelmo.update_diagnostics!(y)
+    copyto!(scratch.H_pred, H_now)
+
+    # Stage 2: full FE step y_pred_AB → y_** (k_** at AB predictor state).
+    @timed_section y :pc_corrector _step_fe!(y, dt)
+
+    # Heun corrector identity (Yelmo.jl-style; matches Fortran AB-SAM's
+    # corrector β3=β4=0.5 only in the linear-cascade case).
+    H_now = interior(y.tpo.H_ice)
+    @inbounds @simd for i in eachindex(scratch.H_corr)
+        scratch.H_corr[i] = 0.5 * (snap.H_ice[i] + H_now[i])
+    end
+    copyto!(H_now, scratch.H_corr)
+    apply_mask_ice_pass!(y, snap.H_ice)
+    y.time = snap.time + dt
+    Yelmo.update_diagnostics!(y)
+
+    # Truncation-error proxy: factor = ζ / (3·(ζ+1)).
+    factor = ζ / (3.0 * (ζ + 1.0))
+    diff_max = 0.0
+    @inbounds @simd for i in eachindex(scratch.H_corr)
+        d = abs(scratch.H_corr[i] - scratch.H_pred[i])
         diff_max = max(diff_max, d)
     end
     return factor * diff_max / dt
@@ -656,6 +758,17 @@ function _adaptive_step!(y, dt_outer::Float64,
         end
 
         scratch.n_steps_taken += 1
+        # Save the accepted-step ΔH for AB-SAM's predictor (and flip
+        # the bootstrap flag). At this point `scratch.snap.H_ice` is
+        # H_n for *this* attempt and `y.tpo.H_ice` is H_corr — exactly
+        # what AB-SAM's next predictor needs as `ΔH_prev`. Cheap copy
+        # whether or not the active scheme uses it.
+        let H_corr = interior(y.tpo.H_ice)
+            @inbounds @simd for i in eachindex(scratch.ΔH_prev)
+                scratch.ΔH_prev[i] = H_corr[i] - scratch.snap.H_ice[i]
+            end
+        end
+        scratch.is_bootstrapped = true
         # Store actual eta (NOT floored to pc_eps) so the controller
         # sees the true history. `_dt_ratio` does its own floor at
         # 1e-8 to keep the divisor finite.

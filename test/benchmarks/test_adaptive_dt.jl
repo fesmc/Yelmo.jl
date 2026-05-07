@@ -161,14 +161,15 @@ end
 end
 
 
-@testset "Adaptive PC: pc_method resolver dispatches both schemes" begin
+@testset "Adaptive PC: pc_method resolver dispatches all schemes" begin
     @test Yelmo._resolve_pc_scheme("HEUN")   isa Yelmo.HEUN
     @test Yelmo._resolve_pc_scheme("FE-SBE") isa Yelmo.FE_SBE
-    @test_throws ErrorException Yelmo._resolve_pc_scheme("AB-SAM")
+    @test Yelmo._resolve_pc_scheme("AB-SAM") isa Yelmo.AB_SAM
+    @test_throws ErrorException Yelmo._resolve_pc_scheme("BOGUS")
 end
 
 
-for pc_method in ("FE-SBE", "HEUN")
+for pc_method in ("FE-SBE", "HEUN", "AB-SAM")
 
 @testset "Adaptive PC ($pc_method): MISMIP3D Stnd 500-yr trajectory" begin
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
