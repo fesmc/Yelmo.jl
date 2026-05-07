@@ -1,11 +1,4 @@
-# `mismip3d-stnd` ⚠️ BROKEN (does not reproduce reference)
-
-> **Status:** the current Yelmo.jl SSA pipeline produces velocities
-> clamped at the 5000 m/yr ceiling under this configuration; the
-> grounding line advances to the eastern boundary instead of retreating.
-> Committed as a record of current behaviour; see "Observed trajectory"
-> below. Tracking issue: TBD. **Do not** quote results from this
-> benchmark as a Yelmo.jl validation.
+# `mismip3d-stnd`
 
 MISMIP3D Stnd benchmark (Pattyn et al. 2013). Steady-state buildup of a
 2D marine ice sheet on a y-invariant downward-sloping bed
@@ -79,35 +72,16 @@ julia --project=. summary.jl
 - `summary.json` — committed reference values for cross-version
   comparison.
 
-## Observed trajectory (Yelmo.jl, current main)
+## Notes
 
-This benchmark reproduces what
-[test/benchmarks/test_mismip3d_stnd.jl](../../test/benchmarks/test_mismip3d_stnd.jl)
-exercises (same parameters, same IC override), extended to 2000 yr.
-The current Yelmo.jl SSA pipeline produces:
-
-| t [yr] | max(H) [m] | mean(H) [m] | mean(f_grnd) | GL_x [km] | max\|ux\| [m/yr] |
-|---|---|---|---|---|---|
-| 0    | 1442.8 | 622.5  | 0.49 | 392.0 | 0.0 |
-| 100  | 1287.5 | 1159.5 | 0.98 | 792.0 | 5000 |
-| 1000 | 1639.6 | 1565.9 | 0.98 | 792.0 | 5000 |
-| 2000 | 2088.2 | 2006.9 | 0.98 | 792.0 | 5000 |
-
-This **does not** reproduce the Pattyn et al. (2013) reference behavior
-(retreating grounding line under SSA + Coulomb sliding). What's
-happening instead: the SSA BiCGStab solver fails to converge on this
-configuration and produces velocities clamped at `ssa_vel_max = 5000 m/yr`,
-which (combined with positive smb) advances the grounding line all the
-way to the eastern boundary in ~100 yr.
-
-Likely causes are documented elsewhere — the literal Fortran 10 m
-all-floating IC is rank-deficient under SSA (Yelmo.jl runs the thicker
-grounded override to avoid that), but even with the override Yelmo.jl
-lacks the adaptive timestepping / `dHdt_dyn_lim` infrastructure
-Fortran uses to keep the SSA solve well-conditioned during transient
-adjustment. Investigation continues; the benchmark is committed as a
-faithful record of current behaviour, against which improvements can
-be compared.
+This is a longer reproduction of the regression test
+[test/benchmarks/test_mismip3d_stnd.jl](../../test/benchmarks/test_mismip3d_stnd.jl).
+`run.jl` calls `Yelmo.init_state!(y, 0.0; thrm_method = "robin")` after
+constructing the model — mirrors Fortran's `yelmo_init_state` call in
+`yelmo/tests/yelmo_mismip.f90`. Without that, default-zero `T_ice_b`
+collides with `calc_c_bed!`'s `scale_T = 1` thermal-scaling branch
+and collapses basal friction; the SSA solver then saturates at the
+5000 m/yr velocity clamp. See PR #66 for the bisect history.
 
 Next benchmarks: **mismip3d-stnd-att-ramp** (same setup with phased
 changes to the Glen rate factor — see

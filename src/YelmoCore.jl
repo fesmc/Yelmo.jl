@@ -1526,10 +1526,11 @@ end
 # init_state! and step! — abstract-interface methods for YelmoModel
 # ---------------------------------------------------------------------------
 
-function init_state!(y::YelmoModel, time::Float64; kwargs...)
-    y.time = time
-    return y
-end
+# `init_state!` forward declaration. The actual method body lives in
+# `YelmoModelThrm` (`src/thrm/init_state.jl`) so the analytic temperature
+# solvers it invokes don't have to be visible at YelmoCore scope.
+# Mirrors Fortran's `yelmo_init_state` (yelmo_ice.f90:1262).
+function init_state! end
 
 # ---------------------------------------------------------------------------
 # Per-component time-stepping generics
