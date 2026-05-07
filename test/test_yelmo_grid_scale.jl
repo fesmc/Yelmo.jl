@@ -10,6 +10,8 @@ import Pkg; Pkg.activate(".")
 using Test
 using Yelmo
 using Oceananigans
+using Oceananigans.Grids: topology, xnodes, ynodes, znodes,
+                          Bounded, Periodic, Flat
 
 # ---------------------------------------------------------------------
 # Construction + validation
@@ -177,4 +179,112 @@ end
     src = Float64.(reshape(1:12, 4, 3))
     @test map_field_to_hi(src, w) == src
     @test map_field_to_lo(src, w) == src
+end
+
+# ---------------------------------------------------------------------
+# Companion-grid construction (refine_grid / coarsen_grid)
+# ---------------------------------------------------------------------
+
+@testset "grid_scale: refine_grid — 2D Flat-z preserves extent + topology" begin
+    grid_lo = RectilinearGrid(CPU();
+        size = (5, 4),
+        x = (0.0, 50.0e3), y = (0.0, 40.0e3),
+        topology = (Bounded, Bounded, Flat))
+    grid_hi = refine_grid(grid_lo, 4)
+
+    @test size(grid_hi, 1) == 20
+    @test size(grid_hi, 2) == 16
+    Tx, Ty, Tz = topology(grid_hi)
+    @test (Tx, Ty, Tz) === (Bounded, Bounded, Flat)
+
+    # Same physical extent (xmin/xmax and ymin/ymax).
+    @test xnodes(grid_hi, Face())[1]   == xnodes(grid_lo, Face())[1]
+    @test xnodes(grid_hi, Face())[end] == xnodes(grid_lo, Face())[end]
+    @test ynodes(grid_hi, Face())[1]   == ynodes(grid_lo, Face())[1]
+    @test ynodes(grid_hi, Face())[end] == ynodes(grid_lo, Face())[end]
+
+    # And the resulting (lo, hi) pair must satisfy GridScaleWeights.
+    w = GridScaleWeights(grid_lo, grid_hi)
+    @test w.s == 4
+end
+
+@testset "grid_scale: refine_grid — 3D Bounded-z preserves vertical axis" begin
+    z_face = collect(0.0:0.25:1.0)        # 5 face nodes → Nz=4
+    grid_lo = RectilinearGrid(CPU();
+        size = (3, 2, 4),
+        x = (0.0, 30.0e3), y = (0.0, 20.0e3), z = z_face,
+        topology = (Bounded, Bounded, Bounded))
+    grid_hi = refine_grid(grid_lo, 2)
+
+    @test size(grid_hi, 1) == 6
+    @test size(grid_hi, 2) == 4
+    @test size(grid_hi, 3) == 4    # Nz preserved
+    # z face nodes match exactly.
+    @test collect(Float64, znodes(grid_hi, Face())) ≈ z_face atol = 1e-12
+
+    w = GridScaleWeights(grid_lo, grid_hi)
+    @test w.s == 2
+end
+
+@testset "grid_scale: refine_grid — Periodic-x topology preserved" begin
+    grid_lo = RectilinearGrid(CPU();
+        size = (4, 3),
+        x = (0.0, 40.0e3), y = (0.0, 30.0e3),
+        topology = (Periodic, Bounded, Flat))
+    grid_hi = refine_grid(grid_lo, 3)
+    Tx, Ty, _ = topology(grid_hi)
+    @test (Tx, Ty) === (Periodic, Bounded)
+    @test size(grid_hi, 1) == 12
+end
+
+@testset "grid_scale: refine_grid — invalid s errors" begin
+    grid = RectilinearGrid(CPU();
+        size = (4, 3),
+        x = (0, 40e3), y = (0, 30e3),
+        topology = (Bounded, Bounded, Flat))
+    @test_throws ErrorException refine_grid(grid, 0)
+    @test_throws ErrorException refine_grid(grid, -2)
+end
+
+@testset "grid_scale: coarsen_grid — 2D round-trip via refine" begin
+    grid_lo = RectilinearGrid(CPU();
+        size = (3, 4),
+        x = (0.0, 30.0e3), y = (0.0, 40.0e3),
+        topology = (Bounded, Bounded, Flat))
+    grid_hi = refine_grid(grid_lo, 5)
+    grid_back = coarsen_grid(grid_hi, 5)
+
+    @test size(grid_back) == size(grid_lo)
+    @test xnodes(grid_back, Face())[1]   == xnodes(grid_lo, Face())[1]
+    @test xnodes(grid_back, Face())[end] == xnodes(grid_lo, Face())[end]
+end
+
+@testset "grid_scale: coarsen_grid — non-divisible factor errors" begin
+    grid_hi = RectilinearGrid(CPU();
+        size = (10, 6),    # Nx=10 not divisible by 3
+        x = (0, 100e3), y = (0, 60e3),
+        topology = (Bounded, Bounded, Flat))
+    @test_throws ErrorException coarsen_grid(grid_hi, 3)
+
+    grid_hi_y = RectilinearGrid(CPU();
+        size = (12, 7),    # Ny=7 not divisible by 2
+        x = (0, 120e3), y = (0, 70e3),
+        topology = (Bounded, Bounded, Flat))
+    @test_throws ErrorException coarsen_grid(grid_hi_y, 2)
+end
+
+@testset "grid_scale: refine_grid + map_field_to_hi end-to-end" begin
+    # Verify the two-step workflow the user is intended to follow:
+    # build companion grid, build weights, remap.
+    grid_lo = RectilinearGrid(CPU();
+        size = (4, 3),
+        x = (0.0, 4.0e3), y = (0.0, 3.0e3),
+        topology = (Bounded, Bounded, Flat))
+    grid_hi = refine_grid(grid_lo, 2)
+    w = GridScaleWeights(grid_lo, grid_hi)
+
+    src_lo = Float64.(reshape(1:12, 4, 3))
+    dst_hi = map_field_to_hi(src_lo, w)
+    back   = map_field_to_lo(dst_hi, w)
+    @test maximum(abs.(back .- src_lo)) < 1e-12
 end

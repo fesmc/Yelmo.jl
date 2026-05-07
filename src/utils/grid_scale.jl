@@ -28,11 +28,14 @@
 # an issue if needed.
 # ----------------------------------------------------------------------
 
-using Oceananigans.Grids: RectilinearGrid
+using Oceananigans.Grids: RectilinearGrid, topology, Flat, Bounded, Periodic
+using Oceananigans.Grids: xnodes, ynodes, znodes
+using Oceananigans: CPU, Face
 using Base.Threads: @threads
 
 export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
-       map_field_to_hi, map_field_to_hi!
+       map_field_to_hi, map_field_to_hi!,
+       refine_grid, coarsen_grid
 
 # ----------------------------------------------------------------------
 # Stencil helpers — explicit s×s block access patterns. Inlined so the
@@ -270,4 +273,88 @@ end
 function map_field_to_hi(src::AbstractArray{T,3}, w::GridScaleWeights) where T
     dst = Array{T,3}(undef, w.Nx_hi, w.Ny_hi, size(src, 3))
     return map_field_to_hi!(dst, src, w)
+end
+
+# ----------------------------------------------------------------------
+# Companion-grid construction
+# ----------------------------------------------------------------------
+
+# Build a `RectilinearGrid` matching `template` in physical extent +
+# x/y topology + z-axis discretisation, but with caller-supplied
+# horizontal (Nx, Ny) cell counts. Used by `refine_grid` / `coarsen_grid`.
+function _make_paired_grid(template::RectilinearGrid, Nx::Int, Ny::Int)
+    Tx, Ty, Tz = topology(template)
+
+    # Preserve physical extent. `Nx*dx` reconstruction is robust to
+    # both Bounded (face count Nx+1) and Periodic (face count Nx)
+    # storage conventions; relying on `xnodes(...)[end]` would give
+    # the wrong rightmost coordinate under Periodic.
+    dx = abs(Float64(template.Δxᶜᵃᵃ))
+    dy = abs(Float64(template.Δyᵃᶜᵃ))
+    Nx_t = size(template, 1)
+    Ny_t = size(template, 2)
+    xmin = Float64(xnodes(template, Face())[1])
+    ymin = Float64(ynodes(template, Face())[1])
+    xlims = (xmin, xmin + Nx_t * dx)
+    ylims = (ymin, ymin + Ny_t * dy)
+
+    if Tz === Flat
+        return RectilinearGrid(CPU();
+            size     = (Nx, Ny),
+            x        = xlims, y = ylims,
+            topology = (Tx, Ty, Tz))
+    else
+        # 3D: preserve the z face array exactly so vertical
+        # discretisation (Path B `[0; centers...; 1]` or otherwise) is
+        # transferred to the new grid without re-derivation.
+        Nz = size(template, 3)
+        z_face = collect(Float64, znodes(template, Face()))
+        return RectilinearGrid(CPU();
+            size     = (Nx, Ny, Nz),
+            x        = xlims, y = ylims, z = z_face,
+            topology = (Tx, Ty, Tz))
+    end
+end
+
+"""
+    refine_grid(grid_lo, s::Integer) -> grid_hi
+
+Build a high-resolution companion grid by subdividing each cell of
+`grid_lo` into an `s × s` block. The returned grid has size
+`(Nx_lo · s, Ny_lo · s)` and covers the same physical x / y extent
+with the same x / y topology and (for 3D inputs) the same z axis.
+
+Pairs with `GridScaleWeights(grid_lo, grid_hi)` and the
+`map_field_to_lo` / `map_field_to_hi` family. Validates that `s ≥ 1`.
+"""
+function refine_grid(grid_lo::RectilinearGrid, s::Integer)
+    s >= 1 || error("refine_grid: refinement factor s must be ≥ 1, got $s.")
+    Nx_lo = size(grid_lo, 1)
+    Ny_lo = size(grid_lo, 2)
+    return _make_paired_grid(grid_lo, Int(Nx_lo * s), Int(Ny_lo * s))
+end
+
+"""
+    coarsen_grid(grid_hi, s::Integer) -> grid_lo
+
+Build a low-resolution companion grid by combining each `s × s` block
+of `grid_hi` cells into a single cell. The returned grid has size
+`(Nx_hi ÷ s, Ny_hi ÷ s)` and covers the same physical x / y extent
+with the same x / y topology and (for 3D inputs) the same z axis.
+
+Validates that `s ≥ 1` and that `s` evenly divides BOTH `Nx_hi` and
+`Ny_hi` — otherwise the returned grid would not satisfy
+`GridScaleWeights`'s aligned-cell invariant.
+"""
+function coarsen_grid(grid_hi::RectilinearGrid, s::Integer)
+    s >= 1 || error("coarsen_grid: refinement factor s must be ≥ 1, got $s.")
+    Nx_hi = size(grid_hi, 1)
+    Ny_hi = size(grid_hi, 2)
+    Nx_hi % s == 0 ||
+        error("coarsen_grid: Nx_hi=$(Nx_hi) is not divisible by s=$(s); " *
+              "the returned lo grid would not align with the hi grid.")
+    Ny_hi % s == 0 ||
+        error("coarsen_grid: Ny_hi=$(Ny_hi) is not divisible by s=$(s); " *
+              "the returned lo grid would not align with the hi grid.")
+    return _make_paired_grid(grid_hi, Int(Nx_hi ÷ s), Int(Ny_hi ÷ s))
 end

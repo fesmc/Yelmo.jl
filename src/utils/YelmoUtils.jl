@@ -32,7 +32,8 @@ export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 export gen_map_filename, map_scrip_load, map_scrip_field, vec_stat
 export fill_weighted!, fill_nearest!, gaussian_filter!
 export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
-       map_field_to_hi, map_field_to_hi!
+       map_field_to_hi, map_field_to_hi!,
+       refine_grid, coarsen_grid
 
 include("tridiag.jl")
 include("topology.jl")
