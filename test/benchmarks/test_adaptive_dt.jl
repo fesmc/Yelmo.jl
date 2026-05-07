@@ -44,11 +44,11 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, yther
 # Same params as `test_mismip3d_stnd_lockstep.jl::_mismip3d_lockstep_params`,
 # but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC),
 # `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
-function _adaptive_params()
+function _adaptive_params(; pc_method::String = "FE-SBE")
     return YelmoModelParameters("mismip3d_stnd_adaptive";
         yelmo = yelmo_params(
             dt_method     = 2,
-            pc_method     = "HEUN",
+            pc_method     = pc_method,
             pc_controller = "PI42",
             pc_tol        = 5.0,        # rejection threshold (m/yr)
             pc_eps        = 1.0,        # controller floor
@@ -94,7 +94,7 @@ function _adaptive_params()
 end
 
 function _fixed_params()
-    p = _adaptive_params()
+    p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
     return YelmoModelParameters(p.name;
         yelmo  = yelmo_params(dt_method = 0),
@@ -116,7 +116,13 @@ function _build(b, p)
         H_int[i, j, 1] = (zb < b.z_bed_floor) ? 0.0 :
                                                  max(0.0, 1000.0 - 0.9 * zb)
     end
-    Yelmo.update_diagnostics!(y)
+    # Match `test_mismip3d_stnd.jl::_build`: run the Fortran-faithful
+    # init cycle (topo sync → analytic thermal init → mat → β-safety →
+    # initial SSA → final topo sync). Without `thrm_method = "robin"`,
+    # `T_prime_b` defaults to zero and `c_bed` collapses via thermal
+    # scaling, saturating SSA at the velocity clamp. Required since
+    # PR #66 added thermal init to the mismip3d-stnd benchmark.
+    init_state!(y, 0.0; thrm_method = "robin")
     return y
 end
 
@@ -155,9 +161,19 @@ end
 end
 
 
-@testset "Adaptive PC: MISMIP3D Stnd 500-yr trajectory" begin
+@testset "Adaptive PC: pc_method resolver dispatches all schemes" begin
+    @test Yelmo._resolve_pc_scheme("HEUN")   isa Yelmo.HEUN
+    @test Yelmo._resolve_pc_scheme("FE-SBE") isa Yelmo.FE_SBE
+    @test Yelmo._resolve_pc_scheme("AB-SAM") isa Yelmo.AB_SAM
+    @test_throws ErrorException Yelmo._resolve_pc_scheme("BOGUS")
+end
+
+
+for pc_method in ("FE-SBE", "HEUN", "AB-SAM")
+
+@testset "Adaptive PC ($pc_method): MISMIP3D Stnd 500-yr trajectory" begin
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
-    p_adaptive = _adaptive_params()
+    p_adaptive = _adaptive_params(; pc_method = pc_method)
     p_fixed    = _fixed_params()
 
     # Fixed-FE reference run.
@@ -220,7 +236,7 @@ end
 end
 
 
-@testset "Adaptive PC: rollback path actually fires on cliff IC" begin
+@testset "Adaptive PC ($pc_method): rollback path actually fires on cliff IC" begin
     # On the very first step from the MISMIP3D Stnd thicker IC, the
     # SSA solve produces an unphysically large velocity (clipped to
     # ssa_vel_max = 5000 m/yr). One full FE step at dt=1 dumps ~400m
@@ -228,7 +244,7 @@ end
     # should detect and reject. We validate that scratch.n_rejections
     # increments in the first few steps.
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
-    p = _adaptive_params()
+    p = _adaptive_params(; pc_method = pc_method)
     y = _build(b, p)
 
     # Take a single outer step (dt=1). The adaptive driver may
@@ -248,3 +264,5 @@ end
     @test scratch.n_rejections > 0 || (scratch.n_steps_taken > 1) ||
           (!isempty(scratch.dt_history) && minimum(scratch.dt_history) < 1.0)
 end
+
+end  # for pc_method

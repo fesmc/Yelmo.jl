@@ -67,7 +67,14 @@ Base.@kwdef struct YelmoParams
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    pc_method        ::String  = "AB-SAM"
+    # Fortran namelist default is "AB-SAM" (unimplemented); Yelmo.jl
+    # has "HEUN" and "FE-SBE". HEUN is the default because empirically
+    # it picks ~3× larger sub-step dt for the same `pc_tol` (FE-SBE's
+    # truncation-factor is 1/2 vs HEUN's 1/6, and FE-SBE's
+    # |H_corr − H_pred| has no Heun-style k1≈k2 cancellation). Use
+    # "FE-SBE" when nonlinear cascade kernels (LSF calving, finite
+    # `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n geometry.
+    pc_method        ::String  = "HEUN"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
