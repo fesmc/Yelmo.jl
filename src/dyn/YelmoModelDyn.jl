@@ -103,6 +103,11 @@ include("viscosity.jl")
 include("diagnostics.jl")
 include("velocity_sia.jl")
 include("velocity_ssa.jl")
+# Energy-functional alternative assembly (`SSASolver(method =
+# :energy_quadratic)`). Reuses helpers from velocity_ssa.jl —
+# `_push_coo!`, `_row_ux`, `_row_uy`, `_ssa_resolve_bcs`, the
+# topology constants, etc. — so must load AFTER it.
+include("velocity_ssa_energy.jl")
 # DIVA reuses helpers from velocity_ssa.jl — must load AFTER it.
 include("velocity_diva.jl")
 # Vertical velocity (uz, uz_star). Production routine `calc_uz_3D_jac!`

@@ -1680,9 +1680,20 @@ function calc_velocity_ssa!(y)
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_quadratic
-            error("calc_velocity_ssa!: method = :energy_quadratic not yet " *
-                  "implemented. Wired up in a follow-up commit; use " *
-                  "method = :residual (default) until then.")
+            _assemble_ssa_matrix_energy!(
+                sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                sc.ssa_b_vec, sc.ssa_nnz,
+                y.dyn.ux_b, y.dyn.uy_b,
+                y.dyn.beta_acx, y.dyn.beta_acy,
+                y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
+                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
+                y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+                y.dyn.taud_acx, y.dyn.taud_acy,
+                y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+                dx, dy, p_ydyn.beta_min;
+                boundaries = _ssa_boundaries_symbol(y),
+                lateral_bc = p_ydyn.ssa_lat_bc,
+            )
         elseif ssa.method === :energy_nonlinear
             error("calc_velocity_ssa!: method = :energy_nonlinear is reserved " *
                   "for the future fully-nonlinear energy-minimisation solver " *
