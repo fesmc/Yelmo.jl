@@ -13,7 +13,8 @@
 #   - `calc_calving_equil_ac!`     — `cr = -u_bar` (front-fixing)
 #   - `calc_calving_threshold_ac!` — ice-thickness threshold (Hc)
 #   - `calc_calving_vonmises_m16_ac!` — Morlighem et al. (2016)
-#     stress-based; not yet wired through `mat`, errors at call.
+#     stress-based, weight `max(0, tau_1/tau_ice)` from `mat`'s
+#     1st principal stress (`y.mat.strs2D_tau_eig_1`).
 #
 # `merge_calving_rates!` ports the merge / above-SL pin block from
 # `yelmo_topography.f90:744-782`.
@@ -121,21 +122,76 @@ end
         -> (cr_x, cr_y)
 
 Morlighem et al. (2016) von-Mises calving (port of
-`calc_calving_rate_vonmises_m16`):
+`calc_calving_rate_vonmises_m16` in
+`yelmo/src/physics/calving/calving_ac.f90:259-317`):
 
     cr_x = -u_bar · max(0, tau1_acx / tau_ice)
+    cr_y = -v_bar · max(0, tau1_acy / tau_ice)
 
-Requires the 1st principal stress `tau_1` from `mat`. Not yet wired
-in the Yelmo.jl port — calling this errors. Stub kept here so the
-dispatch in `calving_step!` can route to it once `mat` lands.
+`tau_1` is the 1st principal stress on aa-nodes, computed by
+`mat_step!` (`y.mat.strs2D_tau_eig_1`). Staggering to ac-faces uses
+the standard ice/ocean special case: at an ice→ocean border the
+ice-side value is taken; at an ocean→ice border the ice-side
+value (the +1 neighbour) is taken; otherwise the simple average
+of the two centres.
+
+`tau_ice` is the ice fracture strength (Pa). Per-axis weight
+`max(0, tau1/tau_ice)` reproduces the equil law (`cr = -u_bar`)
+when stress saturates at fracture strength, and pins the front
+(`cr = 0`) when `tau1 ≤ 0`.
 """
 function calc_calving_vonmises_m16_ac!(cr_x, cr_y,
                                        u_bar, v_bar,
                                        tau_1, f_ice,
                                        tau_ice::Real)
-    error("calc_calving_vonmises_m16_ac!: vm-m16 calving requires `mat` " *
-          "(1st principal stress `tau_1`), which is not yet ported. " *
-          "Use `calv_flt_method = \"threshold\"` or `\"equil\"`.")
+    tau_ice > 0 ||
+        error("calc_calving_vonmises_m16_ac!: tau_ice must be > 0 (got $tau_ice).")
+
+    Cx = interior(cr_x)
+    Cy = interior(cr_y)
+    Ux = interior(u_bar)
+    Uy = interior(v_bar)
+
+    fill_halo_regions!(tau_1)
+    fill_halo_regions!(f_ice)
+
+    # XFaceField: face `i` between centres `i-1` and `i`. We index
+    # `tau_1` / `f_ice` directly (not via `interior`) so the
+    # `i-1 = 0` border read goes through the halo, matching the
+    # threshold kernel above.
+    @inbounds for j in axes(Cx, 2), i in axes(Cx, 1)
+        T_l = tau_1[i - 1, j, 1]
+        T_r = tau_1[i,     j, 1]
+        F_l = f_ice[i - 1, j, 1]
+        F_r = f_ice[i,     j, 1]
+        tau1_acx = if F_l > 0.0 && F_r == 0.0
+            T_l                              # ice → ocean: pick ice
+        elseif F_l == 0.0 && F_r > 0.0
+            T_r                              # ocean → ice: pick ice
+        else
+            0.5 * (T_l + T_r)
+        end
+        wv = max(0.0, tau1_acx / tau_ice)
+        Cx[i, j, 1] = -Ux[i, j, 1] * wv
+    end
+
+    # YFaceField: face `j` between centres `j-1` and `j`.
+    @inbounds for j in axes(Cy, 2), i in axes(Cy, 1)
+        T_d = tau_1[i, j - 1, 1]
+        T_u = tau_1[i, j,     1]
+        F_d = f_ice[i, j - 1, 1]
+        F_u = f_ice[i, j,     1]
+        tau1_acy = if F_d > 0.0 && F_u == 0.0
+            T_d
+        elseif F_d == 0.0 && F_u > 0.0
+            T_u
+        else
+            0.5 * (T_d + T_u)
+        end
+        wv = max(0.0, tau1_acy / tau_ice)
+        Cy[i, j, 1] = -Uy[i, j, 1] * wv
+    end
+    return cr_x, cr_y
 end
 
 """

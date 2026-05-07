@@ -1385,6 +1385,49 @@ end
     @test_throws ErrorException calc_calving_threshold_ac!(crx, cry, u, v, H, F, 0.0)
 end
 
+@testset "tpo: calc_calving_vonmises_m16_ac!" begin
+    # Same i=2..3, j=2 ice block as the threshold test, but driven by
+    # the 1st principal stress instead of ice thickness. Pick
+    # `tau_1 = 1e5 Pa` over ice and `tau_ice = 2e5 Pa`, giving
+    # `wv = max(0, 1e5/2e5) = 0.5`, so `cr = -u_bar · 0.5 = -50`.
+    g = _calv_grid(5, 3)
+    F = CenterField(g); fill!(interior(F), 0.0)
+    T1 = CenterField(g); fill!(interior(T1), 0.0)
+    u = XFaceField(g); fill!(interior(u), 100.0)
+    v = YFaceField(g); fill!(interior(v),   0.0)
+    crx = XFaceField(g)
+    cry = YFaceField(g)
+
+    for i in 2:3, j in 2:2
+        interior(F)[i, j, 1]  = 1.0
+        interior(T1)[i, j, 1] = 1.0e5
+    end
+
+    calc_calving_vonmises_m16_ac!(crx, cry, u, v, T1, F, 2.0e5)
+    # Faces at j=2:
+    #   i=1: ocean/ocean,  T_acx=0,    wv=0,    cr=0
+    #   i=2: ocean→ice,    T_acx=1e5,  wv=0.5,  cr=-50 (ice-side stagger)
+    #   i=3: ice/ice,      T_acx=1e5,  wv=0.5,  cr=-50
+    #   i=4: ice→ocean,    T_acx=1e5,  wv=0.5,  cr=-50 (ice-side stagger)
+    #   i=5: ocean/ocean,  T_acx=0,    wv=0,    cr=0
+    #   i=6: ocean/(out),  T_acx=0,    wv=0,    cr=0
+    expected = [0.0, -50.0, -50.0, -50.0, 0.0, 0.0]
+    @test interior(crx)[:, 2, 1] ≈ expected atol = 1e-12
+
+    # Negative principal stress (compression) → wv clamped to 0 → cr = 0.
+    fill!(interior(T1), -1.0e5)
+    for i in 2:3, j in 2:2
+        interior(T1)[i, j, 1] = -1.0e5
+    end
+    calc_calving_vonmises_m16_ac!(crx, cry, u, v, T1, F, 2.0e5)
+    @test all(interior(crx) .== 0.0)
+    @test all(interior(cry) .== 0.0)
+
+    # tau_ice must be positive.
+    @test_throws ErrorException calc_calving_vonmises_m16_ac!(
+        crx, cry, u, v, T1, F, 0.0)
+end
+
 @testset "tpo: merge_calving_rates!" begin
     g = _calv_grid(4, 3)
     u = XFaceField(g); fill!(interior(u), 100.0)
@@ -1490,7 +1533,11 @@ end
 end
 
 @testset "tpo: calving_step! method dispatch" begin
-    # vm-m16 errors (mat not yet ported); unknown method also errors.
+    # vm-m16 now resolves at runtime (mat's `strs2D_tau_eig_1` is
+    # threaded through). With `tau_eig_1` explicitly zeroed and
+    # `topo_step!` called directly (so mat_step doesn't refresh
+    # tau_eig_1 between zeroing and the calving phase), vm-m16 must
+    # produce zero calving rate — the no-stress no-op path.
     p_vm = YelmoModelParameters("calv-vm";
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
@@ -1502,20 +1549,25 @@ end
                       p=p_vm, strict=false)
     lsf_init!(y_vm.tpo.lsf, y_vm.tpo.H_ice, y_vm.bnd.z_bed, y_vm.bnd.z_sl)
     fill!(interior(y_vm.bnd.smb_ref), 0.0)
-    @test_throws ErrorException Yelmo.step!(y_vm, 1.0)
+    fill!(interior(y_vm.mat.strs2D_tau_eig_1), 0.0)
+    Yelmo.topo_step!(y_vm, 1.0)
+    # tau_1 = 0 everywhere ⇒ wv = 0 ⇒ cr = 0 on every face.
+    @test all(interior(y_vm.tpo.cmb_flt_acx) .== 0.0)
+    @test all(interior(y_vm.tpo.cmb_flt_acy) .== 0.0)
 
-    p_bogus = YelmoModelParameters("calv-bogus";
-        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
-                             dmb_method=0, topo_rel=0),
-        ycalv = ycalv_params(use_lsf=true, calv_flt_method="bogus"),
-        ydyn  = ydyn_params(solver="fixed"),
-        ytherm = ytherm_params(method="fixed"),
-    )
-    y_b = YelmoModel(RESTART_PATH, 0.0; alias="calv-bogus",
-                    p=p_bogus, strict=false)
-    lsf_init!(y_b.tpo.lsf, y_b.tpo.H_ice, y_b.bnd.z_bed, y_b.bnd.z_sl)
-    fill!(interior(y_b.bnd.smb_ref), 0.0)
-    @test_throws ErrorException Yelmo.step!(y_b, 1.0)
+    # Unrecognised calving method now fails at parameter construction
+    # (use_lsf = true triggers the validator), not deep inside step!.
+    @test_throws ErrorException ycalv_params(use_lsf=true, calv_flt_method="bogus")
+
+    # Known-but-unported Fortran method (`vm-l19`) likewise errors at
+    # construction with a clear "not yet ported" message.
+    @test_throws ErrorException ycalv_params(use_lsf=true, calv_flt_method="vm-l19")
+
+    # When use_lsf = false the validator is dormant — the default
+    # `calv_flt_method = "vm-l19"` (Fortran default) must round-trip
+    # without error since calving never runs.
+    p_dormant = ycalv_params(use_lsf=false)
+    @test p_dormant.calv_flt_method == "vm-l19"
 end
 
 @testset "model: YelmoConstants plumbing" begin

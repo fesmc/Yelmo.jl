@@ -27,7 +27,7 @@ import ..YelmoCore: topo_step!
 
 export topo_step!, apply_mask_ice_pass!, advect_tracer!,
        advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!,
-       ImplicitAdvectionCache, init_advection_cache,
+       AdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
        solve_advection!,
        apply_tendency!, mbal_tendency!, resid_tendency!,

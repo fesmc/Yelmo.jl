@@ -17,11 +17,12 @@ using ..YelmoConst: YelmoConstants,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
 using ..YelmoModelPar: YelmoModelParameters
 using ..YelmoTiming: YelmoTimer, @timed_section
+using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
 export topo_step!, dyn_step!, mat_step!, therm_step!
-export load_grids_from_restart, load_fields_from_restart
+export load_grids_from_restart, load_grids_with_regrid, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids
 export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
@@ -439,6 +440,67 @@ abstract type AbstractYelmoModel end
 # ---------------------------------------------------------------------------
 # NetCDF restart loading
 # ---------------------------------------------------------------------------
+
+"""
+    load_grids_with_regrid(restart_file, target_grid_file; boundaries)
+        -> (grid2d, grid3d_ice, grid3d_rock)
+
+Variant of `load_grids_from_restart` for the regridding path: build
+the target horizontal grid from `target_grid_file` (typically a
+`<grid_name>_REGIONS.nc` or any NetCDF with `xc` / `yc` axes), and
+keep the vertical axes from `restart_file`. The returned `grid2d`
+has the target horizontal extent; the 3D grids share that extent
+plus the restart's vertical discretisation.
+
+This is the kw-driven entry-point for in-line restart regridding —
+`YelmoModel(restart_file, time; target_grid_file=...)` calls this
+when a target grid file is supplied.
+"""
+function load_grids_with_regrid(restart_file::AbstractString,
+                                target_grid_file::AbstractString;
+                                boundaries = :bounded)
+    # Horizontal coords from target.
+    ds_tgt = NCDataset(target_grid_file)
+    xc = Vector{Float64}(ds_tgt["xc"][:])
+    yc = Vector{Float64}(ds_tgt["yc"][:])
+    x_units = lowercase(strip(get(ds_tgt["xc"].attrib, "units", "")))
+    y_units = lowercase(strip(get(ds_tgt["yc"].attrib, "units", "")))
+    close(ds_tgt)
+    if x_units == "km"
+        xc .*= 1000.0
+    end
+    if y_units == "km"
+        yc .*= 1000.0
+    end
+
+    Nx = length(xc); Ny = length(yc)
+    dx = xc[2] - xc[1]; dy = yc[2] - yc[1]
+    xlims = (xc[1] - dx/2, xc[end] + dx/2)
+    ylims = (yc[1] - dy/2, yc[end] + dy/2)
+    Tx, Ty = resolve_boundaries(boundaries)
+
+    grid2d = RectilinearGrid(size = (Nx, Ny),
+                             x = xlims, y = ylims,
+                             topology = (Tx, Ty, Flat))
+
+    # Vertical from restart.
+    ds_src = NCDataset(restart_file)
+    grid3d_ice  = _build_3d_grid(ds_src, "zeta",      "zeta_ac",
+                                 Nx, Ny, xlims, ylims, Tx, Ty; path_b = true)
+    grid3d_rock = _build_3d_grid(ds_src, "zeta_rock", "zeta_rock_ac",
+                                 Nx, Ny, xlims, ylims, Tx, Ty; path_b = false)
+    close(ds_src)
+    return grid2d, grid3d_ice, grid3d_rock
+end
+
+# Read the `grid_name` global attribute from a NetCDF, returning
+# `nothing` if not present.
+function _read_grid_name_attr(filename::AbstractString)
+    NCDataset(filename) do ds
+        return haskey(ds.attrib, "grid_name") ?
+               String(ds.attrib["grid_name"]) : nothing
+    end
+end
 
 """
     load_grids_from_restart(filename) -> (grid2d, grid3d_ice, grid3d_rock)
@@ -871,13 +933,14 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # without per-cell branching in the kernel.
     haskey(tpo, :H_ice) && (tpo = merge(tpo, (H_ice = dirichlet_2d_field(g, 0.0),)))
 
-    # Implicit advection scratch (src/topo/advection.jl).
-    # `Ref{Any}` is filled lazily on the first
-    # `advect_tracer!(...; scheme=:upwind_implicit)` call with an
-    # `ImplicitAdvectionCache(grid)`. The concrete type lives in the
+    # Advection scratch (src/topo/advection.jl).
+    # `Ref{Any}` is filled lazily on the first `advect_tracer!` call
+    # with an `AdvectionCache(grid)`. The concrete type lives in the
     # later-included YelmoModelTopo module, so we mirror the
     # `pc_scratch` / `ssa_amg_cache` lazy pattern rather than
-    # eagerly typing it here.
+    # eagerly typing it here. The same cache serves both schemes:
+    # the implicit path uses the sparse operator + GMRES workspace,
+    # the explicit path uses the preallocated `tend` buffer.
     tpo_scratch = (adv_cache = Ref{Any}(nothing),)
     tpo = merge(tpo, (scratch = tpo_scratch,))
 
@@ -913,14 +976,42 @@ function YelmoModel(restart_file::String, time::Float64;
                     c::YelmoConstants = YelmoConstants(),
                     boundaries = :bounded,
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
-                    strict::Bool = true)
+                    strict::Bool = true,
+                    target_grid_file::Union{Nothing,AbstractString} = nothing,
+                    maps_dir::AbstractString = "maps",
+                    regrid_method::AbstractString = "con")
 
     if p === nothing
         @warn "No parameters supplied to YelmoModel; constructing YelmoModelParameters(\"$(alias)\") with defaults."
         p = YelmoModelParameters(alias)
     end
 
-    g, gt, gr = load_grids_from_restart(restart_file; boundaries=boundaries)
+    # Build grids: if a target_grid_file is provided, the model lives
+    # on the target horizontal grid (vertical axis from restart) and
+    # data is regridded on read via a SCRIP map.
+    mps = nothing
+    if target_grid_file !== nothing
+        src_grid_name = _read_grid_name_attr(restart_file)
+        dst_grid_name = _read_grid_name_attr(target_grid_file)
+        src_grid_name === nothing && error(
+            "YelmoModel(...; target_grid_file=...): restart file " *
+            "$(restart_file) has no `grid_name` global attribute; cannot " *
+            "construct SCRIP map filename.")
+        dst_grid_name === nothing && error(
+            "YelmoModel(...; target_grid_file=...): target grid file " *
+            "$(target_grid_file) has no `grid_name` global attribute.")
+        if src_grid_name == dst_grid_name
+            @warn "target_grid_file grid_name matches restart grid_name (\"$(src_grid_name)\"); skipping regrid."
+            g, gt, gr = load_grids_from_restart(restart_file; boundaries = boundaries)
+        else
+            g, gt, gr = load_grids_with_regrid(restart_file, target_grid_file;
+                                               boundaries = boundaries)
+            mps = map_scrip_load(src_grid_name, dst_grid_name, maps_dir;
+                                 method = regrid_method)
+        end
+    else
+        g, gt, gr = load_grids_from_restart(restart_file; boundaries = boundaries)
+    end
     gt === nothing && error("Restart file $(restart_file) has no ice vertical axis; cannot build ice grid.")
     gr === nothing && error("Restart file $(restart_file) has no rock vertical axis; cannot build rock grid.")
 
@@ -936,9 +1027,9 @@ function YelmoModel(restart_file::String, time::Float64;
     # post-load inference may overwrite based on `ice_allowed`.
     fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
 
-    load_state!(y, restart_file; groups=groups, strict=strict)
+    load_state!(y, restart_file; groups=groups, strict=strict, mps=mps)
 
-    _infer_mask_ice!(y, restart_file)
+    _infer_mask_ice!(y, restart_file; mps=mps)
 
     return y
 end
@@ -950,12 +1041,13 @@ end
 #    not-allowed → NONE. Read directly from the file so this works
 #    even when `:bnd` was not in the loaded `groups`.
 #  - Else leave the all-dynamic default established before load_state!.
-function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString)
+function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString;
+                          mps = nothing)
     NCDataset(restart_file) do ds
         haskey(ds, "mask_ice") && return  # already loaded
         haskey(ds, "ice_allowed") || return  # nothing to infer from
 
-        ia = _read_nc_2d(ds["ice_allowed"])
+        ia = _read_nc_2d_mps(ds["ice_allowed"], mps, "ice_allowed")
         mask_ice = interior(y.bnd.mask_ice)
         @inbounds for j in axes(mask_ice, 2), i in axes(mask_ice, 1)
             mask_ice[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
@@ -985,7 +1077,8 @@ by direct name as before.
 """
 function load_state!(y::YelmoModel, restart_file::AbstractString;
                      groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
-                     strict::Bool = true)
+                     strict::Bool = true,
+                     mps = nothing)
     ds = NCDataset(restart_file)
     try
         for gname in groups
@@ -1007,7 +1100,7 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                         continue
                     end
                     slab = get!(slab_cache, unified) do
-                        Array{Float64,3}(_read_nc_3d(ds[unified]))
+                        Array{Float64,3}(_read_nc_3d_mps(ds[unified], mps, unified))
                     end
                     _apply_path_b_slice!(group_nt[k], slab, path_b_slice_kind(meta.name))
                 else
@@ -1018,7 +1111,8 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                             "file $(restart_file). Pass `strict=false` to skip missing variables.")
                         continue
                     end
-                    _load_into_field!(group_nt[k], ds[name_str])
+                    _load_into_field!(group_nt[k], ds[name_str];
+                                      mps = mps, varname = name_str)
                 end
             end
         end
@@ -1173,6 +1267,49 @@ end
 _read_nc_2d(ncvar) = ndims(ncvar) == 2 ? ncvar[:, :]    : ncvar[:, :, 1]
 _read_nc_3d(ncvar) = ndims(ncvar) == 3 ? ncvar[:, :, :] : ncvar[:, :, :, 1]
 
+# Maybe-regrid wrappers. When `mps === nothing` they're identity.
+# When an mps Dict is supplied (constructed by `map_scrip_load`),
+# the raw NetCDF read is regridded onto the target grid via the
+# vendored `map_scrip_field` (`src/utils/scrip_map.jl`). NaN cells in
+# the regridded output (no source contribution) are replaced by
+# `nan_replacement` (default 0.0) so prognostic fields stay numerically
+# clean — boundary cells outside the source domain become zeros.
+@inline function _read_nc_2d_mps(ncvar, mps, varname::AbstractString;
+                                 nan_replacement::Float64 = 0.0)
+    raw = _read_nc_2d(ncvar)
+    mps === nothing && return raw
+    src = Float64.(raw)
+    _, dst = map_scrip_field(mps, varname, src)
+    @inbounds for i in eachindex(dst)
+        if isnan(dst[i])
+            dst[i] = nan_replacement
+        end
+    end
+    return dst
+end
+
+@inline function _read_nc_3d_mps(ncvar, mps, varname::AbstractString;
+                                 nan_replacement::Float64 = 0.0)
+    raw = _read_nc_3d(ncvar)
+    mps === nothing && return raw
+    src = Float64.(raw)
+    Nx_dst = mps["dst_grid_dims"][1]
+    Ny_dst = mps["dst_grid_dims"][2]
+    Nz     = size(src, 3)
+    dst = Array{Float64,3}(undef, Nx_dst, Ny_dst, Nz)
+    for k in 1:Nz
+        _, layer = map_scrip_field(mps, varname,
+                                                    @view src[:, :, k])
+        @inbounds for i in eachindex(layer)
+            if isnan(layer[i])
+                layer[i] = nan_replacement
+            end
+        end
+        dst[:, :, k] .= layer
+    end
+    return dst
+end
+
 @inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
 # Transitional Path B vertical-slice helper.
@@ -1200,7 +1337,8 @@ _read_nc_3d(ncvar) = ndims(ncvar) == 3 ? ncvar[:, :, :] : ncvar[:, :, :, 1]
     end
 end
 
-function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Face, Center}
+function _load_into_field!(field::Field{Face, Center, Center}, ncvar;
+                           mps = nothing, varname::AbstractString = "") where {Face, Center}
     # XFaceField loader. Interior shape depends on x-axis topology:
     #   - Bounded-x:  `(Nx+1, Ny[, Nz])` — Ny cells × (Nx+1) face slots.
     #     File slab x-dim may be either:
@@ -1217,7 +1355,7 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
     int = interior(field)
     Nx_int = size(int, 1)
     if _is_3d_field(int)
-        data_full = _read_nc_3d(ncvar)
+        data_full = _read_nc_3d_mps(ncvar, mps, varname)
         data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Tx === Bounded
             if size(data, 1) == Nx_int
@@ -1235,7 +1373,7 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
             error("_load_into_field!(XFaceField, 3D): unsupported x-topology $Tx")
         end
     else
-        data = _read_nc_2d(ncvar)
+        data = _read_nc_2d_mps(ncvar, mps, varname)
         if Tx === Bounded
             if size(data, 1) == Nx_int
                 int[:, :, 1] .= data
@@ -1255,7 +1393,8 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar) where {Fac
     return field
 end
 
-function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Face, Center}
+function _load_into_field!(field::Field{Center, Face, Center}, ncvar;
+                           mps = nothing, varname::AbstractString = "") where {Face, Center}
     # YFaceField loader. Symmetric to the XFaceField method above —
     # interior shape depends on y-axis topology:
     #   - Bounded-y:  `(Nx, Ny+1[, Nz])`. File slab y-dim may be
@@ -1268,7 +1407,7 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Fac
     int = interior(field)
     Ny_int = size(int, 2)
     if _is_3d_field(int)
-        data_full = _read_nc_3d(ncvar)
+        data_full = _read_nc_3d_mps(ncvar, mps, varname)
         data = _path_b_interior_slice_3d(data_full, size(int, 3))
         if Ty === Bounded
             if size(data, 2) == Ny_int
@@ -1286,7 +1425,7 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Fac
             error("_load_into_field!(YFaceField, 3D): unsupported y-topology $Ty")
         end
     else
-        data = _read_nc_2d(ncvar)
+        data = _read_nc_2d_mps(ncvar, mps, varname)
         if Ty === Bounded
             if size(data, 2) == Ny_int
                 int[:, :, 1] .= data
@@ -1306,10 +1445,11 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar) where {Fac
     return field
 end
 
-function _load_into_field!(field::Field{Center, Center, Face}, ncvar) where {Face, Center}
+function _load_into_field!(field::Field{Center, Center, Face}, ncvar;
+                           mps = nothing, varname::AbstractString = "") where {Face, Center}
     int = interior(field)
     if _is_3d_field(int)
-        data = _read_nc_3d(ncvar)
+        data = _read_nc_3d_mps(ncvar, mps, varname)
         nz_file  = size(data, 3)
         nz_field = size(int, 3)
         if nz_file == nz_field
@@ -1329,19 +1469,20 @@ function _load_into_field!(field::Field{Center, Center, Face}, ncvar) where {Fac
                   "(file=$nz_file, field=$nz_field).")
         end
     else
-        int[:, :, 1] .= _read_nc_2d(ncvar)
+        int[:, :, 1] .= _read_nc_2d_mps(ncvar, mps, varname)
     end
     return field
 end
 
-function _load_into_field!(field::Field{Center, Center, Center}, ncvar) where {Center}
+function _load_into_field!(field::Field{Center, Center, Center}, ncvar;
+                           mps = nothing, varname::AbstractString = "") where {Center}
     int = interior(field)
     if _is_3d_field(int)
-        data_full = _read_nc_3d(ncvar)
+        data_full = _read_nc_3d_mps(ncvar, mps, varname)
         data = _path_b_interior_slice_3d(data_full, size(int, 3))
         int[:, :, :] .= data
     else
-        int[:, :, 1] .= _read_nc_2d(ncvar)
+        int[:, :, 1] .= _read_nc_2d_mps(ncvar, mps, varname)
     end
     return field
 end

@@ -572,6 +572,29 @@ end
     @test maximum(abs.(Ux_hybrid)) > maximum(abs.(Ux_sia))
 end
 
+@testset "dyn_step! solver=\"diva-noslip\" — basal sliding zeroed" begin
+    # The "diva-noslip" solver string forces `no_slip = true` inside
+    # `calc_velocity_diva!`, regardless of the `y.p.ydyn.no_slip`
+    # parameter. The defining behaviour is `ux_b == uy_b == 0`
+    # everywhere after the call — DIVA's `calc_vel_basal_diva!` short-
+    # circuits sliding under no-slip. Mirrors Fortran
+    # `yelmo_dynamics.f90:477-480` where the solver name forces
+    # `no_slip = .TRUE.`.
+    Nx, Ny, Nz = 7, 3, 4
+    dx = 1000.0
+    y = _run_uniform_slab("diva-noslip"; Nx=Nx, Ny=Ny, dx=dx, Nz=Nz)
+
+    Uxb = interior(y.dyn.ux_b)
+    Uyb = interior(y.dyn.uy_b)
+    @test all(==(0.0), Uxb)
+    @test all(==(0.0), Uyb)
+
+    # `ux_bar / uy_bar` come from DIVA's depth-averaged matrix solve
+    # and should be non-zero on this driving-stress fixture (the
+    # no-slip flag zeros only basal sliding, not depth-averaged flow).
+    @test maximum(abs.(interior(y.dyn.ux_bar))) > 1e-12
+end
+
 # ======================================================================
 # Test set 5 — Schoof-slab convergence (numerical reference, monotone)
 # ======================================================================

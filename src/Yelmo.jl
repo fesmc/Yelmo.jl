@@ -20,6 +20,10 @@ include("topo/YelmoModelTopo.jl")
 include("dyn/YelmoModelDyn.jl")
 include("mat/YelmoModelMat.jl")
 include("thrm/YelmoModelThrm.jl")
+# Regions: regional aggregate diagnostics + per-region NetCDF time-series
+# I/O. Loaded AFTER all per-phase modules since `calc_region_diagnostics!`
+# reads from `tpo`, `dyn`, `mat`, `thrm`, and `bnd` simultaneously.
+include("regions/YelmoRegions.jl")
 # Adaptive timestepping (predictor-corrector): must be loaded AFTER
 # topo + dyn + mat + thrm modules since it calls `topo_step!`,
 # `mat_step!`, `dyn_step!`, `therm_step!`, and `update_diagnostics!`.
@@ -44,6 +48,7 @@ using .YelmoModelTopo
 using .YelmoModelDyn
 using .YelmoModelMat
 using .YelmoModelThrm
+using .YelmoRegions
 using .YelmoIO
 
 # Re-export the public API at the package level
@@ -69,6 +74,9 @@ export compare
 # YelmoUtils
 export solve_tridiag!
 export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
+export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
+       map_field_to_hi, map_field_to_hi!,
+       refine_grid, coarsen_grid
 
 # YelmoSolvers
 export Solver, SSASolver
@@ -100,7 +108,7 @@ export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 # YelmoModelTopo
 export topo_step!, advect_tracer!
 export advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!
-export ImplicitAdvectionCache, init_advection_cache,
+export AdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
        solve_advection!
 export apply_tendency!, mbal_tendency!, resid_tendency!, calc_f_ice!
@@ -182,5 +190,10 @@ export TimestepLog, init_timestep_log!, write_timestep_row!
 
 # Timing scaffold (timing.jl)
 export YelmoTimer, @timed_section, reset_timings!, print_timings
+
+# YelmoRegions
+export RegionDiagnostics, YelmoRegion, YelmoRegions
+export init_regions, add_region!, update_regions!, write_regions!
+export calc_region_diagnostics!
 
 end # module

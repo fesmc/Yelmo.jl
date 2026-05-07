@@ -54,6 +54,7 @@ using Krylov: bicgstab!
 using AlgebraicMultigrid: smoothed_aggregation, ruge_stuben, aspreconditioner,
                           GaussSeidel, Jacobi
 using NCDatasets: NCDataset, defDim, defVar
+using Base.Threads: @threads
 
 export set_ssa_masks!, _assemble_ssa_matrix!,
        _solve_ssa_linear!, calc_velocity_ssa!,
@@ -1205,17 +1206,25 @@ end
 function _picard_relax_visc_kernel!(V, Vnm1, rel::Float64)
     rm = 1.0 - rel
     Nx = size(V, 1); Ny = size(V, 2); Nz = size(V, 3)
-    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
-        v_prev = Vnm1[i, j, k]
-        v_now  = V[i, j, k]
-        # Guard against log(0): if either is zero, fall back to linear
-        # mixing (preserves the Fortran behavior where visc_min floor
-        # ensures positive values, but be defensive in case the caller
-        # passed an unfilled array on the first iteration).
-        if v_prev > 0.0 && v_now > 0.0
-            V[i, j, k] = exp(rm * log(v_prev) + rel * log(v_now))
-        else
-            V[i, j, k] = rm * v_prev + rel * v_now
+    # Each (i, j, k) writes to its own slot — no shared writes.
+    # `@threads` over the outermost (Nz) axis: viscosity arrays are
+    # vertically-3D so `Nz` is typically 11–41, comparable to the
+    # number of available cores. Inner (j, i) stay sequential per
+    # thread so the hot loop body keeps tight SIMD.
+    @threads for k in 1:Nz
+        @inbounds for j in 1:Ny, i in 1:Nx
+            v_prev = Vnm1[i, j, k]
+            v_now  = V[i, j, k]
+            # Guard against log(0): if either is zero, fall back to
+            # linear mixing (preserves the Fortran behavior where
+            # visc_min floor ensures positive values, but be defensive
+            # in case the caller passed an unfilled array on the
+            # first iteration).
+            if v_prev > 0.0 && v_now > 0.0
+                V[i, j, k] = exp(rm * log(v_prev) + rel * log(v_now))
+            else
+                V[i, j, k] = rm * v_prev + rel * v_now
+            end
         end
     end
     return nothing
@@ -1246,13 +1255,19 @@ end
 # heap-allocated `CartesianIndex{3}` per loop step on Oceananigans
 # `interior(...)` SubArrays.
 function _picard_relax_vel_kernel!(Ux, Uy, Uxnm1, Uynm1, rel::Float64)
+    # Velocity arrays are 2D-flavored (Nz=1) so thread on the
+    # row axis `j`, not on `k`.
     Nxx, Nxy, Nxz = size(Ux, 1), size(Ux, 2), size(Ux, 3)
-    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
-        Ux[i, j, k] = Uxnm1[i, j, k] + rel * (Ux[i, j, k] - Uxnm1[i, j, k])
+    @threads for j in 1:Nxy
+        @inbounds for k in 1:Nxz, i in 1:Nxx
+            Ux[i, j, k] = Uxnm1[i, j, k] + rel * (Ux[i, j, k] - Uxnm1[i, j, k])
+        end
     end
     Nyx, Nyy, Nyz = size(Uy, 1), size(Uy, 2), size(Uy, 3)
-    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
-        Uy[i, j, k] = Uynm1[i, j, k] + rel * (Uy[i, j, k] - Uynm1[i, j, k])
+    @threads for j in 1:Nyy
+        @inbounds for k in 1:Nyz, i in 1:Nyx
+            Uy[i, j, k] = Uynm1[i, j, k] + rel * (Uy[i, j, k] - Uynm1[i, j, k])
+        end
     end
     return nothing
 end
@@ -1383,21 +1398,26 @@ function set_inactive_margins!(ux_b, uy_b, f_ice)
     Tx_top = topology(ux_b.grid, 1)
     Ty_top = topology(uy_b.grid, 2)
 
-    @inbounds for j in 1:Ny, i in 1:Nx
-        ip1 = i == Nx ? (Tx_top === Periodic ? 1 : Nx) : i + 1
-        jp1 = j == Ny ? (Ty_top === Periodic ? 1 : Ny) : j + 1
-        ip1f = _ip1_modular(i, Nx, Tx_top)
-        jp1f = _jp1_modular(j, Ny, Ty_top)
+    # Each cell (i, j) writes only to its own +1 face slot,
+    # `Ux[ip1f, j]` and `Uy[i, jp1f]`. Different cells map to
+    # different slots, so threading on `j` is race-free.
+    @threads for j in 1:Ny
+        @inbounds for i in 1:Nx
+            ip1 = i == Nx ? (Tx_top === Periodic ? 1 : Nx) : i + 1
+            jp1 = j == Ny ? (Ty_top === Periodic ? 1 : Ny) : j + 1
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
 
-        # x-face between (i, j) and (ip1, j): at slot [ip1f, j].
-        if (Fi[i, j, 1] < 1.0 && Fi[ip1, j, 1] == 0.0) ||
-           (Fi[i, j, 1] == 0.0 && Fi[ip1, j, 1] < 1.0)
-            Ux[ip1f, j, 1] = 0.0
-        end
-        # y-face between (i, j) and (i, jp1): at slot [i, jp1f].
-        if (Fi[i, j, 1] < 1.0 && Fi[i, jp1, 1] == 0.0) ||
-           (Fi[i, j, 1] == 0.0 && Fi[i, jp1, 1] < 1.0)
-            Uy[i, jp1f, 1] = 0.0
+            # x-face between (i, j) and (ip1, j): at slot [ip1f, j].
+            if (Fi[i, j, 1] < 1.0 && Fi[ip1, j, 1] == 0.0) ||
+               (Fi[i, j, 1] == 0.0 && Fi[ip1, j, 1] < 1.0)
+                Ux[ip1f, j, 1] = 0.0
+            end
+            # y-face between (i, j) and (i, jp1): at slot [i, jp1f].
+            if (Fi[i, j, 1] < 1.0 && Fi[i, jp1, 1] == 0.0) ||
+               (Fi[i, j, 1] == 0.0 && Fi[i, jp1, 1] < 1.0)
+                Uy[i, jp1f, 1] = 0.0
+            end
         end
     end
     return ux_b, uy_b
@@ -1418,15 +1438,22 @@ function calc_basal_stress!(taub_acx, taub_acy, beta_acx, beta_acy, ux_b, uy_b)
     Ux = interior(ux_b)
     Uy = interior(uy_b)
     tol = 1e-5
+    # Pure per-cell: write to `Tx[i, j, k]` only. Thread on `j`
+    # (the row axis is typically large enough; the velocity arrays
+    # are 2D so threading on `k` would give Nz=1 task).
     Nxx, Nxy, Nxz = size(Tx, 1), size(Tx, 2), size(Tx, 3)
-    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
-        v = Bx[i, j, k] * Ux[i, j, k]
-        Tx[i, j, k] = abs(v) < tol ? 0.0 : v
+    @threads for j in 1:Nxy
+        @inbounds for k in 1:Nxz, i in 1:Nxx
+            v = Bx[i, j, k] * Ux[i, j, k]
+            Tx[i, j, k] = abs(v) < tol ? 0.0 : v
+        end
     end
     Nyx, Nyy, Nyz = size(Ty, 1), size(Ty, 2), size(Ty, 3)
-    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
-        v = By[i, j, k] * Uy[i, j, k]
-        Ty[i, j, k] = abs(v) < tol ? 0.0 : v
+    @threads for j in 1:Nyy
+        @inbounds for k in 1:Nyz, i in 1:Nyx
+            v = By[i, j, k] * Uy[i, j, k]
+            Ty[i, j, k] = abs(v) < tol ? 0.0 : v
+        end
     end
     return taub_acx, taub_acy
 end

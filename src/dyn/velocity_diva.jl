@@ -442,12 +442,17 @@ end
 # ======================================================================
 
 """
-    calc_velocity_diva!(y) -> y
+    calc_velocity_diva!(y; no_slip = nothing) -> y
 
 Top-level DIVA driver. Iterates the SSA-like 2D depth-integrated
 momentum balance with depth-integrated effective friction `beta_eff`
 until the depth-averaged velocity converges, then reconstructs the
 3D horizontal velocity field via the F1 closed-form integral.
+
+`no_slip` overrides the no-slip flag for this call. When `nothing`
+(default) the value is taken from `y.p.ydyn.no_slip`. The `dyn_step!`
+dispatch passes `no_slip = true` for the `"diva-noslip"` solver
+keyword (mirroring Fortran's `yelmo_dynamics.f90:477-480`).
 
 Picard outer loop mirrors `calc_velocity_ssa!` step-for-step; the
 only differences vs SSA are:
@@ -467,7 +472,7 @@ only differences vs SSA are:
 
 Port of Fortran `velocity_diva.f90:69-412 calc_velocity_diva`.
 """
-function calc_velocity_diva!(y)
+function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
     p_ydyn = y.p.ydyn
     p_ymat = y.p.ymat
     ssa    = p_ydyn.ssa_solver
@@ -482,7 +487,7 @@ function calc_velocity_diva!(y)
     dy = abs(Float64(dy_g isa Number ? dy_g : error("calc_velocity_diva!: stretched y-grid not supported.")))
 
     sc = y.dyn.scratch
-    no_slip = p_ydyn.no_slip
+    no_slip = no_slip === nothing ? p_ydyn.no_slip : no_slip
 
     # Step 1 — SSA masks.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,

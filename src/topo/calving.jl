@@ -20,9 +20,10 @@
 #   12. `dlsfdt = (lsf - lsf_n) / dt`.
 #
 # Dispatch covers four laws: `"none"`/`"zero"`, `"equil"`,
-# `"threshold"`, and `"vm-m16"`. The last errors at call time because
-# it needs `mat`'s 1st principal stress, not yet ported. The aa-form
-# (vertical mb) calving path from Fortran is not ported.
+# `"threshold"`, and `"vm-m16"`. `"vm-m16"` reads the 1st principal
+# stress from `y.mat.strs2D_tau_eig_1` (computed by `mat_step!` from
+# the previous step's velocity / viscosity). The aa-form (vertical
+# mb) calving path from Fortran is not ported.
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
@@ -42,7 +43,7 @@ end
 
 # Dispatch table for one direction (floating or grounded).
 function _dispatch_calving!(cr_x, cr_y, method::AbstractString,
-                            u_bar, v_bar, H_ice, f_ice,
+                            u_bar, v_bar, H_ice, f_ice, tau_1,
                             Hc::Real, tau_ice::Real,
                             tag::AbstractString)
     fill!(interior(cr_x), 0.0)
@@ -55,8 +56,11 @@ function _dispatch_calving!(cr_x, cr_y, method::AbstractString,
         return calc_calving_threshold_ac!(cr_x, cr_y, u_bar, v_bar,
                                           H_ice, f_ice, Hc)
     elseif method == "vm-m16"
+        tau_1 === nothing && error(
+            "calving_step!: $tag = \"vm-m16\" requires the 1st " *
+            "principal stress field `tau_1` (`y.mat.strs2D_tau_eig_1`).")
         return calc_calving_vonmises_m16_ac!(cr_x, cr_y, u_bar, v_bar,
-                                             nothing, f_ice, tau_ice)
+                                             tau_1, f_ice, tau_ice)
     else
         error("calving_step!: unknown $tag = \"$method\". " *
               "Supported: \"none\"/\"zero\", \"equil\", \"threshold\", \"vm-m16\".")
@@ -96,17 +100,19 @@ function calving_step!(y::YelmoModel, dt::Float64)
                                   f_grnd_acx = y.tpo.f_grnd_acx,
                                   f_grnd_acy = y.tpo.f_grnd_acy)
 
-    # 3 + 4. Per-direction calving rates.
+    # 3 + 4. Per-direction calving rates. The vm-m16 law consumes
+    # `mat.strs2D_tau_eig_1` (1st principal stress, refreshed by the
+    # previous `mat_step!`); other laws ignore the argument.
     _dispatch_calving!(y.tpo.cmb_flt_acx,  y.tpo.cmb_flt_acy,
                        y.p.ycalv.calv_flt_method,
                        y.dyn.ux_bar, y.dyn.uy_bar,
-                       y.tpo.H_ice, y.tpo.f_ice,
+                       y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
                        y.p.ycalv.Hc_ref_flt, y.p.ycalv.tau_ice,
                        "calv_flt_method")
     _dispatch_calving!(y.tpo.cmb_grnd_acx, y.tpo.cmb_grnd_acy,
                        y.p.ycalv.calv_grnd_method,
                        y.dyn.ux_bar, y.dyn.uy_bar,
-                       y.tpo.H_ice, y.tpo.f_ice,
+                       y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
                        y.p.ycalv.Hc_ref_grnd, y.p.ycalv.tau_ice,
                        "calv_grnd_method")
 
