@@ -35,16 +35,29 @@
 #   - Dirichlet (mask = 0, mask = -1, no-slip edges): κ-penalty.
 #     Add  ½κ(u - u_BC)² · dx·dy  to E.
 #     Contributes  K[row,row] += κ·dx·dy, b[row] += κ·u_BC·dx·dy.
-#     With κ ≫ max|K_inner_diag|, this enforces u → u_BC.
 #
-#   - Calving front (mask = 3): NOT YET IMPLEMENTED — errors out at
-#     the row dispatch. Textbook is to drop the membrane/shear
-#     contributions that span the absent neighbour and add the
-#     boundary-work term `+T_front · dy` to b. Lands in a follow-up.
+#   - Free-slip edges: symmetric κ-penalty on `u_n - u_{n-1} = 0`.
+#     Adds the four-entry quartet
+#       K[edge, edge]   += +κ·dx·dy   K[inner, edge]  += -κ·dx·dy
+#       K[edge, inner]  += -κ·dx·dy   K[inner, inner] += +κ·dx·dy
+#     The `[inner, *]` pair is appended as extra COO triplets at the
+#     boundary cell's iteration; the CSC builder sums them with the
+#     inner row's stencil entries. Keeps K symmetric → CG-compatible.
 #
-#   - Free-slip edges: NOT YET IMPLEMENTED — errors out. Textbook is a
-#     symmetry constraint via Lagrange multiplier or κ-penalty on
-#     `u_n - u_n-1 = 0`. Lands in a follow-up.
+#   - Calving front (mask = 3): textbook energy form — keep the
+#     regular inner stencil (membrane / shear / drag / drive), and
+#     append the boundary-work term `+T_front · dy` (u-row) or
+#     `+T_front · dx` (v-row) to b. The membrane / shear ηH
+#     contributions on the ice-free side vanish naturally because
+#     `calc_visc_eff_int!` and `stagger_visc_aa_ab!` zero `Naa` /
+#     `Nab` at ice-free cells. This is the formulation derived in
+#     `IceSheetStencils.jl/examples/energy_functional_demo.jl` —
+#     symmetric, SPD-compatible, and physically correct in the
+#     continuum limit. NOTE: differs from the strong-form residual
+#     assembly's one-sided FD discretisation at calving fronts;
+#     velocities at calving-front cells will not match `:residual`
+#     byte-for-byte. Validation against analytical CalvingMIP /
+#     reference solutions is a separate task.
 #
 # Threading / GPU notes:
 #
@@ -302,14 +315,18 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
                       "top edge not supported for method = :energy_quadratic.")
             end
 
-        elseif ssa_mask_x == 3
-            error("_assemble_ssa_matrix_energy!: calving-front rows " *
-                  "(ssa_mask_acx == 3) not yet implemented for method = " *
-                  ":energy_quadratic. Use method = :residual until the " *
-                  "boundary-work term lands.")
-
         else
             # === Inner-stencil u-row (energy form) ===
+            #
+            # Handles both regular interior cells (`ssa_mask_x ∈
+            # {1, 2}`) and calving-front rows (`ssa_mask_x == 3`).
+            # For mask = 3 the membrane / shear ηH contributions to
+            # the ice-free side vanish naturally because
+            # `calc_visc_eff_int!` and `stagger_visc_aa_ab!` zero
+            # `Naa` / `Nab` at ice-free cells. The boundary-work
+            # term `+T_front·dy` is appended to b after the stencil.
+            # See file-level header for the textbook derivation
+            # (`E_front = -u₀·T_front·dy`).
             #
             # Patch-local viscosity + thickness products (`Naa` is η·H̄
             # at aa-cells; `Nab` is the corner-staggered η·H̄ from
@@ -377,6 +394,22 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
             # the existing residual assembly's `b = taud_acx` after the
             # K = -A·dx·dy / b = -b·dx·dy transformation).
             b_vec[nr] = -Tdx[ip1f_i, j, 1] * s_dx_dy
+
+            # Calving-front boundary work: when ssa_mask_x == 3 the
+            # u-face sits at an ice/ocean interface. The textbook
+            # energy form adds `E_front = -u₀·T_front·dy` to the
+            # discrete energy; its gradient at u=0 contributes
+            # `+T_front·dy` to b. Yelmo precomputes T_front (depth-
+            # integrated lateral BC stress) into `taul_int_acx`, with
+            # the sign convention used by the strong-form residual
+            # row (`b_residual = Tlx`). The energy mirror of that is
+            # `+Tlx·dy` (consistent with the inner-stencil sign
+            # transformation `b_energy = -b_residual·dx·dy` taken at
+            # the boundary scale `·dy`, NOT `·dx·dy`, since boundary
+            # work integrates over edge length only).
+            if ssa_mask_x == 3
+                b_vec[nr] += Tlx[ip1f_i, j, 1] * dy
+            end
         end
 
         # ===========================================================
@@ -458,13 +491,10 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
                       "right edge not supported (v-row).")
             end
 
-        elseif ssa_mask_y == 3
-            error("_assemble_ssa_matrix_energy!: calving-front rows " *
-                  "(ssa_mask_acy == 3) not yet implemented for method = " *
-                  ":energy_quadratic.")
-
         else
             # === Inner-stencil v-row (energy form, mirror of u-row) ===
+            # Handles regular interior cells AND mask = 3; the boundary-
+            # work term is appended below.
             #
             # ηH_S_cell = Naa[i, j, 1]         (cell south of v-face)
             # ηH_N_cell = Naa[i, jp1, 1]       (cell north of v-face)
@@ -529,6 +559,13 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
                                -2.0 * ηH_Nc - ηH_Ec)
 
             b_vec[nr] = -Tdy[i, jp1f_j, 1] * s_dx_dy
+
+            # Calving-front boundary work for the v-component (see
+            # u-row counterpart). Boundary length = `dx` here since
+            # the v-face's lateral edge has length `dx`.
+            if ssa_mask_y == 3
+                b_vec[nr] += Tly[i, jp1f_j, 1] * dx
+            end
         end
     end
 
