@@ -116,7 +116,13 @@ function _build(b, p)
         H_int[i, j, 1] = (zb < b.z_bed_floor) ? 0.0 :
                                                  max(0.0, 1000.0 - 0.9 * zb)
     end
-    Yelmo.update_diagnostics!(y)
+    # Match `test_mismip3d_stnd.jl::_build`: run the Fortran-faithful
+    # init cycle (topo sync → analytic thermal init → mat → β-safety →
+    # initial SSA → final topo sync). Without `thrm_method = "robin"`,
+    # `T_prime_b` defaults to zero and `c_bed` collapses via thermal
+    # scaling, saturating SSA at the velocity clamp. Required since
+    # PR #66 added thermal init to the mismip3d-stnd benchmark.
+    init_state!(y, 0.0; thrm_method = "robin")
     return y
 end
 
@@ -155,12 +161,10 @@ end
 end
 
 
-@testset "Adaptive PC: default pc_method is FE-SBE when dt_method = 2" begin
-    p = _adaptive_params()  # no explicit pc_method override
-    @test p.yelmo.pc_method == "FE-SBE"
-    # And the resolver returns the right scheme.
-    scheme = Yelmo._resolve_pc_scheme(p.yelmo.pc_method)
-    @test scheme isa Yelmo.FE_SBE
+@testset "Adaptive PC: pc_method resolver dispatches both schemes" begin
+    @test Yelmo._resolve_pc_scheme("HEUN")   isa Yelmo.HEUN
+    @test Yelmo._resolve_pc_scheme("FE-SBE") isa Yelmo.FE_SBE
+    @test_throws ErrorException Yelmo._resolve_pc_scheme("AB-SAM")
 end
 
 

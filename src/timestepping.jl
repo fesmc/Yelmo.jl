@@ -6,7 +6,7 @@
 #
 #   - `dt_method`     : 0 = fixed forward Euler (default),
 #                       2 = adaptive predictor-corrector.
-#   - `pc_method`     : "FE-SBE" (default), "HEUN", "AB-SAM" (stub).
+#   - `pc_method`     : "HEUN" (default), "FE-SBE", "AB-SAM" (stub).
 #   - `pc_controller` : "PI42" (this PR), other Söderlind variants future.
 #   - `pc_tol`        : rejection threshold on truncation-error proxy
 #                       `eta` (m/yr).
@@ -19,8 +19,8 @@
 #
 # Architecture:
 #
-#   - `PCScheme`      : abstract type. Concrete: `HEUN`, `FE_SBE`
-#                       (default); `AB_SAM` is a stub.
+#   - `PCScheme`      : abstract type. Concrete: `HEUN` (default),
+#                       `FE_SBE`; `AB_SAM` is a stub.
 #   - `PIController`  : abstract type. Concrete: `PI42`; further
 #                       controllers (H312b, H321PID, …) plug in via
 #                       methods on `_dt_ratio`.
@@ -103,9 +103,11 @@ those kernels (see `test_mismip3d_stnd*.jl` etc.), so this is benign
 for the current test suite.
 
 For configurations with active LSF calving, finite `H_min_flt` /
-`H_min_grnd`, or `topo_rel != 0`, prefer `FE_SBE` (the default),
-which uses the Fortran-style "both stages start from `H_n`" pattern
-where the topo cascade only sees `H_n`'s geometry.
+`H_min_grnd`, or `topo_rel != 0`, consider `FE_SBE`, which uses the
+"both stages start from `H_n`" pattern where the topo cascade only
+sees `H_n`'s geometry. (HEUN is the default because it's
+substantially faster wall-clock; see the FE_SBE docstring's
+performance note.)
 """
 struct HEUN <: PCScheme end
 
@@ -113,24 +115,36 @@ struct HEUN <: PCScheme end
     FE_SBE
 
 Forward Euler predictor + Semi-implicit Backward Euler corrector.
-Default `pc_method`. Faithful Fortran-style PC pattern matching
-`yelmo_ice.f90:138-377`:
 
-  - Predictor: full topo cascade from `H_n` advected by `u_n`,
-    yielding `H_pred`.
-  - SSA solve at `H_pred`, yielding `u_pred`.
-  - Corrector: full topo cascade **from `H_n` again**, but advected
-    by `u_pred`. Yields `H_corr`.
-  - `mat_step!` + `therm_step!` run once afterward at the corrector
-    state (matching Fortran's outer-loop ordering — these are not
-    part of the PC iteration).
+Two-stage scheme structurally similar to `HEUN` (both run two FE
+cycles per attempt), but with the architectural distinction that
+the corrector's full topo cascade starts from `H_n`'s geometry, not
+`H_pred`'s:
 
-Both topo passes start from `H_n`, so calving / `resid_tendency!` /
-mass-balance kernels only ever see `H_n`'s geometry — the corrector
-result is consistent with the cascade's nonlinear behaviour at
-`H_n`. Cost: **1 SSA solve per attempt** (vs `HEUN`'s 2). Velocity
-carried forward is `u_pred` (the post-predictor SSA solution),
-matching Fortran's pattern.
+  - Predictor: `_step_fe!(y, dt)` from `y_n` → `(H_pred, u_pred, …)`.
+  - `restore_H_only!`: roll `H_ice` and `time` back to `y_n`; keep
+    velocity (= `u_pred`) and other state untouched.
+  - Corrector: `_step_fe!(y, dt)` from `(H_n, u_pred, …)`. The
+    embedded `topo_step!` advects `H_n` by `u_pred`; the embedded
+    `dyn_step!` resolves SSA at `H_corr`.
+
+Cost: **2 SSA solves per attempt** (same as `HEUN`). The benefit
+over `HEUN` is correctness for nonlinear cascade kernels (calving
+thresholds, `H_min_*` cleanup, level-set front events) — these only
+ever see `H_n`'s geometry under FE-SBE.
+
+**Performance note.** Empirically `FE_SBE` is significantly slower
+wall-clock than `HEUN` on smooth-flow benchmarks at the same
+`pc_tol`. Two compounding effects: (a) the truncation-factor is
+`1/2` vs `HEUN`'s `1/6`, so the controller picks ~3× smaller dt
+for the same `|H_corr − H_pred|`; (b) `FE_SBE`'s
+`|H_corr − H_pred|` is structurally larger because it lacks the
+Heun-style `k1 ≈ k2` cancellation. As a result `HEUN` is the
+default; reach for `FE_SBE` when nonlinear cascade kernels are
+active and the geometric correctness matters more than wall time.
+
+Velocity carried forward is `u_corr` (the post-corrector SSA
+solution).
 
 Truncation-error proxy: `tau = 1/(2·dt) · (H_corr − H_pred)`
 matching Fortran `yelmo_timesteps.f90:329`.
@@ -418,28 +432,32 @@ end
 """
     pc_step!(::FE_SBE, y, dt, scratch) -> eta::Float64
 
-Faithful Fortran-style FE-SBE predictor-corrector. Both predictor
-and corrector topo cascades operate on `H_n`'s geometry; only the
-advection velocity differs.
+FE-SBE predictor-corrector — both topo cascades operate on `H_n`'s
+geometry; only the advection velocity differs.
 
-Sequence (matches `yelmo_ice.f90:138-377` outer-loop body):
+Sequence:
 
-  1. **Predictor**: `topo_step!(y, dt)` — full topo cascade from
-     `H_n` advected by `u_n` (the velocity present in `y.dyn` at
-     attempt start, snapshotted in `scratch.snap`). Result: `H_pred`.
-  2. **Velocity update**: `dyn_step!(y, dt)` — solve SSA at `H_pred`,
-     yielding `u_pred` (1 SSA solve per attempt vs `HEUN`'s 2).
-  3. **Restore H, keep velocity**: `restore_H_only!(y, snap)` puts
-     `H_ice` back to `H_n` and resets `time`, but leaves
-     `y.dyn.ux_bar = u_pred`.
-  4. **Corrector**: `topo_step!(y, dt)` — same topo cascade run again
-     from `H_n`, now advected by `u_pred`. Result: `H_corr`.
-  5. **Material + thermal**: `mat_step!` + `therm_step!` once at the
-     corrector state. These are *not* part of the PC iteration in
-     Fortran — they run after the topo+dyn outer-loop body.
+  1. **Predictor**: `_step_fe!(y, dt)` — full FE cycle (topo + dyn +
+     mat + therm) from `y_n`. Result: `(H_pred, u_pred, mat_pred,
+     therm_pred)`. Save `H_pred`.
+  2. **Restore H, keep state**: `restore_H_only!(y, snap)` rolls
+     `H_ice` and `time` back to `y_n`, but leaves the velocity, mat,
+     and therm fields untouched (so the corrector advects with
+     `u_pred` and uses `mat_pred` for SSA viscosity).
+  3. **Corrector**: `_step_fe!(y, dt)` — full FE cycle from
+     `(H_n, u_pred, mat_pred, …)`. Inside, `topo_step!` advects
+     `H_n` by `u_pred`, then `dyn_step!` resolves SSA at `H_corr`
+     giving `u_corr`, then mat/therm refresh.
 
-Velocity carried forward to the next outer step is `u_pred`, matching
-Fortran's "carry the predictor-state velocity" behaviour.
+Cost: **2 SSA solves per attempt** (same as `HEUN`). The
+architectural distinction vs `HEUN` is that the corrector's full
+topo cascade — calving, `resid_tendency!`, mass-balance kernels —
+operates on `H_n`'s geometry, not `H_pred`'s. This matters for
+configurations with active LSF calving, finite `H_min_*`, or
+`topo_rel != 0`.
+
+Velocity carried forward to the next outer step is `u_corr` (the
+post-corrector SSA solution at `H_corr`).
 
 Truncation-error proxy: `tau = 1/(2·dt) · |H_corr − H_pred|`,
 matching Fortran `yelmo_timesteps.f90:329`.
@@ -447,36 +465,26 @@ matching Fortran `yelmo_timesteps.f90:329`.
 function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
 
-    # Stage 1 — predictor topo cascade with the snapshotted velocity.
-    # `y.dyn.ux_bar` already holds `u_n` at this point because the
-    # outer driver snapshotted into `scratch.snap` immediately before
-    # calling us, and nothing has touched `y.dyn` since.
-    @timed_section y :pc_predictor Yelmo.topo_step!(y, dt)
+    # Stage 1 — predictor: full FE cycle from y_n.
+    # y is now at (H_pred, u_pred, mat_pred, therm_pred).
+    @timed_section y :pc_predictor _step_fe!(y, dt)
     copyto!(scratch.H_pred, interior(y.tpo.H_ice))
 
-    # Stage 2 — solve SSA at `H_pred` to get `u_pred`. Updates
-    # `y.dyn.ux_bar` / `y.dyn.uy_bar` (and `_b` versions) in place.
-    @timed_section y :dyn Yelmo.dyn_step!(y, dt)
-
-    # Stage 3 — restore `H_ice` and `time` to `y_n`, keeping the
-    # post-Stage-2 velocity `u_pred` in `y.dyn`. `update_diagnostics!`
-    # (called inside `restore_H_only!`) refreshes `f_grnd`, `H_grnd`,
-    # `z_srf`, mask fields, etc. from `H_n`.
+    # Stage 2 — restore H_ice + time to y_n; keep u_pred (and
+    # mat_pred, therm_pred) in place. `update_diagnostics!` (called
+    # inside `restore_H_only!`) refreshes f_grnd, H_grnd, z_srf, mask
+    # fields, etc. from H_n.
     restore_H_only!(y, snap)
 
-    # Stage 4 — corrector topo cascade from `H_n` advected by `u_pred`.
-    # `topo_step!` reads `y.dyn.ux_bar` / `y.dyn.uy_bar` by default,
-    # which now hold `u_pred`. The full cascade (calving, mass balance,
-    # `resid_tendency!`, …) sees `H_n`'s geometry — the key difference
-    # vs `HEUN`-via-2-FE.
-    @timed_section y :pc_corrector Yelmo.topo_step!(y, dt)
-    # `y` is now at `(H_corr, u_pred, t_n + dt)`.
-
-    # Stage 5 — material + thermal once at the corrector state. Not
-    # part of the PC iteration in Fortran (yelmo_ice.f90 outer loop
-    # ordering: topo+dyn iterate, mat/therm follow once).
-    @timed_section y :mat  Yelmo.mat_step!(y, dt)
-    @timed_section y :thrm Yelmo.therm_step!(y, dt)
+    # Stage 3 — corrector: full FE cycle from (H_n, u_pred, …).
+    # `topo_step!` reads `y.dyn.ux_bar` / `y.dyn.uy_bar` by default
+    # (which now hold `u_pred`), so it advects `H_n` by `u_pred`.
+    # The full cascade (calving, mass balance, resid_tendency!, …)
+    # sees H_n's geometry — the key architectural difference vs
+    # HEUN's stage-2-on-H_pred pattern. dyn_step! then resolves SSA
+    # at H_corr; mat/therm refresh once more.
+    @timed_section y :pc_corrector _step_fe!(y, dt)
+    # y is now at (H_corr, u_corr, ...) with time = t_n + dt.
 
     # Truncation-error proxy.
     factor = pc_error_factor(FE_SBE())
