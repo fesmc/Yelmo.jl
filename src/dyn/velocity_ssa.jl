@@ -1632,20 +1632,43 @@ function calc_velocity_ssa!(y)
                             y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
 
         # ---- Step 7: assemble SSA matrix into COO buffers + RHS. ----
-        _assemble_ssa_matrix!(
-            sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
-            sc.ssa_b_vec, sc.ssa_nnz,
-            y.dyn.ux_b, y.dyn.uy_b,
-            y.dyn.beta_acx, y.dyn.beta_acy,
-            y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
-            y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
-            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
-            y.dyn.taud_acx, y.dyn.taud_acy,
-            y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-            dx, dy, p_ydyn.beta_min;
-            boundaries = _ssa_boundaries_symbol(y),
-            lateral_bc = p_ydyn.ssa_lat_bc,
-        )
+        # Dispatch on `ssa.method`:
+        #   :residual         — Jacobian of the strong-form SSA momentum
+        #                       residual (Fortran-faithful).
+        #   :energy_quadratic — Hessian of the discrete viscous-energy
+        #                       functional with η, β, H frozen
+        #                       (symmetric positive-definite). Assembly
+        #                       lives in `velocity_ssa_energy.jl`.
+        #   :energy_nonlinear — RESERVED. Future fully-nonlinear
+        #                       minimisation; not yet implemented.
+        if ssa.method === :residual
+            _assemble_ssa_matrix!(
+                sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                sc.ssa_b_vec, sc.ssa_nnz,
+                y.dyn.ux_b, y.dyn.uy_b,
+                y.dyn.beta_acx, y.dyn.beta_acy,
+                y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
+                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
+                y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+                y.dyn.taud_acx, y.dyn.taud_acy,
+                y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+                dx, dy, p_ydyn.beta_min;
+                boundaries = _ssa_boundaries_symbol(y),
+                lateral_bc = p_ydyn.ssa_lat_bc,
+            )
+        elseif ssa.method === :energy_quadratic
+            error("calc_velocity_ssa!: method = :energy_quadratic not yet " *
+                  "implemented. Wired up in a follow-up commit; use " *
+                  "method = :residual (default) until then.")
+        elseif ssa.method === :energy_nonlinear
+            error("calc_velocity_ssa!: method = :energy_nonlinear is reserved " *
+                  "for the future fully-nonlinear energy-minimisation solver " *
+                  "(η baked into E[u] via Glen's law, Newton/L-BFGS replacing " *
+                  "the Picard loop). Not yet implemented.")
+        else
+            error("calc_velocity_ssa!: unrecognised method=$(ssa.method). " *
+                  "Expected :residual, :energy_quadratic, or :energy_nonlinear.")
+        end
 
         # ---- Step 8: build (or refresh) sparse CSC, solve. ----
         # On `iter == 1` builds A from COO via `sparse(...)` and caches
