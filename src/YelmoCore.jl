@@ -438,6 +438,28 @@ must expose the fields `alias`, `rundir`, `time`, `p`, `g`, `gt`, `gr`, `v`,
 abstract type AbstractYelmoModel end
 
 # ---------------------------------------------------------------------------
+# RMSEStats: scalar comparison metrics for the `dta` group
+# ---------------------------------------------------------------------------
+#
+# Lives in `YelmoCore` (rather than `YelmoModelData`) so the type can
+# be referenced by `_alloc_yelmo_groups` below without a forward
+# reference into a later-loaded module. `data_compare!` (in
+# `src/data/YelmoModelData.jl`) is the only writer; readers just
+# `getfield` the four scalars from `y.dta.rmse`.
+#
+# Mirrors Fortran `dta%pd%rmse_H/_zsrf/_uxy/_loguxy`. `rmse_iso` is
+# omitted — isochrone comparison is deferred until the corresponding
+# `mat` diagnostics land.
+mutable struct RMSEStats
+    H::Float64
+    zsrf::Float64
+    uxy::Float64
+    loguxy::Float64
+end
+RMSEStats() = RMSEStats(NaN, NaN, NaN, NaN)
+export RMSEStats
+
+# ---------------------------------------------------------------------------
 # NetCDF restart loading
 # ---------------------------------------------------------------------------
 
@@ -943,6 +965,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # the explicit path uses the preallocated `tend` buffer.
     tpo_scratch = (adv_cache = Ref{Any}(nothing),)
     tpo = merge(tpo, (scratch = tpo_scratch,))
+
+    # `dta.rmse`: scalar comparison metrics filled by `data_compare!`
+    # (src/data/YelmoModelData.jl). Initialised to NaN so absence of a
+    # comparison call shows up cleanly downstream rather than reading as
+    # zero. See `RMSEStats` above for field layout.
+    dta = merge(dta, (rmse = RMSEStats(),))
 
     return bnd, dta, dyn, mat, thrm, tpo
 end

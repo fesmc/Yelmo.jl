@@ -34,6 +34,7 @@ export fill_weighted!, fill_nearest!, gaussian_filter!
 export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
        map_field_to_hi, map_field_to_hi!,
        refine_grid, coarsen_grid
+export remove_englacial_lakes!, smooth_gauss_2D!, adjust_topography_gradients!
 
 include("tridiag.jl")
 include("topology.jl")
@@ -41,5 +42,6 @@ include("quadrature.jl")
 include("dzeta.jl")
 include("scrip_map.jl")
 include("grid_scale.jl")
+include("topography_helpers.jl")
 
 end # module YelmoUtils
