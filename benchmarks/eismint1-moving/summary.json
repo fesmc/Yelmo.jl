@@ -1,0 +1,14 @@
+{
+  "benchmark": "eismint1-moving",
+  "date": "2026-05-07T10:07:31.515",
+  "final_dome_x_km": 775.0,
+  "final_dome_y_km": 775.0,
+  "final_max_H_m": 2877.6843280164367,
+  "final_max_uz_abs_m_per_yr": 2.0702762988437184,
+  "final_mean_H_m": 792.4403939775162,
+  "final_total_volume_m3": 1.9038380465309828e15,
+  "n_samples": 251,
+  "t_end_yr": 25000.0,
+  "t_final_yr": 25000.0,
+  "yelmo_version": "0.1.0"
+}
