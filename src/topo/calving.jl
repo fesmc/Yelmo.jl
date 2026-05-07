@@ -169,7 +169,13 @@ function calving_step!(y::YelmoModel, dt::Float64)
 
     # 8. Optional redistancing.
     if _redist_trigger(y.time, dt, y.p.ycalv.dt_lsf)
-        lsf_redistance!(y.tpo.lsf, _dx(y.g), _dy(y.g))
+        # lsf is in normalized ±1 units, so redistance in grid-cell units
+        # (dx=1) so that the PDE drives |∇lsf| → 1 cell⁻¹ near the
+        # zero level set, producing lsf ≈ ±0.5 at adjacent cells.
+        # Passing physical dx (25 km) would make the smoothed sign
+        # function ≈ ±lsf/25000 ≈ 0 and cause the lsf to diverge to
+        # ±(1 + n_iter*0.5) ≈ ±3.5 every call.
+        lsf_redistance!(y.tpo.lsf, 1.0, 1.0)
     end
 
     # 9. Kill-rate cmb + aa-stagger magnitude diagnostics.
