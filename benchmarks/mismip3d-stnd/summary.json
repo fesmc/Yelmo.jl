@@ -1,0 +1,15 @@
+{
+  "benchmark": "mismip3d-stnd",
+  "date": "2026-05-07T12:48:30.155",
+  "final_gl_x_km": 792.0,
+  "final_max_H_m": 2151.6813297499602,
+  "final_max_ux_abs_m_per_yr": 5000.0,
+  "final_max_uy_center_abs_m_per_yr": 250.6786620954893,
+  "final_mean_H_m": 2055.8072172817597,
+  "final_mean_f_grnd": 0.9803921568627451,
+  "final_picard_iters": 4,
+  "n_samples": 201,
+  "t_end_yr": 2000.0,
+  "t_final_yr": 2000.0,
+  "yelmo_version": "0.1.0"
+}

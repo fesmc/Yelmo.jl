@@ -24,7 +24,9 @@ export AbstractBenchmark
 export state, write_fixture!
 
 include("eismint_moving.jl")
+include("mismip3d.jl")
 
 export EISMINT1MovingBenchmark, eismint_moving_smb
+export MISMIP3DBenchmark
 
 end # module
