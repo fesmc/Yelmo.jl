@@ -17,6 +17,9 @@ const _gen_map_filename = Yelmo.YelmoUtils.gen_map_filename
 const _map_scrip_load   = Yelmo.YelmoUtils.map_scrip_load
 const _map_scrip_field  = Yelmo.YelmoUtils.map_scrip_field
 const _vec_stat         = Yelmo.YelmoUtils.vec_stat
+const _fill_weighted!   = Yelmo.YelmoUtils.fill_weighted!
+const _fill_nearest!    = Yelmo.YelmoUtils.fill_nearest!
+const _gaussian_filter! = Yelmo.YelmoUtils.gaussian_filter!
 
 # ---------------------------------------------------------------------
 # Helper: hand-craft a minimal SCRIP NetCDF with a known weights table.
@@ -168,6 +171,149 @@ end
 @testset "scrip: map_scrip_load — missing file errors clearly" begin
     @test_throws ErrorException _map_scrip_load("NOSUCH_SRC", "NOSUCH_DST",
         mktempdir(; prefix = "scrip_missing_"))
+end
+
+# ---------------------------------------------------------------------
+# fill_nearest! / fill_weighted!
+# ---------------------------------------------------------------------
+
+@testset "scrip: fill_nearest! — single NaN cell takes nearest neighbour" begin
+    a = Float64[1.0  2.0  3.0;
+                4.0  NaN  6.0;
+                7.0  8.0  9.0]
+    _fill_nearest!(a)
+    @test !any(isnan, a)
+    # The NaN at (2,2) had eight 8-neighbours all valid; ties broken
+    # by "first encountered" — the value lands somewhere in the
+    # neighbour set. Just assert that the chosen value is in {1..9}.
+    @test 1.0 <= a[2, 2] <= 9.0
+end
+
+@testset "scrip: fill_weighted! — symmetric pattern recovers mean" begin
+    # 5x5 with the centre cell NaN and a uniform-1 ring around it.
+    # The annular weighted average must land at 1.0 to f.p. precision.
+    a = ones(Float64, 5, 5)
+    a[3, 3] = NaN
+    _fill_weighted!(a)
+    @test a[3, 3] ≈ 1.0 atol = 1e-12
+    @test !any(isnan, a)
+end
+
+@testset "scrip: fill_weighted! — NaN halo at boundary fills inward" begin
+    # Source domain: 3x3 valid block surrounded by 1-cell NaN halo.
+    a = fill(NaN, 5, 5)
+    @inbounds for j in 2:4, i in 2:4
+        a[i, j] = 7.0
+    end
+    _fill_weighted!(a)
+    @test !any(isnan, a)
+    # Halo cells should fill to 7.0 (the only available source value).
+    # Tolerance allows for floating-point roundoff in the weighted
+    # average — all source values are 7.0 so the analytic result is
+    # exactly 7.0 but the divisions introduce ~1 ULP of error.
+    @test maximum(abs.(a .- 7.0)) < 1e-12
+end
+
+@testset "scrip: fill_weighted! — no valid cells leaves NaNs" begin
+    a = fill(NaN, 3, 3)
+    _fill_weighted!(a)
+    @test all(isnan, a)
+end
+
+# ---------------------------------------------------------------------
+# gaussian_filter!
+# ---------------------------------------------------------------------
+
+@testset "scrip: gaussian_filter! — uniform input is invariant" begin
+    a = fill(5.0, 8, 6)
+    _gaussian_filter!(a; sigma = 2.0, dx = 1.0)
+    @test all(abs.(a .- 5.0) .< 1e-12)
+end
+
+@testset "scrip: gaussian_filter! — small sigma preserves peak shape qualitatively" begin
+    Nx, Ny = 11, 11
+    a = zeros(Float64, Nx, Ny)
+    a[6, 6] = 1.0          # delta function at the centre
+    _gaussian_filter!(a; sigma = 1.0, dx = 1.0)
+    # After convolution the peak is at the centre and decreasing
+    # monotonically along x and y axes.
+    @test a[6, 6] >= a[6, 5] >= a[6, 4]
+    @test a[6, 6] >= a[5, 6] >= a[4, 6]
+    # Symmetry along x and y.
+    @test a[6, 5] ≈ a[6, 7] atol = 1e-12
+    @test a[5, 6] ≈ a[7, 6] atol = 1e-12
+    # Mass is approximately preserved (replicate boundaries inflate
+    # the integral slightly because the delta is far from edges, but
+    # for our 3-sigma kernel within an 11x11 array the loss is small).
+    @test sum(a) ≈ 1.0 atol = 1e-6
+end
+
+@testset "scrip: gaussian_filter! — invalid sigma / dx error" begin
+    a = ones(Float64, 4, 4)
+    @test_throws ErrorException _gaussian_filter!(a; sigma = 0.0, dx = 1.0)
+    @test_throws ErrorException _gaussian_filter!(a; sigma = 1.0, dx = 0.0)
+end
+
+# ---------------------------------------------------------------------
+# map_scrip_field with fill_method / filt_method wiring
+# ---------------------------------------------------------------------
+
+@testset "scrip: map_scrip_field — fill_method=\"nn\" removes NaNs" begin
+    tdir = mktempdir(; prefix = "scrip_fill_")
+    path = joinpath(tdir, "scrip-con_A_B.nc")
+    # 2×1 → 3×1 with only middle target cell mapped (same fixture as
+    # the unmapped-cells test above; reusing the assertion that those
+    # NaNs would normally remain).
+    _write_scrip_fixture(path;
+        src_dims = (2, 1), dst_dims = (3, 1),
+        src_addr = [1, 2],
+        dst_addr = [2, 2],
+        weights  = [0.5, 0.5])
+
+    mps = _map_scrip_load("A", "B", tdir; method = "con")
+    src = reshape([10.0, 20.0], 2, 1)
+    _, dst = _map_scrip_field(mps, "T", src; fill_method = "nn")
+    @test !any(isnan, dst)
+    # All three cells should equal the only mapped value (15.0).
+    @test all(dst .≈ 15.0)
+end
+
+@testset "scrip: map_scrip_field — filt_method=\"gaussian\" smooths" begin
+    tdir = mktempdir(; prefix = "scrip_filt_")
+    path = joinpath(tdir, "scrip-con_A_A.nc")
+    Nx, Ny = 7, 7
+    n = Nx * Ny
+    _write_scrip_fixture(path;
+        src_dims = (Nx, Ny), dst_dims = (Nx, Ny),
+        src_addr = collect(1:n),
+        dst_addr = collect(1:n),
+        weights  = ones(n))
+
+    mps = _map_scrip_load("A", "A", tdir; method = "con")
+    src = zeros(Float64, Nx, Ny)
+    src[4, 4] = 1.0
+    _, dst = _map_scrip_field(mps, "T", src;
+                              filt_method = "gaussian",
+                              filt_par    = [1.0, 1.0])
+    # Identity map then Gaussian smooth: peak is reduced, neighbours rise.
+    @test 0.0 < dst[4, 4] < 1.0
+    @test dst[4, 5] > 0.0
+    @test dst[3, 4] > 0.0
+end
+
+@testset "scrip: map_scrip_field — gaussian without filt_par errors" begin
+    tdir = mktempdir(; prefix = "scrip_filt_err_")
+    path = joinpath(tdir, "scrip-con_A_A.nc")
+    n = 4
+    _write_scrip_fixture(path;
+        src_dims = (2, 2), dst_dims = (2, 2),
+        src_addr = collect(1:n),
+        dst_addr = collect(1:n),
+        weights  = ones(n))
+    mps = _map_scrip_load("A", "A", tdir; method = "con")
+    src = ones(Float64, 2, 2)
+    @test_throws ErrorException _map_scrip_field(mps, "T", src;
+        filt_method = "gaussian")
 end
 
 # ---------------------------------------------------------------------

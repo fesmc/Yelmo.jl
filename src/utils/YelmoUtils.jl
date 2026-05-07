@@ -30,6 +30,7 @@ export solve_tridiag!
 export calc_dzeta_terms!
 export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 export gen_map_filename, map_scrip_load, map_scrip_field, vec_stat
+export fill_weighted!, fill_nearest!, gaussian_filter!
 
 include("tridiag.jl")
 include("topology.jl")
