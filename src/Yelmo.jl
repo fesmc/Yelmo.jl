@@ -20,6 +20,7 @@ include("topo/YelmoModelTopo.jl")
 include("dyn/YelmoModelDyn.jl")
 include("mat/YelmoModelMat.jl")
 include("thrm/YelmoModelThrm.jl")
+include("data/YelmoModelData.jl")
 # Regions: regional aggregate diagnostics + per-region NetCDF time-series
 # I/O. Loaded AFTER all per-phase modules since `calc_region_diagnostics!`
 # reads from `tpo`, `dyn`, `mat`, `thrm`, and `bnd` simultaneously.
@@ -48,6 +49,7 @@ using .YelmoModelTopo
 using .YelmoModelDyn
 using .YelmoModelMat
 using .YelmoModelThrm
+using .YelmoModelData
 using .YelmoRegions
 using .YelmoIO
 
@@ -175,6 +177,9 @@ export calc_enth_column!, calc_enth_3D!
 export calc_enth_diffusivity!, convert_from_enthalpy_column!
 export define_temp_bedrock_column!, define_temp_bedrock_3D!
 export define_temp_bedrock_active_3D!, calc_Q_bedrock_column
+
+# YelmoModelData
+export init_topo_load!, data_load!, data_compare!
 
 # YelmoIO
 export init_output
