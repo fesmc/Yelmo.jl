@@ -50,7 +50,7 @@ using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using SparseArrays: SparseMatrixCSC, sparse
 using LinearAlgebra: norm, Diagonal, diag
-using Krylov: bicgstab!
+using Krylov: bicgstab!, cg!
 using AlgebraicMultigrid: smoothed_aggregation, ruge_stuben, aspreconditioner,
                           GaussSeidel, Jacobi
 using NCDatasets: NCDataset, defDim, defVar
@@ -1151,10 +1151,33 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
             @warn "SSA BiCGStab did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
         end
         return x_dest
+    elseif linmeth === :cg
+        # CG requires SPD `A`. Only safe for `method = :energy_quadratic`
+        # (Hessian of the discrete viscous-energy functional). The
+        # `:residual` formulation produces a non-symmetric system and
+        # must use `:bicgstab` — `resolve_linear_method` enforces this
+        # for `linear_method = :auto`; an explicit override here is the
+        # caller's responsibility.
+        workspace = scratch.ssa_cg_workspace
+        if M === nothing
+            cg!(workspace, A, b;
+                rtol = ssa.rtol, itmax = ssa.itmax,
+                history = false)
+        else
+            cg!(workspace, A, b;
+                M = M, ldiv = ldiv_flag,
+                rtol = ssa.rtol, itmax = ssa.itmax,
+                history = false)
+        end
+        copyto!(x_dest, workspace.x)
+        if !workspace.stats.solved
+            res = norm(A * x_dest .- b)
+            @warn "SSA CG did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
+        end
+        return x_dest
     else
         error("_solve_ssa_linear!: linear_method=$(linmeth) not yet implemented. " *
-              "Currently only :bicgstab is supported. (CG support lands with " *
-              "method = :energy_quadratic in a follow-up.)")
+              "Currently only :bicgstab and :cg are supported.")
     end
 end
 
