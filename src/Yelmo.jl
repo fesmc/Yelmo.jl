@@ -81,7 +81,7 @@ export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
        refine_grid, coarsen_grid
 
 # YelmoSolvers
-export Solver, SSASolver
+export Solver, SSASolver, resolve_linear_method
 
 # YelmoIntegration
 export vert_int_trapz_boundary!

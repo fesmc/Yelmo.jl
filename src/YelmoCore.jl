@@ -7,7 +7,7 @@ using Oceananigans.BoundaryConditions: FieldBoundaryConditions,
                                        GradientBoundaryCondition,
                                        fill_halo_regions!
 using NCDatasets
-using Krylov: BicgstabWorkspace
+using Krylov: BicgstabWorkspace, CgWorkspace
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoConst: YelmoConstants,
@@ -877,6 +877,13 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_x_vec                  = Vector{Float64}(undef, N_rows),
         ssa_iter_now               = Ref{Int}(0),
         ssa_solver_workspace       = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
+        # CG workspace for `method = :energy_quadratic` (Hessian-of-energy
+        # assembly produces a symmetric positive-definite matrix). Allocated
+        # eagerly alongside the BiCGStab workspace; both share the same
+        # `N_rows`-shaped buffers and remain alive for the lifetime of the
+        # model. Only one is actually used per Picard iter, dispatched on
+        # `resolve_linear_method(ssa_solver)` in `_solve_ssa_linear!`.
+        ssa_cg_workspace           = CgWorkspace(N_rows, N_rows, Vector{Float64}),
         ssa_amg_cache              = Ref{Any}(nothing),
         # Reusable diagonal-inverse buffer for the `:jacobi`
         # preconditioner — `_build_ssa_precond` refreshes
