@@ -785,6 +785,9 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     # actually measure (set via `yelmo_params(timing = true)`).
     # See `src/timing.jl`.
     timer::YelmoTimer
+    # User-supplied calving-rate hooks. Set after construction to inject
+    # a custom calving law (e.g. CalvingMIP experiments). See YelmoHooks.jl.
+    hooks::YelmoHooks
 end
 
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
@@ -1055,7 +1058,7 @@ function YelmoModel(restart_file::String, time::Float64;
 
     timer = YelmoTimer(enabled = _resolve_timing_enabled(p))
 
-    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, timer)
+    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, timer, YelmoHooks())
 
     # Default mask_ice to all-dynamic before load_state!. If the restart
     # file carries `mask_ice`, load_state! overwrites this; otherwise the

@@ -163,7 +163,7 @@ Calving methods that are supported by Yelmo.jl's `_dispatch_calving!`
 parameter construction when `use_lsf = true` and the requested
 method is not implemented in the Julia port.
 """
-const SUPPORTED_CALV_METHODS = ("none", "zero", "equil", "threshold", "vm-m16")
+const SUPPORTED_CALV_METHODS = ("none", "zero", "equil", "threshold", "vm-m16", "custom")
 
 """
 Calving methods that exist in Fortran Yelmo (`yelmo/src/yelmo_topography.f90`)
