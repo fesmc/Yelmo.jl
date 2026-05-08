@@ -20,7 +20,7 @@ so the two are interchangeable at the run-script level.
 ## What this site covers
 
 - **Getting started** — install, link the Fortran tree, run a five-step
-  smoke test, run the analytical BUELER-B benchmark.
+  smoke test, and run the analytical BUELER-B benchmark.
 - **Concepts** — the model state layout, the staggered grid, parameter
   groups, and the Mirror-vs-Model split.
 - **Usage** — loading a model from a restart, stepping it, writing
@@ -30,7 +30,11 @@ so the two are interchangeable at the run-script level.
   bookkeeping, the subgrid grounded fraction (with derivation of the
   analytical-limit fixes), relaxation, level-set calving, and the
   dynamics step (driving stress, lateral BC, `N_eff`, bed-roughness
-  chain, SIA solver).
+  chain, SIA and SSA/DIVA solvers).
+- **Benchmarks** — end-to-end validation benchmarks (BUELER-B, EISMINT-1
+  Moving, ISMIP-HOM-C, MISMIP3D Standard, Trough F17, CalvingMIP Exp 1,
+  slab advection stability, and adaptive predictor-corrector timestepping),
+  each with setup descriptions and expected results.
 - **API reference** — auto-generated from the package's docstrings,
   one page per module.
 - **Variables** — the canonical variable tables for the six state
@@ -47,25 +51,33 @@ the current milestone:
 
 | Component | Status |
 |---|---|
-| `tpo` advection (explicit upwind)                          | Done |
+| `tpo` advection (explicit upwind + implicit)               | Done |
 | `tpo` mass balance: SMB / BMB / FMB / DMB pipeline         | Done (DMB stub) |
 | `tpo` subgrid grounded fraction (linear / area / CISM)     | Done |
 | `tpo` distance / mask / surface diagnostics                | Done |
-| `tpo` relaxation                                            | Done (modes 1–3, `topo_rel == 4` deferred) |
-| `tpo` calving (level-set flux form, 3 laws)                | Done |
-| `tpo` predictor-corrector wrapper, `impl-lis` solver       | Deferred |
+| `tpo` relaxation                                            | Done (modes 1–3; `topo_rel == 4` deferred) |
+| `tpo` calving (level-set flux form, 3 laws + vm-m16)       | Done |
+| `tpo` predictor-corrector wrapper (`impl` advection solver)| Done |
 | `dyn` driving + lateral BC stress                          | Done |
 | `dyn` effective pressure `N_eff` (6 methods)               | Done (subgrid sampling deferred) |
 | `dyn` bed-roughness chain `cb_tgt → cb_ref → c_bed`        | Done |
 | `dyn` SIA solver (`solver = "sia"`, Option C convention)   | Done |
-| `dyn` SSA / hybrid / DIVA solvers                          | Deferred |
-| `dyn` velocity Jacobian, `uz`, strain-rate tensor          | Deferred (milestone 3h) |
-| `mat`, `thrm`                                              | Deferred (per-component step shells in place) |
+| `dyn` SSA solver (`solver = "ssa"`, Picard iteration)      | Done |
+| `dyn` hybrid / DIVA solver (`solver = "diva"`)             | Done |
+| `dyn` velocity Jacobian, `uz`, strain-rate tensor          | Done |
+| `mat` rate factor, viscosity, stress invariants            | Done |
+| `mat` enhancement factor                                   | Done |
+| `mat` ice age tracer (3D implicit Crank-Nicolson)          | Done |
+| `thrm`                                                     | Deferred (enthalpy solver present; validation pending) |
+| Adaptive PC timestepping (HEUN, FE-SBE, AB-SAM + PI42)    | Done |
+| Regions infrastructure (39 scalars, per-region NetCDF)     | Done |
+| Regridding (SCRIP maps + aligned-grid conservative remap)  | Done |
 
 See the [physics overview](physics/index.md) for the per-step phase
 ordering, the [topography page](physics/topography.md) for the
-full topography pipeline, and the [dynamics page](physics/dynamics.md)
-for the velocity-solver chain.
+full topography pipeline, the [dynamics page](physics/dynamics.md)
+for the velocity-solver chain, and the [benchmarks section](benchmarks/index.md)
+for validation results against analytical solutions and YelmoMirror.
 
 ## Quick example
 

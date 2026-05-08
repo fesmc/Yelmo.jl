@@ -1,10 +1,9 @@
 # Dynamics
 
 The dynamics step `dyn_step!(y, dt)` advances the velocity-related
-state in `y.dyn` by one outer time step. The current milestone wires
-through the full pre- and post-solver chain plus a Shallow-Ice
-Approximation (SIA) solver dispatch; SSA / hybrid / DIVA solvers
-land in subsequent milestones.
+state in `y.dyn` by one outer time step. The full pre- and post-solver
+chain is implemented, including the SIA, SSA, and hybrid DIVA solvers,
+the velocity Jacobian, vertical velocity `uz`, and the strain-rate tensor.
 
 This page documents:
 
@@ -27,9 +26,9 @@ Fortran's `calc_ydyn` body (`yelmo_dynamics.f90:48`):
 | 3 | Optional grounding-line refinement      | `calc_driving_stress_gl!`      | `dyn.taud_acx`, `dyn.taud_acy` |
 | 4 | Lateral boundary stress at the ice front| `calc_lateral_bc_stress_2D!`   | `dyn.taul_int_acx`, `dyn.taul_int_acy` |
 | 5 | Effective pressure + bed-roughness chain| `calc_ydyn_neff!`, `calc_cb_ref!`, `calc_c_bed!` | `dyn.N_eff`, `dyn.cb_tgt`, `dyn.cb_ref`, `dyn.c_bed` |
-| 6 | Solver dispatch                         | `calc_velocity_sia!` (or no-op)| `dyn.ux_i`, `dyn.uy_i`, `dyn.ux_i_bar`, `dyn.uy_i_bar`, plus combined `dyn.ux`, `dyn.uy`, `dyn.ux_bar`, `dyn.uy_bar` |
+| 6 | Solver dispatch                         | `calc_velocity_sia!` / `calc_velocity_ssa!` / `calc_velocity_diva!` | `dyn.ux_i`, `dyn.uy_i`, `dyn.ux_i_bar`, `dyn.uy_i_bar`, `dyn.ux_s`, `dyn.uy_s`, plus combined `dyn.ux`, `dyn.uy`, `dyn.ux_bar`, `dyn.uy_bar` |
 | 7 | Underflow clip                          | inline                          | `dyn.ux/uy`, `dyn.ux_bar/uy_bar` |
-| 8 | Velocity Jacobian + `uz` + strain rates | (deferred — milestone 3h)       | — |
+| 8 | Velocity Jacobian + `uz` + strain rates | `calc_strain_rate_2D!`, `calc_uz_3D!`, `calc_jacobian!` | `dyn.eps_xx`, `dyn.eps_yy`, `dyn.eps_xy`, `dyn.eps_eff`, `dyn.uz`, `dyn.uz_star`, `dyn.jvel_dz*` |
 | 9 | Diagnostics                             | `calc_ice_flux!`, `calc_magnitude_from_staggered!`, `calc_vel_ratio!` | `dyn.qq*`, `dyn.uxy*`, `dyn.taud`, `dyn.taub`, `dyn.f_vbvs`, `dyn.duxydt` |
 
 `dyn_step!` does **not** advance `y.time` — that is owned by
