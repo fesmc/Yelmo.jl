@@ -52,8 +52,16 @@ const RESTART_NC    = joinpath(OUTPUT_DIR, "restart_at_threshold.nc")
 const SNAPSHOTS_NC  = joinpath(OUTPUT_DIR, "snapshots_phase2.nc")
 
 # ----------------------------------------------------------------------
-# Asymmetry metric: 8-direction front radii (E, NE, N, NW, W, SW, S, SE)
-# from the centre of the domain to the first lsf 0-crossing.
+# Asymmetry metric — eight-ray front-radius scan from the **true origin**
+# (0, 0), using bilinear interpolation of the lsf field at each step
+# along the ray.
+#
+# The earlier "walk along grid indices from imid/jmid" approach gave a
+# ~0.3 % baseline artefact on a perfectly-symmetric circular cap because
+# (a) cell-centred grids with even Nx put the origin between cells, so
+# imid is offset by dx/2 from the true centre, and (b) diagonal rays
+# sample lsf at √2 × dx steps vs dx for cardinals, mismatching sub-cell
+# resolutions. This metric removes both biases.
 # ----------------------------------------------------------------------
 
 # Linearly interpolate the radius at which a 1-D `vals` profile crosses
@@ -68,26 +76,48 @@ function _scan_front(vals::AbstractVector, r_km::AbstractVector)
     return NaN
 end
 
-# Cardinal + intercardinal radii, with the centre (imid, jmid) chosen
-# to be the cell whose centre is closest to the origin.
-function _front_radii_8(L, xc_km, yc_km, imid, jmid)
+# Bilinear interpolation of `L[:, :, 1]` at point (xq, yq) in *km*. Cells
+# are uniform with centres `xc_km[i]`, `yc_km[j]`; the value is undefined
+# for points outside the cell-centre bounding box.
+function _bilinear(L, xc_km, yc_km, xq, yq)
     Nx, Ny = size(L, 1), size(L, 2)
-    r_E = _scan_front(L[imid:Nx,   jmid, 1],    xc_km[imid:Nx])
-    r_W = _scan_front(L[imid:-1:1, jmid, 1], -xc_km[imid:-1:1])
-    r_N = _scan_front(L[imid, jmid:Ny,   1],    yc_km[jmid:Ny])
-    r_S = _scan_front(L[imid, jmid:-1:1, 1], -yc_km[jmid:-1:1])
+    dx = xc_km[2] - xc_km[1]
+    dy = yc_km[2] - yc_km[1]
+    fi = (xq - xc_km[1]) / dx + 1.0
+    fj = (yq - yc_km[1]) / dy + 1.0
+    i0 = clamp(Int(floor(fi)), 1, Nx - 1)
+    j0 = clamp(Int(floor(fj)), 1, Ny - 1)
+    s = clamp(fi - i0, 0.0, 1.0)
+    t = clamp(fj - j0, 0.0, 1.0)
+    return ((1 - s) * (1 - t) * L[i0,   j0,   1] +
+                  s  * (1 - t) * L[i0+1, j0,   1] +
+            (1 - s) *      t   * L[i0,   j0+1, 1] +
+                  s  *      t   * L[i0+1, j0+1, 1])
+end
 
-    function _diag(di, dj)
-        n = min(di > 0 ? Nx - imid : imid - 1,
-                dj > 0 ? Ny - jmid : jmid - 1)
-        lsf = [L[imid + di*k, jmid + dj*k, 1] for k in 0:n]
-        r   = [sqrt(xc_km[imid + di*k]^2 + yc_km[jmid + dj*k]^2)
-               for k in 0:n]
-        return _scan_front(lsf, r)
+# Eight-direction radii via radial scans from the origin. Each ray is
+# sampled at uniform `step_km` increments out to `r_max_km`; the front
+# is the first sign change. Returns NaN per direction if no crossing.
+function _front_radii_8(L, xc_km, yc_km;
+                         step_km::Float64 = 1.0,
+                         r_max_km::Float64 = 800.0)
+    @assert size(L, 3) == 1
+    n = Int(floor(r_max_km / step_km))
+    rs = collect(0.0:step_km:r_max_km)
+
+    function _ray(θ)
+        cx, cy = cos(θ), sin(θ)
+        vals = [_bilinear(L, xc_km, yc_km, r * cx, r * cy) for r in rs]
+        return _scan_front(vals, rs)
     end
-    r_NE = _diag(+1, +1); r_NW = _diag(-1, +1)
-    r_SW = _diag(-1, -1); r_SE = _diag(+1, -1)
-
+    r_E  = _ray(0.0)
+    r_NE = _ray(π/4)
+    r_N  = _ray(π/2)
+    r_NW = _ray(3π/4)
+    r_W  = _ray(π)
+    r_SW = _ray(5π/4)
+    r_S  = _ray(3π/2)
+    r_SE = _ray(7π/4)
     return (E=r_E, NE=r_NE, N=r_N, NW=r_NW, W=r_W, SW=r_SW, S=r_S, SE=r_SE)
 end
 
@@ -95,6 +125,22 @@ function _asym(radii)
     vals = filter(!isnan, collect(values(radii)))
     isempty(vals) && return NaN
     return (maximum(vals) - minimum(vals)) / mean(vals)
+end
+
+# 4-fold-symmetry-breaking metric: spread within the cardinals (E/N/W/S)
+# and within the diagonals (NE/NW/SW/SE), each normalised by the group
+# mean. Stays at machine precision when the front is rotationally
+# symmetric under 90° rotations — independent of any cardinal/diagonal
+# Cartesian-grid anisotropy. **This is the bug-detector**; the
+# `_asym` over all 8 directions also catches grid anisotropy and so
+# carries a baseline of a few tenths of a percent on a perfectly
+# symmetric cap.
+function _asym_4fold(radii)
+    cards = filter(!isnan, [radii.E, radii.N, radii.W, radii.S])
+    diags = filter(!isnan, [radii.NE, radii.NW, radii.SW, radii.SE])
+    a_card = isempty(cards) ? NaN : (maximum(cards) - minimum(cards)) / mean(cards)
+    a_diag = isempty(diags) ? NaN : (maximum(diags) - minimum(diags)) / mean(diags)
+    return max(a_card, a_diag)
 end
 
 # ----------------------------------------------------------------------
@@ -200,7 +246,8 @@ function _write_timeseries_nc(samples, path)
             ("time",   "yr"),
             ("max_H",  "m"),
             ("vol",    "m^3"),
-            ("asym",   "1"),
+            ("asym",   "1"),         # all-8 spread (incl. grid anisotropy baseline)
+            ("asym4",  "1"),         # 4-fold-symmetry-breaking only
             ("front_E",  "km"), ("front_NE", "km"),
             ("front_N",  "km"), ("front_NW", "km"),
             ("front_W",  "km"), ("front_SW", "km"),
@@ -212,6 +259,7 @@ function _write_timeseries_nc(samples, path)
         ds["max_H"][:] = [s.max_H for s in samples]
         ds["vol"][:]   = [s.vol for s in samples]
         ds["asym"][:]  = [s.asym for s in samples]
+        ds["asym4"][:] = [s.asym4 for s in samples]
         for d in (:E, :NE, :N, :NW, :W, :SW, :S, :SE)
             ds["front_$(d)"][:] = [getproperty(s.r, d) for s in samples]
         end
@@ -228,32 +276,28 @@ function main()
     @info "calvingmip-exp2 — t_max=$(T_PHASE2_MAX_YR) yr, dt_outer=$(DT_OUTER_YR), threshold=$(ASYM_THRESHOLD)"
 
     y, b = _build_from_exp1_restart()
-    Nx = length(b.xc); Ny = length(b.yc)
     xc_km = b.xc ./ 1e3; yc_km = b.yc ./ 1e3
-
-    # Use the cell-centre indices closest to the origin (cell-centred
-    # grid: with even Nx the origin sits between two cells).
-    imid = argmin(abs.(b.xc))
-    jmid = argmin(abs.(b.yc))
 
     function _take_sample()
         H = interior(y.tpo.H_ice)[:, :, 1]
         L = interior(y.tpo.lsf)
         cell_area = (b.dx_km * 1e3)^2
-        r = _front_radii_8(L, xc_km, yc_km, imid, jmid)
+        r = _front_radii_8(L, xc_km, yc_km)
         return (
-            time  = y.time,
-            max_H = maximum(H),
-            vol   = sum(H) * cell_area,
-            asym  = _asym(r),
-            r     = r,
+            time      = y.time,
+            max_H     = maximum(H),
+            vol       = sum(H) * cell_area,
+            asym      = _asym(r),         # all-8 spread (incl. grid anisotropy)
+            asym4     = _asym_4fold(r),   # 4-fold-breaking only — bug detector
+            r         = r,
         )
     end
 
     samples = NamedTuple[]
     push!(samples, _take_sample())
     s0 = samples[1]
-    @printf("  t = %5.0f  asym = %5.2f%%\n", s0.time, 100 * s0.asym)
+    @printf("  t = %5.0f  asym4 = %5.3f%%  asym8 = %5.2f%%\n",
+            s0.time, 100 * s0.asym4, 100 * s0.asym)
 
     n_max          = Int(round(T_PHASE2_MAX_YR / DT_OUTER_YR))
     sample_every   = max(Int(round(SAMPLE_DT_YR / DT_OUTER_YR)), 1)
@@ -264,13 +308,17 @@ function main()
         if k % sample_every == 0
             s = _take_sample()
             push!(samples, s)
-            @printf("  t = %5.0f  asym = %5.2f%%  vol = %.3e m^3\n",
-                    s.time, 100 * s.asym, s.vol)
+            @printf("  t = %5.0f  asym4 = %5.3f%%  asym8 = %5.2f%%  vol = %.3e m^3\n",
+                    s.time, 100 * s.asym4, 100 * s.asym, s.vol)
 
-            if !isnan(s.asym) && s.asym > ASYM_THRESHOLD
+            # Threshold checks the 4-fold-symmetry-breaking metric only.
+            # The all-8 `asym` carries a Cartesian-grid baseline (~0.3 %
+            # on a circular cap at dx = 25 km) that's a finite-resolution
+            # artefact, not a sign of asymmetry growth.
+            if !isnan(s.asym4) && s.asym4 > ASYM_THRESHOLD
                 threshold_path = _write_restart_nc(y, b, RESTART_NC;
-                    reason = @sprintf("asym=%.3f exceeds %.3f", s.asym, ASYM_THRESHOLD))
-                @info "Asymmetry threshold crossed — stopping" t = s.time asym = s.asym
+                    reason = @sprintf("asym4=%.3f exceeds %.3f", s.asym4, ASYM_THRESHOLD))
+                @info "Asymmetry threshold crossed — stopping" t = s.time asym4 = s.asym4
                 break
             end
         end
