@@ -21,9 +21,9 @@ cd(@__DIR__)   # data paths in the nml are relative to this directory
 
 using IceSheetBenchmarks
 using Yelmo
-using Yelmo: step!, init_state!, init_topo_load!, data_load!
+using Yelmo: step!, init_state!, init_topo_load!
 using Yelmo: init_regions, update_regions!, write_regions!
-using Yelmo: init_output, write_output!
+using Yelmo: init_output, write_output!, OutputSelection
 using Yelmo.YelmoModelPar: YelmoModelParameters
 using Oceananigans: interior
 using NCDatasets
@@ -56,31 +56,28 @@ function _build()
     p = YelmoModelParameters(NAMELIST_PATH, "initmip_grl")
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
-    # --- Load topography and present-day reference data ---
-
-    # Initial topography: H_ice, z_bed, z_bed_sd from M17.
-    # grad_lim_zb = 0.5 matches ytopo nml.
+    # --- Topography from M17 ---
+    # init_topo_load! reads H_ice/z_bed/z_bed_sd from the nml path,
+    # applies z_bed_f_sd scaling, removes englacial lakes, and adjusts
+    # bedrock gradients. grad_lim_zb = 0.5 matches ytopo nml.
     init_topo_load!(y; grad_lim_zb = 0.5)
 
-    # Present-day reference data: MAR smb/T_srf, M17 topo reference,
-    # J18 surface velocities → fills y.dta.pd_* fields.
-    data_load!(y)
-
-    # --- Set boundary conditions ---
+    # --- Climate and forcing: load directly into bnd fields ---
 
     # SMB and surface temperature from MAR present-day climatology.
-    smb   = @view interior(y.bnd.smb_ref)[:, :, 1]
-    T_srf = @view interior(y.bnd.T_srf)[:, :, 1]
-    smb   .= interior(y.dta.pd_smb_ref)[:, :, 1]
-    T_srf .= interior(y.dta.pd_T_srf)[:, :, 1]
+    NCDataset(joinpath(DATA_DIR, "GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc")) do ds
+        interior(y.bnd.smb_ref)[:, :, 1] .= ds["smb"][:, :]
+        interior(y.bnd.T_srf)[:, :, 1]   .= ds["T_srf"][:, :]
+    end
 
     # Ice-free cells receive an additional -2 m/yr SMB penalty to
     # prevent spurious ice growth outside the present-day margin.
     # Mirrors Fortran yelmo_initmip.f90:183.
-    pd_H = @view interior(y.dta.pd_H_ice)[:, :, 1]
-    @. smb = ifelse(pd_H <= 0.0, smb - 2.0, smb)
+    smb   = @view interior(y.bnd.smb_ref)[:, :, 1]
+    H_ice = @view interior(y.tpo.H_ice)[:, :, 1]
+    @. smb = ifelse(H_ice <= 0.0, smb - 2.0, smb)
 
-    # GHF from Shapiro & Ritzwoller 2004 (S04).
+    # GHF from Shapiro & Ritzwoller 2004.
     NCDataset(joinpath(DATA_DIR, "GRL-16KM_GHF-S04.nc")) do ds
         interior(y.bnd.Q_geo)[:, :, 1] .= ds["ghf"][:, :]
     end
@@ -113,8 +110,8 @@ function main()
 
     # --- 2D snapshot file ---
     # Groups match Fortran write_step_2D: tpo, dyn, mat, thrm, bnd, dta.
-    snap_sel = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta])
-    snap_out = init_output(y, SNAPSHOTS_NC; selection = snap_sel)
+    snap_out = init_output(y, SNAPSHOTS_NC;
+                           selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
 
     # Write t = 0 records.
     update_regions!(regs, y)
