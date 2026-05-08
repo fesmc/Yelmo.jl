@@ -3,5 +3,10 @@
 # not packages — we *want* the Manifest committed for reproducibility.
 !Manifest.toml
 
+# Benchmark configuration is committed (root .gitignore excludes *.nml).
+!yelmo_initmip_grl.nml
+
+# Runtime outputs (regenerable).
 output/
 plots/
+logs/
