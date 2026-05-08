@@ -71,6 +71,33 @@ Algorithm (Leguy et al. 2021, ported via IMAU-ICE v2.0):
      acx-/acy-/ab-fractions are quadrant means at the corresponding
      face-/corner-staggered positions.
 
+# Face-staggering convention
+
+`f_grnd_acx` and `f_grnd_acy` are written in the **Oceananigans
+XFaceField / YFaceField indexing convention** (`i-1/2` faces):
+
+  - `f_grnd_acx[i, j, 1]` is the grounded fraction at the face *between
+    cells `(i-1, j)` and `(i, j)`* (the western face of cell `i`,
+    equivalently the eastern face of cell `i-1`). Loop range
+    `i ∈ 1..Nx+1` for `Bounded` topology; the first / last slot uses
+    only the single in-domain cell (replication of the inward neighbour
+    in Fortran's edge fix-up).
+  - `f_grnd_acy[i, j, 1]` is analogous on the y-axis (face between
+    cells `(i, j-1)` and `(i, j)`).
+
+This matches `calc_f_grnd_subgrid_linear!` and
+`calc_f_grnd_subgrid_area!` so that consumers can read the same array
+shape regardless of which `gl_sep` algorithm produced it. The Fortran
+port stored these at "i+1/2" (face east-of-cell-i) in `(Nx, Ny)`
+arrays — the NetCDF restart loader's `_apply_path_b_2d_slice!` translates
+between the two conventions automatically by writing Fortran's slot `i`
+into Julia's slot `i+1`.
+
+`f_grnd_ab` retains the Fortran "i+1/2, j+1/2" (NE corner of cell `(i,j)`)
+convention because Yelmo.jl currently has no reader of this field; if
+a consumer is added, harmonise the convention with the Oceananigans-
+native ab-stagger at the same time.
+
 Halo handling: `H_grnd`'s halos are filled via `fill_halo_regions!`,
 so neighbour reads honour the field's grid topology and boundary
 conditions automatically (Neumann-zero clamp by default; Periodic
@@ -102,22 +129,37 @@ function determine_grounded_fractions!(f_grnd, H_grnd;
     end
 
     if f_grnd_acx !== nothing
+        # XFaceField slot `i` is the face between cells `(i-1, j)` and
+        # `(i, j)` (Oceananigans i-1/2 convention). Average the right
+        # quadrants of the left cell and the left quadrants of the right
+        # cell. At the leftmost / rightmost domain face we have no cell
+        # outside the domain — replicate the in-domain cell on both sides
+        # (matches Fortran's `f_grnd_acx[nx, :] = f_grnd_acx[nx-1, :]`
+        # edge fix).
         Facx = interior(f_grnd_acx)
-        @inbounds for j in 1:ny, i in 1:nx
-            ip1 = min(i + 1, nx)
-            Facx[i, j, 1] = 0.25 * (f_NE[i,   j] + f_SE[i,   j] +
-                                    f_NW[ip1, j] + f_SW[ip1, j])
+        @inbounds for j in axes(Facx, 2), i in axes(Facx, 1)
+            i_l = max(1, i - 1)
+            i_r = min(i, nx)
+            Facx[i, j, 1] = 0.25 * (f_NE[i_l, j] + f_SE[i_l, j] +
+                                    f_NW[i_r, j] + f_SW[i_r, j])
         end
     end
     if f_grnd_acy !== nothing
+        # YFaceField slot `j` is the face between cells `(i, j-1)` and
+        # `(i, j)` — Oceananigans j-1/2 convention.
         Facy = interior(f_grnd_acy)
-        @inbounds for j in 1:ny, i in 1:nx
-            jp1 = min(j + 1, ny)
-            Facy[i, j, 1] = 0.25 * (f_NE[i, j  ] + f_NW[i, j  ] +
-                                    f_SE[i, jp1] + f_SW[i, jp1])
+        @inbounds for j in axes(Facy, 2), i in axes(Facy, 1)
+            j_l = max(1, j - 1)
+            j_r = min(j, ny)
+            Facy[i, j, 1] = 0.25 * (f_NE[i, j_l] + f_NW[i, j_l] +
+                                    f_SE[i, j_r] + f_SW[i, j_r])
         end
     end
     if f_grnd_ab !== nothing
+        # NOTE: f_grnd_ab is currently stored as a CenterField and uses
+        # the Fortran "NE corner of cell (i, j)" convention (i+1/2, j+1/2).
+        # No consumer in Yelmo.jl reads this field today; harmonise with
+        # Oceananigans ab-stagger when one is added.
         Fab = interior(f_grnd_ab)
         @inbounds for j in 1:ny, i in 1:nx
             ip1 = min(i + 1, nx)

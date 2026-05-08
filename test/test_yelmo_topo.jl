@@ -1056,6 +1056,106 @@ end
 end
 
 # ------------------------------------------------------------------
+# Face-staggering convention regression test.
+#
+# Locks in that all three `gl_sep` producers
+# (`calc_f_grnd_subgrid_linear!`, `calc_f_grnd_subgrid_area!`,
+# `determine_grounded_fractions!`) write `f_grnd_acx` and `f_grnd_acy`
+# under the **Oceananigans XFaceField / YFaceField i-1/2 convention**:
+# slot `[i, j]` is the grounded fraction at the face between cells
+# `(i-1, j)` and `(i, j)`.
+#
+# The OLD Fortran convention (face east of cell `i`, stored at slot
+# `[i, j]`) was the source of the LSF asymmetry in CalvingMIP-Exp2;
+# this test prevents a regression to it.
+# ------------------------------------------------------------------
+
+@testset "tpo: f_grnd_ac{x,y} face convention (Oceananigans i-1/2)" begin
+    Nx = Ny = 7
+    g = RectilinearGrid(size=(Nx, Ny),
+                        x=(0.0, 7.0), y=(0.0, 7.0),
+                        topology=(Bounded, Bounded, Flat))
+    H_grnd     = CenterField(g)
+    f_grnd     = CenterField(g)
+    f_grnd_acx = XFaceField(g)
+    f_grnd_acy = YFaceField(g)
+
+    # E-W split: cells with i ≤ 3 grounded, i ≥ 5 floating, cell 4 at GL.
+    # Under the i-1/2 convention:
+    #   - face slot 4 sits between cells (3, 4): grounded ↔ GL (transition).
+    #   - face slot 5 sits between cells (4, 5): GL ↔ floating (transition).
+    #   - face slot 3 (and lower) is fully grounded.
+    #   - face slot 6 (and higher) is fully floating.
+    @inbounds for j in 1:Ny, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = i <= 3 ? +100.0 : (i == 4 ? 0.0 : -100.0)
+    end
+
+    # All three producers must place transitions at the same face slots.
+    for variant in (:linear, :area, :cism)
+        fill!(interior(f_grnd_acx), -9.0)
+        fill!(interior(f_grnd_acy), -9.0)
+        if variant === :linear
+            calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+        elseif variant === :area
+            calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                                      gz_nx = 11)
+        else
+            determine_grounded_fractions!(f_grnd, H_grnd;
+                                          f_grnd_acx = f_grnd_acx,
+                                          f_grnd_acy = f_grnd_acy)
+        end
+
+        Fx = interior(f_grnd_acx)
+        @testset "$(variant): grounded interior faces (slot ≤ 3) == 1" begin
+            for i in 1:3, j in 1:Ny
+                @test Fx[i, j, 1] ≈ 1.0
+            end
+        end
+        @testset "$(variant): floating interior faces (slot ≥ 6) == 0" begin
+            for i in 6:Nx+1, j in 1:Ny
+                @test Fx[i, j, 1] ≈ 0.0
+            end
+        end
+        @testset "$(variant): GL transition lives at slots 4-5" begin
+            for j in 1:Ny
+                @test 0.0 <= Fx[4, j, 1] <= 1.0
+                @test 0.0 <= Fx[5, j, 1] <= 1.0
+            end
+        end
+    end
+
+    # Same pattern on the y-axis.
+    @inbounds for j in 1:Ny, i in 1:Nx
+        interior(H_grnd)[i, j, 1] = j <= 3 ? +100.0 : (j == 4 ? 0.0 : -100.0)
+    end
+    for variant in (:linear, :area, :cism)
+        fill!(interior(f_grnd_acx), -9.0)
+        fill!(interior(f_grnd_acy), -9.0)
+        if variant === :linear
+            calc_f_grnd_subgrid_linear!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd)
+        elseif variant === :area
+            calc_f_grnd_subgrid_area!(f_grnd, f_grnd_acx, f_grnd_acy, H_grnd;
+                                      gz_nx = 11)
+        else
+            determine_grounded_fractions!(f_grnd, H_grnd;
+                                          f_grnd_acx = f_grnd_acx,
+                                          f_grnd_acy = f_grnd_acy)
+        end
+        Fy = interior(f_grnd_acy)
+        @testset "$(variant) y: grounded faces (slot ≤ 3) == 1" begin
+            for i in 1:Nx, j in 1:3
+                @test Fy[i, j, 1] ≈ 1.0
+            end
+        end
+        @testset "$(variant) y: floating faces (slot ≥ 6) == 0" begin
+            for i in 1:Nx, j in 6:Ny+1
+                @test Fy[i, j, 1] ≈ 0.0
+            end
+        end
+    end
+end
+
+# ------------------------------------------------------------------
 # Analytical benchmarks for determine_grounded_fractions!
 # ------------------------------------------------------------------
 
