@@ -831,6 +831,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
 
+    # ice_allowed defaults to 1 (permit ice everywhere). resid_tendency!
+    # silently zeroes H_ice on cells where ice_allowed == 0, so the
+    # all-zero Oceananigans field default would suppress all SMB-driven
+    # nucleation unless overridden by a restart or explicit benchmark IC.
+    fill!(interior(bnd.ice_allowed), 1.0)
+
     # SIA / SSA solver scratch buffers; not in the dyn schema because
     # they are recomputed every `dyn_step!` and not part of the model
     # state. Exposed as `y.dyn.scratch.<name>`. See
