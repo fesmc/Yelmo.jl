@@ -345,6 +345,7 @@ function main()
             push!(samples, s)
             @printf("  t = %5.0f  asym4 = %5.3f%%  asym8 = %5.2f%%  vol = %.3e m^3\n",
                     s.time, 100 * s.asym4, 100 * s.asym, s.vol)
+            flush(stdout)
 
             snap_idx += 1
             _write_snapshot!(snap_idx)

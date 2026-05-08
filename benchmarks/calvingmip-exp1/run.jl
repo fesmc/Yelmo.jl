@@ -163,6 +163,7 @@ function main()
             if k % (steps_per_sample * 10) == 0
                 @printf("  t=%6.0f  max_H=%7.2f m  mean_H=%6.2f m  vol=%.3e m^3  n_ice=%d\n",
                         s.time, s.max_H, s.mean_H, s.total_volume_m3, s.n_ice_cells)
+                flush(stdout)
             end
         end
     end
