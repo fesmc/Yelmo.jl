@@ -1,15 +1,17 @@
-# benchmarks/calvingmip-exp1/run.jl
+# benchmarks/calvingmip-exp3/run.jl
 #
-# CalvingMIP Experiment 1 — circular domain, equilibrium calving pinned
-# at r = 750 km. Ice grows from a cold start under constant SMB until
-# it reaches the pinned front, where calvmip_exp1! cancels outflow.
+# CalvingMIP Experiment 3 — Thule domain, equilibrium calving pinned
+# at r = 750 km. Same calving law as Exp1 (calvmip_exp1!) but on the
+# Thule bed geometry (parabolic bowl + cosine undulations).
 #
 # Reference: CalvingMIP wiki — https://github.com/JRowanJordan/CalvingMIP/wiki
+# Fortran:   yelmo/src/physics/calving/calving_ac.f90:395 (calvmip_exp1,
+#            "Experiment 1 & 3 of CalvMIP")
 #
 # Outputs (under output/, gitignored):
 #   - timeseries.nc     — time, ice volume, max H, ice cell count.
 #   - restart_final.nc  — full state at T_END_YR; consumed by
-#                          benchmarks/calvingmip-exp2/run.jl.
+#                          benchmarks/calvingmip-exp4/run.jl.
 
 using IceSheetBenchmarks
 using Yelmo
@@ -29,7 +31,7 @@ const DT_OUTER_YR  = 5.0         # outer-loop dt [yr]
 const SAMPLE_DT_YR = 100.0       # cadence for time-series snapshots [yr]
 
 const DX_KM          = 25.0      # CalvingMIP standard grid spacing
-const NAMELIST_PATH  = abspath(joinpath(@__DIR__, "yelmo_calvingmip_exp1.nml"))
+const NAMELIST_PATH  = abspath(joinpath(@__DIR__, "yelmo_calvingmip_exp3.nml"))
 
 const OUTPUT_DIR     = abspath(joinpath(@__DIR__, "output"))
 const TIMESERIES_NC  = joinpath(OUTPUT_DIR, "timeseries.nc")
@@ -40,11 +42,11 @@ const RESTART_FINAL  = joinpath(OUTPUT_DIR, "restart_final.nc")
 # ----------------------------------------------------------------------
 
 function _build()
-    b = CalvingMIPBenchmark(:exp1; dx_km = DX_KM)
-    p = YelmoModelParameters(NAMELIST_PATH, "calvingmip_exp1")
+    b = CalvingMIPBenchmark(:exp3; dx_km = DX_KM)
+    p = YelmoModelParameters(NAMELIST_PATH, "calvingmip_exp3")
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
-    # Attach the exp1 calving-rate hook (captures b's xc/yc).
+    # Attach the exp1/3 calving-rate hook (captures b's xc/yc).
     xc = b.xc; yc = b.yc
     y.hooks.calv_flt = (cx, cy, ux, uy, Hi, fi, lsf, t) ->
         calvmip_exp1!(cx, cy, ux, uy, Hi, fi, lsf, t; xc = xc, yc = yc)
@@ -62,12 +64,12 @@ function _snapshot(y, b)
     L   = interior(y.tpo.lsf)[:, :, 1]
     cell_area_m2 = (b.dx_km * 1e3)^2
     return (
-        time           = y.time,
-        max_H          = maximum(H),
-        mean_H         = mean(H),
+        time            = y.time,
+        max_H           = maximum(H),
+        mean_H          = mean(H),
         total_volume_m3 = sum(H) * cell_area_m2,
-        n_ice_cells    = count(>(0.0), H),
-        n_ocean_cells  = count(>(0.0), L),
+        n_ice_cells     = count(>(0.0), H),
+        n_ocean_cells   = count(>(0.0), L),
     )
 end
 
@@ -77,8 +79,8 @@ function _write_timeseries_nc(samples, path)
         n = length(samples)
         defDim(ds, "time", n)
 
-        ds.attrib["title"]        = "CalvingMIP Exp1 time series"
-        ds.attrib["benchmark"]    = "calvingmip-exp1"
+        ds.attrib["title"]        = "CalvingMIP Exp3 time series"
+        ds.attrib["benchmark"]    = "calvingmip-exp3"
         ds.attrib["dt_outer_yr"]  = DT_OUTER_YR
         ds.attrib["sample_dt_yr"] = SAMPLE_DT_YR
         ds.attrib["t_end_yr"]     = T_END_YR
@@ -104,9 +106,7 @@ function _write_timeseries_nc(samples, path)
 end
 
 # ----------------------------------------------------------------------
-# Restart writer.  Persists the 2D state needed by the exp2 run.jl
-# (H_ice, lsf, z_bed, plus boundary forcing). Lightweight format —
-# exp2 reads back via NCDataset and re-injects into a fresh YelmoModel.
+# Restart writer.  Persists the 2D state needed by the exp4 run.jl.
 # ----------------------------------------------------------------------
 
 function _write_restart_nc(y, b, path)
@@ -131,7 +131,7 @@ function _write_restart_nc(y, b, path)
             defVar(ds, name, Float64, ("xc", "yc"))[:, :] = src
         end
 
-        ds.attrib["benchmark"] = "calvingmip-exp1"
+        ds.attrib["benchmark"] = "calvingmip-exp3"
         ds.attrib["time_yr"]   = y.time
         ds.attrib["dx_km"]     = b.dx_km
     end
@@ -144,7 +144,7 @@ end
 
 function main()
     mkpath(OUTPUT_DIR)
-    @info "calvingmip-exp1 — t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, dx=$(DX_KM) km"
+    @info "calvingmip-exp3 — t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, dx=$(DX_KM) km (Thule domain)"
 
     y, b = _build()
 

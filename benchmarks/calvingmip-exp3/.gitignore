@@ -1,0 +1,12 @@
+# The repo's root .gitignore ignores Manifest.toml globally (standard
+# Julia package convention). Benchmark projects are end-user projects,
+# not packages — we *want* the Manifest committed for reproducibility.
+!Manifest.toml
+
+# Benchmark configuration is committed (root .gitignore excludes *.nml).
+!yelmo_calvingmip_exp3.nml
+
+# Runtime outputs (regenerable).
+output/
+plots/
+logs/

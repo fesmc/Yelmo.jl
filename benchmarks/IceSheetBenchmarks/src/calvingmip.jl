@@ -85,8 +85,10 @@ end
 CalvingMIP benchmark on the circular (exp1/2) or Thule (exp3/4/5) domain.
 
 Currently supported:
-  - `:exp1` — equilibrium calving pinning the front at r = 750 km.
-  - `:exp2` — oscillating calving front, chained from an Exp1 state.
+  - `:exp1` — equilibrium calving pinning the front at r = 750 km (circular).
+  - `:exp2` — oscillating calving front, chained from an Exp1 state (circular).
+  - `:exp3` — equilibrium calving pinning the front at r = 750 km (Thule).
+  - `:exp4` — oscillating calving front, chained from an Exp3 state (Thule).
 
 The calving law itself is supplied by the host model via a hook (e.g.
 `YelmoHooks.calv_flt`); this struct only carries the model-agnostic
@@ -108,8 +110,8 @@ function CalvingMIPBenchmark(exp::Symbol = :exp1;
                               smb_const::Real    = 0.3,
                               T_srf_const::Real  = 223.15,
                               Q_geo_const::Real  = 42.0)
-    exp in (:exp1, :exp2) || error(
-        "CalvingMIPBenchmark: unsupported exp = $exp. Supported: :exp1, :exp2.")
+    exp in (:exp1, :exp2, :exp3, :exp4) || error(
+        "CalvingMIPBenchmark: unsupported exp = $exp. Supported: :exp1, :exp2, :exp3, :exp4.")
 
     domain = exp in (:exp1, :exp2) ? :circular : :thule
 
@@ -150,7 +152,8 @@ end
 function _calvingmip_analytical_state(b::CalvingMIPBenchmark)
     Nx = length(b.xc); Ny = length(b.yc)
 
-    z_bed = [calvmip_bed_circular(b.xc[i], b.yc[j]) for i in 1:Nx, j in 1:Ny]
+    bed_fn = b.domain == :thule ? calvmip_bed_thule : calvmip_bed_circular
+    z_bed  = [bed_fn(b.xc[i], b.yc[j]) for i in 1:Nx, j in 1:Ny]
     H_ice = zeros(Nx, Ny)
     # lsf = +1 (all ocean) — ice will grow from SMB; the calving step's
     # above-SL pin will force lsf = −1 over land each step.
@@ -203,6 +206,8 @@ function write_fixture!(b::CalvingMIPBenchmark, path::AbstractString;
               "(got t = $t). Use a model-side fixture writer for t > 0.")
 
     s = _calvingmip_analytical_state(b)
+    bed_longname = b.domain == :thule ? "Bedrock elevation (Thule bowl + undulations)" :
+                                        "Bedrock elevation (parabolic bowl)"
     mkpath(dirname(path))
     isfile(path) && rm(path)
 
@@ -235,7 +240,7 @@ function write_fixture!(b::CalvingMIPBenchmark, path::AbstractString;
 
         for (name, data, units, longname) in (
             ("H_ice",       s.H_ice,       "m",       "Ice thickness (zero IC)"),
-            ("z_bed",       s.z_bed,       "m",       "Bedrock elevation (parabolic bowl)"),
+            ("z_bed",       s.z_bed,       "m",       bed_longname),
             ("z_sl",        s.z_sl,        "m",       "Sea level"),
             ("smb_ref",     s.smb_ref,     "m/yr",    "Surface mass balance (constant)"),
             ("T_srf",       s.T_srf,       "K",       "Surface temperature"),

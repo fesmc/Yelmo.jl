@@ -1,0 +1,13 @@
+{
+  "benchmark": "calvingmip-exp3",
+  "date": "2026-05-08T17:14:05.703",
+  "final_max_H_m": 2712.942706852047,
+  "final_mean_H_m": 538.590735224459,
+  "final_n_ice_cells": 2828,
+  "final_n_ocean_cells": 1268,
+  "final_total_volume_m3": 1.378792282174615e15,
+  "n_samples": 101,
+  "t_end_yr": 10000.0,
+  "t_final_yr": 10000.0,
+  "yelmo_version": "0.1.0"
+}
