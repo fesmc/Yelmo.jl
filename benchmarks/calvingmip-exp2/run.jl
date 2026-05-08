@@ -147,14 +147,14 @@ function _write_restart_nc(y, b, path; reason::AbstractString = "")
     NCDataset(path, "c") do ds
         Nx = length(b.xc); Ny = length(b.yc)
         defDim(ds, "xc", Nx); defDim(ds, "yc", Ny)
+        defDim(ds, "xc_face", Nx + 1); defDim(ds, "yc_face", Ny + 1)
         defVar(ds, "xc", Float64, ("xc",))[:] = b.xc
         defVar(ds, "yc", Float64, ("yc",))[:] = b.yc
 
+        # aa-cell fields.
         for (name, src) in (
             ("H_ice",    interior(y.tpo.H_ice)[:, :, 1]),
             ("lsf",      interior(y.tpo.lsf)[:, :, 1]),
-            ("ux_bar",   interior(y.dyn.ux_bar)[:, :, 1]),
-            ("uy_bar",   interior(y.dyn.uy_bar)[:, :, 1]),
             ("z_bed",    interior(y.bnd.z_bed)[:, :, 1]),
             ("z_sl",     interior(y.bnd.z_sl)[:, :, 1]),
             ("smb_ref",  interior(y.bnd.smb_ref)[:, :, 1]),
@@ -165,6 +165,12 @@ function _write_restart_nc(y, b, path; reason::AbstractString = "")
             v = defVar(ds, name, Float64, ("xc", "yc"))
             v[:, :] = src
         end
+
+        # Face-staggered velocities (Oceananigans XFace / YFace shape).
+        defVar(ds, "ux_bar", Float64, ("xc_face", "yc"))[:, :] =
+            interior(y.dyn.ux_bar)[:, :, 1]
+        defVar(ds, "uy_bar", Float64, ("xc", "yc_face"))[:, :] =
+            interior(y.dyn.uy_bar)[:, :, 1]
 
         ds.attrib["benchmark"] = "calvingmip-exp2"
         ds.attrib["time_yr"]   = y.time
