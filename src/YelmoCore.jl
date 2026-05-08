@@ -18,6 +18,7 @@ using ..YelmoConst: YelmoConstants,
 using ..YelmoModelPar: YelmoModelParameters
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
+using ..YelmoHooks: YelmoHooks
 
 export AbstractYelmoModel, YelmoModel
 export init_state!, step!, load_state!
@@ -785,6 +786,9 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     # actually measure (set via `yelmo_params(timing = true)`).
     # See `src/timing.jl`.
     timer::YelmoTimer
+    # User-supplied calving-rate hooks. Set after construction to inject
+    # a custom calving law (e.g. CalvingMIP experiments). See YelmoHooks.jl.
+    hooks::YelmoHooks
 end
 
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
@@ -826,6 +830,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     mat  = _alloc_group(v_meta.mat,  g, gt, gr)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
+
+    # ice_allowed defaults to 1 (permit ice everywhere). resid_tendency!
+    # silently zeroes H_ice on cells where ice_allowed == 0, so the
+    # all-zero Oceananigans field default would suppress all SMB-driven
+    # nucleation unless overridden by a restart or explicit benchmark IC.
+    fill!(interior(bnd.ice_allowed), 1.0)
 
     # SIA / SSA solver scratch buffers; not in the dyn schema because
     # they are recomputed every `dyn_step!` and not part of the model
@@ -1055,7 +1065,7 @@ function YelmoModel(restart_file::String, time::Float64;
 
     timer = YelmoTimer(enabled = _resolve_timing_enabled(p))
 
-    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, timer)
+    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, timer, YelmoHooks())
 
     # Default mask_ice to all-dynamic before load_state!. If the restart
     # file carries `mask_ice`, load_state! overwrites this; otherwise the

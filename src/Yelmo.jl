@@ -13,6 +13,7 @@ include("utils/YelmoUtils.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
 include("YelmoModelPar.jl")
+include("YelmoHooks.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
 include("YelmoMirrorCoreFields.jl")
@@ -90,7 +91,7 @@ export vert_int_trapz_boundary!
 export YelmoModelParameters
 
 # YelmoCore
-export AbstractYelmoModel, YelmoModel
+export AbstractYelmoModel, YelmoModel, YelmoHooks
 export init_state!, step!, load_state!
 export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D

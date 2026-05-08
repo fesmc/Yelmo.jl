@@ -20,13 +20,22 @@ abstract type AbstractBenchmark end
 function state end           # state(b::AbstractBenchmark, t::Real) -> NamedTuple
 function write_fixture! end  # write_fixture!(b, path; times=[t]) -> Vector{String}
 
+# Calving-law hooks. The model-agnostic skeleton is declared here so the
+# `YelmoBenchmarks` package extension can extend them; a non-Yelmo host
+# can extend them with array-only overloads.
+function calvmip_exp1! end
+function calvmip_exp2! end
+
 export AbstractBenchmark
 export state, write_fixture!
+export calvmip_exp1!, calvmip_exp2!
 
 include("eismint_moving.jl")
 include("mismip3d.jl")
+include("calvingmip.jl")
 
 export EISMINT1MovingBenchmark, eismint_moving_smb
 export MISMIP3DBenchmark
+export CalvingMIPBenchmark, calvmip_bed_circular, calvmip_bed_thule
 
 end # module

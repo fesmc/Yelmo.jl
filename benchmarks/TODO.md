@@ -17,14 +17,18 @@ In priority order — each follows the existing scaffolder pattern
   — port that into the benchmarks layout. Should reuse `mismip3d-stnd`'s
   `_build` and add a phase loop.
 
-- [ ] **`calvingmip-exp1`** — first CalvingMIP experiment (CIRCLE
-  geometry). The only one of the CalvingMIP suite with an expected
-  reference solution; first non-Pattyn marine benchmark. Will need a
-  new `CalvingMIPCircleBenchmark` in `IceSheetBenchmarks/src/`
-  (model-agnostic spec) plus calving infrastructure validation.
+- [x] **`calvingmip-exp1`** and **`calvingmip-exp2`** — added.
+  Exp1 spins up the equilibrium ice cap (`calvmip_exp1!` pinned front);
+  Exp2 chains from the Exp1 restart, runs the oscillating-front
+  `calvmip_exp2!` law, tracks an 8-direction asymmetry metric, and
+  stops on threshold. Spec + bed geometry now live in
+  `IceSheetBenchmarks/src/calvingmip.jl`; calving-law hooks in the
+  `YelmoBenchmarks` package extension.
 
-- [ ] **CalvingMIP-Exp2..5** — remaining CalvingMIP experiments.
-  No reference solution; runnable reproductions for paper figures.
+- [ ] **CalvingMIP-Exp3..5** — remaining CalvingMIP experiments
+  (Thule geometry). No reference solution; runnable reproductions for
+  paper figures. Will share the bed-geometry helpers already in
+  `IceSheetBenchmarks/src/calvingmip.jl`.
 
 ## `init_state!` — remaining gaps
 

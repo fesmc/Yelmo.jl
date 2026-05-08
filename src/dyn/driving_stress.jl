@@ -294,7 +294,11 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
     elseif method == 1
         @inbounds for j in 1:Ny, i in 1:Nx-1
             ip1f = _ip1_modular(i, Nx, Tx_top)
-            fgx_now = f_grnd_acx[i, j, 1]
+            # f_grnd_acx is an XFaceField under Oceananigans i-1/2
+            # convention: slot `ip1f` (= i+1 under Bounded) is the face
+            # between cells (i, i+1), which is the face we are
+            # processing here.
+            fgx_now = f_grnd_acx[ip1f, j, 1]
             if 0.0 < fgx_now < 1.0
                 H_gl    = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i+1, j, 1])
                 dzsdx_1 = (z_srf[i+1, j, 1] - z_srf[i, j, 1]) / dx_f
@@ -305,7 +309,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
         end
         @inbounds for j in 1:Ny-1, i in 1:Nx
             jp1f = _jp1_modular(j, Ny, Ty_top)
-            fgy_now = f_grnd_acy[i, j, 1]
+            fgy_now = f_grnd_acy[i, jp1f, 1]
             if 0.0 < fgy_now < 1.0
                 H_gl    = 0.5 * (H_ice_dyn[i, j, 1] + H_ice_dyn[i, j+1, 1])
                 dzsdy_1 = (z_srf[i, j+1, 1] - z_srf[i, j, 1]) / dx_f
@@ -318,7 +322,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
     elseif method == 2
         @inbounds for j in 1:Ny, i in 1:Nx-1
             ip1f = _ip1_modular(i, Nx, Tx_top)
-            fgx_now = f_grnd_acx[i, j, 1]
+            fgx_now = f_grnd_acx[ip1f, j, 1]
             if 0.0 < fgx_now < 1.0
                 H_grnd_mid = 0.5 * (H_grnd[i, j, 1] + H_grnd[i+1, j, 1])
                 dzsdx = if H_grnd_mid > 0.0
@@ -333,7 +337,7 @@ function calc_driving_stress_gl!(taud_acx, taud_acy,
         end
         @inbounds for j in 1:Ny-1, i in 1:Nx
             jp1f = _jp1_modular(j, Ny, Ty_top)
-            fgy_now = f_grnd_acy[i, j, 1]
+            fgy_now = f_grnd_acy[i, jp1f, 1]
             if 0.0 < fgy_now < 1.0
                 H_grnd_mid = 0.5 * (H_grnd[i, j, 1] + H_grnd[i, j+1, 1])
                 dzsdy = if H_grnd_mid > 0.0

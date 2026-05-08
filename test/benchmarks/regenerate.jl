@@ -36,7 +36,7 @@ const SPECS = Any[
     HOMCBenchmark(:C; L_km=80.0, dx_km=2.0),
     MISMIP3DBenchmark(:Stnd; dx_km=16.0),
     EISMINT1MovingBenchmark(),    # 50 km, 25 kyr Mirror fixture (≈3-5 min)
-    # Future BenchmarkSpec entries get pushed here.
+    CalvingMIPBenchmark(:exp1; dx_km=25.0),   # 64×64 circular, t=1000 yr
 ]
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -50,6 +50,7 @@ _default_out_times(::AbstractBenchmark)         = [1000.0]
 _default_out_times(::HOMCBenchmark)             = [0.0]
 _default_out_times(::MISMIP3DBenchmark)         = [0.0, 500.0]
 _default_out_times(::EISMINT1MovingBenchmark)   = [25000.0]
+_default_out_times(::CalvingMIPBenchmark)       = [1000.0]
 
 # MISMIP3D ATT-ramp fixture parameters. Compressed Pattyn-2017 protocol
 # pivoted around the existing Stnd baseline `rf_const = 3.1536e-18`

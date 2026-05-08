@@ -100,21 +100,39 @@ function calving_step!(y::YelmoModel, dt::Float64)
                                   f_grnd_acx = y.tpo.f_grnd_acx,
                                   f_grnd_acy = y.tpo.f_grnd_acy)
 
-    # 3 + 4. Per-direction calving rates. The vm-m16 law consumes
-    # `mat.strs2D_tau_eig_1` (1st principal stress, refreshed by the
-    # previous `mat_step!`); other laws ignore the argument.
-    _dispatch_calving!(y.tpo.cmb_flt_acx,  y.tpo.cmb_flt_acy,
-                       y.p.ycalv.calv_flt_method,
-                       y.dyn.ux_bar, y.dyn.uy_bar,
-                       y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
-                       y.p.ycalv.Hc_ref_flt, y.p.ycalv.tau_ice,
-                       "calv_flt_method")
-    _dispatch_calving!(y.tpo.cmb_grnd_acx, y.tpo.cmb_grnd_acy,
-                       y.p.ycalv.calv_grnd_method,
-                       y.dyn.ux_bar, y.dyn.uy_bar,
-                       y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
-                       y.p.ycalv.Hc_ref_grnd, y.p.ycalv.tau_ice,
-                       "calv_grnd_method")
+    # 3 + 4. Per-direction calving rates. When a hook is set it takes
+    # precedence over the method-string dispatch; the hook fills cr_x/cr_y
+    # in-place (the method string is ignored for that direction).
+    if y.hooks.calv_flt !== nothing
+        fill!(interior(y.tpo.cmb_flt_acx), 0.0)
+        fill!(interior(y.tpo.cmb_flt_acy), 0.0)
+        y.hooks.calv_flt(y.tpo.cmb_flt_acx, y.tpo.cmb_flt_acy,
+                         y.dyn.ux_bar, y.dyn.uy_bar,
+                         y.tpo.H_ice, y.tpo.f_ice,
+                         y.tpo.lsf, y.time)
+    else
+        _dispatch_calving!(y.tpo.cmb_flt_acx,  y.tpo.cmb_flt_acy,
+                           y.p.ycalv.calv_flt_method,
+                           y.dyn.ux_bar, y.dyn.uy_bar,
+                           y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
+                           y.p.ycalv.Hc_ref_flt, y.p.ycalv.tau_ice,
+                           "calv_flt_method")
+    end
+    if y.hooks.calv_grnd !== nothing
+        fill!(interior(y.tpo.cmb_grnd_acx), 0.0)
+        fill!(interior(y.tpo.cmb_grnd_acy), 0.0)
+        y.hooks.calv_grnd(y.tpo.cmb_grnd_acx, y.tpo.cmb_grnd_acy,
+                          y.dyn.ux_bar, y.dyn.uy_bar,
+                          y.tpo.H_ice, y.tpo.f_ice,
+                          y.tpo.lsf, y.time)
+    else
+        _dispatch_calving!(y.tpo.cmb_grnd_acx, y.tpo.cmb_grnd_acy,
+                           y.p.ycalv.calv_grnd_method,
+                           y.dyn.ux_bar, y.dyn.uy_bar,
+                           y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
+                           y.p.ycalv.Hc_ref_grnd, y.p.ycalv.tau_ice,
+                           "calv_grnd_method")
+    end
 
     # 5. Merge floating + grounded into single front velocity.
     merge_calving_rates!(y.tpo.cr_acx, y.tpo.cr_acy,
@@ -151,7 +169,13 @@ function calving_step!(y::YelmoModel, dt::Float64)
 
     # 8. Optional redistancing.
     if _redist_trigger(y.time, dt, y.p.ycalv.dt_lsf)
-        lsf_redistance!(y.tpo.lsf, _dx(y.g), _dy(y.g))
+        # lsf is in normalized ±1 units, so redistance in grid-cell units
+        # (dx=1) so that the PDE drives |∇lsf| → 1 cell⁻¹ near the
+        # zero level set, producing lsf ≈ ±0.5 at adjacent cells.
+        # Passing physical dx (25 km) would make the smoothed sign
+        # function ≈ ±lsf/25000 ≈ 0 and cause the lsf to diverge to
+        # ±(1 + n_iter*0.5) ≈ ±3.5 every call.
+        lsf_redistance!(y.tpo.lsf, 1.0, 1.0)
     end
 
     # 9. Kill-rate cmb + aa-stagger magnitude diagnostics.
