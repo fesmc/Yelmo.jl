@@ -48,6 +48,17 @@ makedocs(
             "Calving"              => "physics/calving.md",
             "Dynamics"             => "physics/dynamics.md",
         ],
+        "Benchmarks" => [
+            "Overview"                        => "benchmarks/index.md",
+            "BUELER-B Halfar dome"            => "benchmarks/bueler-b.md",
+            "EISMINT-1 Moving"                => "benchmarks/eismint-moving.md",
+            "ISMIP-HOM-C"                     => "benchmarks/ismip-hom-c.md",
+            "MISMIP3D Standard"               => "benchmarks/mismip3d.md",
+            "Trough F17"                      => "benchmarks/trough.md",
+            "CalvingMIP Exp 1"                => "benchmarks/calvingmip.md",
+            "Slab advection stability"        => "benchmarks/slab-advection.md",
+            "Adaptive predictor-corrector"    => "benchmarks/adaptive-dt.md",
+        ],
         "API reference" => [
             "Core model"      => "api/core.md",
             "Parameters"      => "api/parameters.md",

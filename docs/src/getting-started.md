@@ -75,7 +75,7 @@ init_state!(y, 0.0)
 out = init_output(y, "./output/demo.nc")
 
 for k in 1:5
-    step!(y, 1.0)        # one-year step: topo + dyn (SIA); mat/thrm pending
+    step!(y, 1.0)        # one-year step: topo + dyn (SIA/SSA/DIVA) + mat
     write_output!(out, y)
 end
 
@@ -128,22 +128,48 @@ references — see the
 [grounded fraction page](physics/grounded-fraction.md) for the
 convergence benchmark).
 
-## Analytical benchmarks
+## Benchmarks
 
-The `test/benchmarks/` directory holds end-to-end analytical
-benchmarks (currently the BUELER-B Halfar dome at `t = 1000 yr`).
-They are runnable as scripts and exercise the full
-`step!(y, dt)` chain (currently topo + SIA dynamics) against a
-known closed-form ice-sheet evolution:
+The `test/benchmarks/` directory holds a growing suite of end-to-end
+validation benchmarks.  They are runnable as standalone scripts and
+exercise the full `step!(y, dt)` chain against either a known closed-form
+solution or a committed YelmoMirror reference fixture.
+
+Quick-start benchmarks (no Fortran required):
 
 ```bash
+# BUELER-B Halfar dome — SIA convergence against analytical solution:
 julia --project=test test/benchmarks/test_smoke.jl
 julia --project=test test/benchmarks/test_sia.jl
+
+# EISMINT-1 Moving — SIA + adaptive PC, 5-kyr transient:
+julia --project=test test/benchmarks/test_eismint_moving.jl
+
+# ISMIP-HOM-C — SSA rotational symmetry on a periodic domain:
+julia --project=test test/benchmarks/test_hom_c.jl
+
+# MISMIP3D Standard — SSA marine ice sheet, 500-yr trajectory:
+julia --project=test test/benchmarks/test_mismip3d_stnd.jl
 ```
 
-The fixture restart file `bueler_b_t1000.nc` is checked in;
-`test/benchmarks/regenerate.jl` rebuilds it from the analytical
-Halfar formula if it ever needs refreshing.
+Benchmarks that require committed YelmoMirror fixtures (already checked in,
+no Fortran build needed to run):
+
+```bash
+# MISMIP3D YelmoMirror lockstep at t = 500 yr:
+julia --project=test test/benchmarks/test_mismip3d_stnd_lockstep.jl
+
+# Trough F17 — SSA fixture round-trip + dyn_step lockstep:
+julia --project=test test/benchmarks/test_trough.jl
+
+# CalvingMIP Exp 1 — calving hook regression:
+julia --project=test test/benchmarks/test_calvingmip_exp1.jl
+```
+
+See the [benchmarks section](benchmarks/index.md) for setup details,
+expected results, and diagnostic figures.  The fixture restart file
+`bueler_b_t1000.nc` is checked in; `test/benchmarks/regenerate.jl`
+rebuilds any fixture from a local Fortran build if it ever needs refreshing.
 
 ## Examples
 
