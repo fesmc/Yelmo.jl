@@ -37,8 +37,8 @@ using Printf
 
 const DT_OUTER_YR    = 5.0
 const SAMPLE_DT_YR   = 50.0
-const T_PHASE2_MAX_YR = 1500.0          # cap if the threshold is never hit
-const ASYM_THRESHOLD = 0.05             # 5 % — (max−min)/mean over 8 radii
+const T_PHASE2_MAX_YR = 5000.0          # full CalvingMIP 5-cycle protocol
+const ASYM_THRESHOLD = 0.05             # 5 % — flagged but does not stop the run
 
 const DX_KM         = 25.0
 const NAMELIST_PATH = abspath(joinpath(@__DIR__, "yelmo_calvingmip_exp2.nml"))
@@ -277,6 +277,7 @@ function main()
 
     y, b = _build_from_exp1_restart()
     xc_km = b.xc ./ 1e3; yc_km = b.yc ./ 1e3
+    Nx = length(b.xc); Ny = length(b.yc)
 
     function _take_sample()
         H = interior(y.tpo.H_ice)[:, :, 1]
@@ -293,11 +294,45 @@ function main()
         )
     end
 
+    # Open a streaming NetCDF for 2D snapshots — writes one record per
+    # sampled snapshot at SAMPLE_DT_YR cadence. Closed at end-of-run.
+    isfile(SNAPSHOTS_NC) && rm(SNAPSHOTS_NC)
+    snap_ds = NCDataset(SNAPSHOTS_NC, "c")
+    defDim(snap_ds, "xc", Nx); defDim(snap_ds, "yc", Ny)
+    defDim(snap_ds, "xc_face", Nx + 1); defDim(snap_ds, "yc_face", Ny + 1)
+    defDim(snap_ds, "time", Inf)
+    defVar(snap_ds, "xc",   Float64, ("xc",))[:]   = b.xc
+    defVar(snap_ds, "yc",   Float64, ("yc",))[:]   = b.yc
+    defVar(snap_ds, "time", Float64, ("time",), attrib = ["units" => "yr"])
+    defVar(snap_ds, "H_ice",  Float64, ("xc", "yc", "time"),
+           attrib = ["units" => "m",   "long_name" => "Ice thickness"])
+    defVar(snap_ds, "lsf",    Float64, ("xc", "yc", "time"),
+           attrib = ["units" => "1",   "long_name" => "Level-set function"])
+    defVar(snap_ds, "ux_bar", Float64, ("xc_face", "yc", "time"),
+           attrib = ["units" => "m/yr", "long_name" => "Vertically-averaged x-velocity"])
+    defVar(snap_ds, "uy_bar", Float64, ("xc", "yc_face", "time"),
+           attrib = ["units" => "m/yr", "long_name" => "Vertically-averaged y-velocity"])
+    snap_ds.attrib["title"]         = "CalvingMIP Exp2 2D snapshots"
+    snap_ds.attrib["benchmark"]     = "calvingmip-exp2"
+    snap_ds.attrib["sample_dt_yr"]  = SAMPLE_DT_YR
+    snap_ds.attrib["dx_km"]         = b.dx_km
+
+    function _write_snapshot!(snap_idx)
+        snap_ds["time"][snap_idx]              = y.time
+        snap_ds["H_ice"][:, :, snap_idx]       = interior(y.tpo.H_ice)[:, :, 1]
+        snap_ds["lsf"][:, :, snap_idx]         = interior(y.tpo.lsf)[:, :, 1]
+        snap_ds["ux_bar"][:, :, snap_idx]      = interior(y.dyn.ux_bar)[:, :, 1]
+        snap_ds["uy_bar"][:, :, snap_idx]      = interior(y.dyn.uy_bar)[:, :, 1]
+        return nothing
+    end
+
     samples = NamedTuple[]
     push!(samples, _take_sample())
     s0 = samples[1]
     @printf("  t = %5.0f  asym4 = %5.3f%%  asym8 = %5.2f%%\n",
             s0.time, 100 * s0.asym4, 100 * s0.asym)
+    snap_idx = 1
+    _write_snapshot!(snap_idx)
 
     n_max          = Int(round(T_PHASE2_MAX_YR / DT_OUTER_YR))
     sample_every   = max(Int(round(SAMPLE_DT_YR / DT_OUTER_YR)), 1)
@@ -311,19 +346,22 @@ function main()
             @printf("  t = %5.0f  asym4 = %5.3f%%  asym8 = %5.2f%%  vol = %.3e m^3\n",
                     s.time, 100 * s.asym4, 100 * s.asym, s.vol)
 
+            snap_idx += 1
+            _write_snapshot!(snap_idx)
+
             # Threshold checks the 4-fold-symmetry-breaking metric only.
-            # The all-8 `asym` carries a Cartesian-grid baseline (~0.3 %
-            # on a circular cap at dx = 25 km) that's a finite-resolution
-            # artefact, not a sign of asymmetry growth.
-            if !isnan(s.asym4) && s.asym4 > ASYM_THRESHOLD
+            # On the first crossing save a snapshot restart for inspection
+            # but do NOT terminate — the user wants to see the full
+            # 5-cycle protocol.
+            if threshold_path === nothing && !isnan(s.asym4) && s.asym4 > ASYM_THRESHOLD
                 threshold_path = _write_restart_nc(y, b, RESTART_NC;
                     reason = @sprintf("asym4=%.3f exceeds %.3f", s.asym4, ASYM_THRESHOLD))
-                @info "Asymmetry threshold crossed — stopping" t = s.time asym4 = s.asym4
-                break
+                @info "Asymmetry threshold crossed (continuing run)" t = s.time asym4 = s.asym4
             end
         end
     end
 
+    close(snap_ds)
     _write_timeseries_nc(samples, TIMESERIES_NC)
     @info "wrote outputs" timeseries = TIMESERIES_NC restart = threshold_path
 

@@ -6,7 +6,7 @@
   "asym8_peak_time": 1300.0,
   "asym_threshold": 0.05,
   "benchmark": "calvingmip-exp2",
-  "date": "2026-05-08T12:46:42.632",
+  "date": "2026-05-08T12:59:11.812",
   "front_radius_range_km": {
     "E": {
       "max": 762.4818490690686,
@@ -41,6 +41,6 @@
       "min": 569.5104905203469
     }
   },
-  "n_samples": 31,
+  "n_samples": 101,
   "yelmo_version": "0.1.0"
 }
