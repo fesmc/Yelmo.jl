@@ -28,12 +28,18 @@ function main()
         error("output/timeseries.nc not found — run run.jl first.")
 
     NCDataset(TIMESERIES_NC, "r") do ds
-        time = ds["time"][:]
-        asym = ds["asym"][:]
+        time  = ds["time"][:]
+        asym4 = ds["asym4"][:]
+        asym8 = ds["asym"][:]
         threshold = Float64(ds.attrib["asym_threshold"])
 
-        i_peak = argmax(asym)
-        i_cross = findfirst(a -> !isnan(a) && a > threshold, asym)
+        # The threshold is checked against asym4 (the 4-fold-symmetry-
+        # breaking metric — independent of Cartesian-grid anisotropy).
+        # asym8 is reported alongside as the all-8 spread (which also
+        # picks up the cap's "slightly square" shape on a finite grid).
+        i_peak4  = argmax(asym4)
+        i_peak8  = argmax(asym8)
+        i_cross4 = findfirst(a -> !isnan(a) && a > threshold, asym4)
 
         dir_ranges = Dict{String,Any}()
         for d in _DIRS
@@ -50,9 +56,11 @@ function main()
             "yelmo_version"   => _yelmo_version(),
             "n_samples"       => length(time),
             "asym_threshold"  => threshold,
-            "asym_peak"       => asym[i_peak],
-            "asym_peak_time"  => time[i_peak],
-            "asym_threshold_time" => i_cross === nothing ? nothing : time[i_cross],
+            "asym4_peak"      => asym4[i_peak4],
+            "asym4_peak_time" => time[i_peak4],
+            "asym4_threshold_time" => i_cross4 === nothing ? nothing : time[i_cross4],
+            "asym8_peak"      => asym8[i_peak8],
+            "asym8_peak_time" => time[i_peak8],
             "front_radius_range_km" => dir_ranges,
         )
 

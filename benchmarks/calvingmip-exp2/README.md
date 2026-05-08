@@ -35,17 +35,30 @@ julia --project=. summary.jl
 
 ## Asymmetry metric
 
-Each snapshot, eight cardinal/intercardinal radii are measured from
-the domain centre to the first `lsf = 0` crossing along each ray.
-The asymmetry metric is
+Each snapshot, eight cardinal/intercardinal radii are measured by
+ray-casting bilinear-interpolated `lsf` from the true origin
+`(0, 0)` and finding the first sign change. Two metrics are
+recorded:
 
-    asym = (max − min) / mean
+- `asym4 = max((max − min)/mean over E/N/W/S,
+                (max − min)/mean over NE/NW/SW/SE)`
+  Spread *within* each 4-fold orbit. **Stays at machine precision on
+  any cap that is rotationally 4-fold symmetric** — i.e. it sees
+  through the Cartesian grid's intrinsic cardinal-vs-diagonal
+  anisotropy and only triggers on actual symmetry breaking. This
+  metric drives the threshold check.
 
-over the eight radii. The run terminates the moment `asym >
-ASYM_THRESHOLD` (default 0.05) — once asymmetry develops in this
-benchmark it grows monotonically, so finishing the full 5-cycle
-protocol adds no information. The state at the threshold-crossing
-moment is saved as `output/restart_at_threshold.nc` for inspection.
+- `asym8 = (max − min)/mean over all 8 radii`
+  Spread across all 8 directions. Carries a baseline of a few tenths
+  of a percent on any finite-resolution Cartesian grid (the cap is
+  "slightly square", with cardinal radii ~2 km longer than diagonals
+  on a 25 km grid) and oscillates with the front position over the
+  advance/retreat cycle. Reported for diagnostic comparison with the
+  pre-fix behaviour.
+
+The run terminates the moment `asym4 > ASYM_THRESHOLD` (default
+0.05). The state at the threshold-crossing moment is saved as
+`output/restart_at_threshold.nc` for inspection.
 
 ## Outputs
 
