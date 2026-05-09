@@ -1,6 +1,7 @@
 &yelmo
     domain          = "Greenland"
     grid_name       = "GRL-16KM"
+    grid_path       = "data/GRL-16KM/GRL-16KM_REGIONS.nc"
     phys_const      = "Earth"
     experiment      = "None"
     zeta_scale      = "exp"

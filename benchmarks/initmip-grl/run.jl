@@ -144,10 +144,10 @@ function _build_mirror()
     p = YelmoParameters(NAMELIST_PATH, "initmip_grl")
     y = YelmoMirror(p, 0.0; rundir = OUTPUT_DIR, overwrite = true)
 
-    # YelmoMirror's `y.c` is constructed from `phys_const = "Earth"`
-    # in the nml (rho_ice = 910, rho_w = 1000 by default). Same
-    # conversion factor as the Yelmo backend.
-    _apply_forcing!(y, y.c.rho_ice, y.c.rho_w)
+    # YelmoMirror keeps physical constants on the Fortran side rather
+    # than as a Julia-side `y.c`; pull them from the parsed nml's
+    # `&phys` block (rho_ice = 910, rho_w = 1000 for `phys_const="Earth"`).
+    _apply_forcing!(y, p.phys.rho_ice, p.phys.rho_w)
 
     init_state!(y, 0.0; thrm_method = "robin-cold")
 
@@ -198,13 +198,12 @@ function _domain_diag_mirror(y)
     H = interior(y.tpo.H_ice)[:, :, 1]
     dx = abs(Float64(y.g.Δxᶜᵃᵃ))
     dy = abs(Float64(y.g.Δyᵃᶜᵃ))
-    cell_km2  = dx * dy * 1e-6                         # m² → km²
-    V_ice_km3 = sum(H) * cell_km2 * 1e-3               # H[m]·area[km²]·1e-3
-    V_ice     = V_ice_km3 * 1e-6                       # match regions API (1e6 km³)
-    H_ice_max = maximum(H)
-    # V_sle requires H_af (above-flotation thickness) which lives in
-    # the regions API. Report NaN here rather than approximate.
-    return (V_ice = V_ice, V_sle = NaN, H_ice_max = H_ice_max)
+    # Match regions API conventions: V_ice in km³ (sum of H[m] × cell
+    # area[m²] × m³→km³ factor), max H in m. V_sle requires H_af
+    # (above-flotation thickness) which lives in the regions API; we
+    # report NaN here rather than approximate.
+    V_ice = sum(H) * dx * dy * 1e-9                # m·m²·(km³/m³) = km³
+    return (V_ice = V_ice, V_sle = NaN, H_ice_max = maximum(H))
 end
 
 function _domain_diag_yelmo(regs)
@@ -229,15 +228,24 @@ function main()
     regs = BACKEND == "yelmo" ? init_regions(y; outdir = OUTPUT_DIR) : nothing
 
     # 2D snapshot file. Groups match Fortran write_step_2D.
-    snap_out = init_output(y, SNAPSHOTS_NC;
-                           selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
+    # YelmoModel only for now: the file format used by init_output assumes
+    # the split-boundary 3D layout (Nz_file = Nz + 2 with 2D `_b` / `_s`
+    # siblings registered in BOUNDARY_FIELD_REGISTRY_ICE). YelmoMirror
+    # uses the interior-extended layout (Nz_file = Nz, no split fields)
+    # — wiring it through here needs a separate writer path.
+    snap_out = if BACKEND == "yelmo"
+        init_output(y, SNAPSHOTS_NC;
+                    selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
+    else
+        nothing
+    end
 
     # Write t = 0 records.
     if regs !== nothing
         update_regions!(regs, y)
         write_regions!(regs, y, y.time)
     end
-    write_output!(snap_out, y)
+    snap_out !== nothing && write_output!(snap_out, y)
 
     diag0 = regs === nothing ? _domain_diag_mirror(y) : _domain_diag_yelmo(regs)
     @info "t=0 initialized" V_ice_km3=diag0.V_ice V_sle_m=diag0.V_sle
@@ -256,7 +264,7 @@ function main()
             write_regions!(regs, y, y.time)
         end
 
-        if k % steps_per_snapshot == 0
+        if snap_out !== nothing && k % steps_per_snapshot == 0
             write_output!(snap_out, y)
         end
 
@@ -268,14 +276,18 @@ function main()
         flush(stdout)
     end
 
-    close(snap_out.ds)
+    snap_out !== nothing && close(snap_out.ds)
 
-    # Restart file (full model state for continuation).
-    restart_out = init_output(y, RESTART_FINAL)
-    write_output!(restart_out, y)
-    close(restart_out.ds)
-
-    @info "done" backend=BACKEND snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
+    # Restart file (full model state for continuation). YelmoModel only;
+    # see the snap_out comment for why Mirror is skipped here.
+    if BACKEND == "yelmo"
+        restart_out = init_output(y, RESTART_FINAL)
+        write_output!(restart_out, y)
+        close(restart_out.ds)
+        @info "done" backend=BACKEND snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
+    else
+        @info "done" backend=BACKEND
+    end
 
     # Per-section timings — YelmoModel only (Mirror has no Julia-side timer).
     if BACKEND == "yelmo" && y.timer.enabled

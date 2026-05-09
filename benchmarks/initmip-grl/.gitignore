@@ -10,3 +10,9 @@
 output/
 plots/
 logs/
+
+# Mirror backend: symlink to Fortran-yelmo's `input/` dir (auxiliary
+# namelists like `yelmo_phys_const.nml` that Fortran opens from the
+# run-time cwd). Created on first Mirror run; not part of the
+# benchmark source.
+input
