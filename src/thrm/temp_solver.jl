@@ -356,9 +356,7 @@ function _calc_temp_3D_kernel!(enth, T, om, bmg, Qib, Hcts,
                                solution::Vector{Float64},
                                cp_tri::Vector{Float64},
                                dp_tri::Vector{Float64},
-                               Tib::Array{Float64,3},
-                               Tmb::Array{Float64,3},
-                               Tis::Array{Float64,3},
+                               Tib, Tmb, Tis,
                                Nx::Int, Ny::Int, Nz::Int)
     @inbounds for j in 2:(Ny - 1), i in 2:(Nx - 1)
         f_ice_ij  = Fi[i, j, 1]
