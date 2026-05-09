@@ -10,10 +10,11 @@
 #                                 Duval (1985) water-content scaling
 #
 # All three take a temperature-coupled ice state. They are wired into
-# `mat_step!` only when `rf_method = 1` (the temperature-coupled
-# branch), which depends on the therm port for live `T_ice`, `T_pmp`,
-# and `omega` fields. The functions are landed now so the kernels are
-# tested independently and ready when therm wires up.
+# `mat_step!` when `rf_method = 1` (temperature-coupled Arrhenius);
+# `mat_step!` reads `T_ice`, `T_pmp`, and `omega` from the therm port,
+# branches on `ymat.rf_use_eismint2` between the EISMINT2 and Greve &
+# Blatter constants, and applies `scale_rate_factor_water!` when
+# `ymat.rf_with_water = true`.
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
