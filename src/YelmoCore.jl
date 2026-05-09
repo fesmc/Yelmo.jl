@@ -115,15 +115,16 @@ const BOUNDARY_FIELD_REGISTRY_ICE = (
     visc    = (b = :visc_b,    s = :visc_s),
     ATT     = (b = :ATT_b,     s = :ATT_s),
     enh     = (b = :enh_b,     s = :enh_s),
-    # 3D dyn velocity components are added with commit 3 (the dyn
-    # refactor). The existing 2D `ux_b` / `ux_s` / `uy_b` / `uy_s`
-    # fields are now true boundary storage rather than redundant
-    # slice-1 / slice-end copies of the 3D fields. On read the file's
-    # unified `ux` / `uy` slab decomposes into `_b` (slice 1),
+    # 3D dyn velocity components. The 2D `_b` / `_s` fields are true
+    # boundary storage (populated by `calc_velocity_*` and
+    # `finalize_velocity_3D!` in dyn) rather than redundant slice-1 /
+    # slice-end copies of the 3D fields. On read the file's unified
+    # `ux` / `uy` / `uxy` slab decomposes into `_b` (slice 1),
     # interior (slice 2:end-1), and `_s` (slice end). On write the
     # three Yelmo fields glue back into one unified slab.
     ux      = (b = :ux_b,      s = :ux_s),
     uy      = (b = :uy_b,      s = :uy_s),
+    uxy     = (b = :uxy_b,     s = :uxy_s),
 )
 
 # Reverse-lookup tables built once at module load. Map every
