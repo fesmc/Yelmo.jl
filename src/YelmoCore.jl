@@ -30,6 +30,7 @@ export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
 export fill_halo_regions!, fill_corner_halos!
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export BOUNDARY_FIELD_REGISTRY_ICE, is_boundary_field_registered, boundary_slice_kind, boundary_unified_name
+export uses_split_boundary_storage
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
@@ -174,6 +175,10 @@ Return the unified disk / Fortran variable name for a registered
 + surface). Throws `KeyError` if `sym` is not registered.
 """
 @inline boundary_unified_name(sym::Symbol) = _BOUNDARY_FIELD_UNIFIED[sym]
+
+# Forward declaration; method dispatching on `AbstractYelmoModel` is
+# defined right after the abstract type.
+function uses_split_boundary_storage end
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -436,6 +441,23 @@ must expose the fields `alias`, `rundir`, `time`, `p`, `g`, `gt`, `gr`, `v`,
 `init_state!(y, time; kwargs...)` and `step!(y, dt)`.
 """
 abstract type AbstractYelmoModel end
+
+"""
+    uses_split_boundary_storage(y) -> Bool
+
+Whether `y` stores 3D ice fields under the split-boundary convention
+(Yelmo.jl: 3D interior + 2D `_b` / `_s` boundary fields → file
+`Nz_file = Nz + 2`) or the interior-extended convention
+(`YelmoMirror`: 3D includes the basal/surface endpoints → file
+`Nz_file = Nz`). Used by the I/O writer to pick file dimensions
+and decide whether to glue boundary fields into the unified slab
+on write.
+
+Default `true` for any `AbstractYelmoModel`; `YelmoMirror` overrides
+in `YelmoMirrorCoreFields.jl`.
+"""
+uses_split_boundary_storage(::AbstractYelmoModel) = true
+
 
 # ---------------------------------------------------------------------------
 # RMSEStats: scalar comparison metrics for the `dta` group

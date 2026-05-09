@@ -6,7 +6,7 @@ using ..YelmoMeta: VariableMeta, parse_variable_table
 using ..YelmoPar: YelmoParameters, write_nml
 using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
                    XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
-import ..YelmoCore: init_state!, step!
+import ..YelmoCore: init_state!, step!, uses_split_boundary_storage
 
 export YelmoMirror, init_state!, step!, yelmo_sync!, yelmo_write_restart!
 export yelmo_get_var2D, yelmo_get_var2D!
@@ -36,6 +36,13 @@ mutable struct YelmoMirror{B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     tpo::TP
     buffers::NamedTuple # Stores (v2D=..., v3D=..., v3Dr=...)
 end
+
+# YelmoMirror stores 3D ice fields under the Fortran-side
+# interior-extended convention (basal/surface endpoints included in
+# the same 3D array, no separate `_b` / `_s` boundary fields). The
+# I/O writer uses this to pick file dimensions (`Nz_file = Nz`
+# instead of `Nz + 2`) and skip the boundary-glue path.
+uses_split_boundary_storage(::YelmoMirror) = false
 
 # --- Constructors ---
 
