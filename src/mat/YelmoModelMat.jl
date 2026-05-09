@@ -16,9 +16,11 @@ The same applies to the adaptive-PC path in `src/timestepping.jl`.
 
 Milestone scope (this PR — "mat 1"):
 
-  - `rf_method ∈ {-1, 0, 2}` only. `rf_method = 1` (temperature- and
-    water-content-coupled) needs the therm port (`T_ice`, `T_pmp`,
-    `omega`) and lands with that milestone.
+  - `rf_method ∈ {-1, 0, 1, 2}`. `rf_method = 1` (temperature- and
+    water-content-coupled Arrhenius) reads `y.thrm.{T_ice, T_pmp,
+    omega}` from the therm port; the EISMINT2 vs Greve & Blatter
+    Arrhenius variant is selected by `ymat.rf_use_eismint2`, and
+    water-content scaling by `ymat.rf_with_water`.
   - `enh_method ∈ {"simple", "shear2D"}`. `shear3D` and any
     `*-tracer` variant are deferred — the latter two require the
     tracer infrastructure (`calc_tracer_3D`, `calc_isochrones`).
@@ -87,9 +89,10 @@ Scope ("mat 1" PR):
   - `enh_method ∈ {"simple", "shear2D", "shear3D"}`. The three
     `*-tracer` variants need the tracer infrastructure
     (`calc_tracer_3D`, `bnd.enh_srf`) and error explicitly.
-  - `rf_method ∈ {-1, 0, 2}`. `rf_method = 1` (temperature- and
-    water-coupled Arrhenius) needs the therm port and errors with
-    a clear pointer to the milestone that lands it.
+  - `rf_method ∈ {-1, 0, 1, 2}`. `rf_method = 1` (temperature- and
+    water-coupled Arrhenius) reads `y.thrm.{T_ice, T_pmp, omega}`,
+    branches on `rf_use_eismint2`, and applies `scale_rate_factor_water!`
+    when `rf_with_water = true`.
   - `calc_age = true` runs the implicit-solver age-tracer port
     (Step 0 of `mat_step!`). Only `tracer_method = "impl"` is
     supported; the explicit branch and `calc_isochrones` (the
@@ -109,6 +112,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
 
     par     = y.p.ymat
     par_dyn = y.p.ydyn
+    c       = y.c
     zeta_aa = znodes(y.gt, Center())
 
     # 0. Age tracer (`dep_time`). Dispatched only when `calc_age = true`
@@ -196,9 +200,27 @@ function mat_step!(y::YelmoModel, dt::Float64)
         fill!(interior(y.mat.ATT_b),   par.rf_const)
         fill!(interior(y.mat.ATT_s),   par.rf_const)
     elseif par.rf_method == 1
-        error("mat_step!: rf_method=1 (temperature-coupled Arrhenius) " *
-              "requires the therm port for live T_ice / T_pmp / omega. " *
-              "Use rf_method ∈ {-1, 0, 2} for now.")
+        # Temperature- and (optionally) water-content-coupled Arrhenius.
+        # Fortran yelmo_material.f90:212-229: the Arrhenius variant is
+        # selected by `rf_use_eismint2` (EISMINT2 / Payne 2000 vs
+        # Greve & Blatter 2009), and `rf_with_water` triggers the
+        # Lliboutry-Duval water-content scaling on top.
+        if par.rf_use_eismint2
+            calc_rate_factor_eismint!(y.mat.ATT, y.thrm.T_ice, y.thrm.T_pmp,
+                                      y.mat.enh, c.T0)
+        else
+            calc_rate_factor!(y.mat.ATT, y.thrm.T_ice, y.thrm.T_pmp,
+                              y.mat.enh, c.T0)
+        end
+        if par.rf_with_water
+            scale_rate_factor_water!(y.mat.ATT, y.thrm.omega)
+        end
+        # Path B refresh of basal / surface boundaries from the freshly
+        # computed 3D ATT, then depth-average — same convention as enh
+        # (step 3a/3b above) and visc (step 5b/6 below).
+        _path_b_constant_extrapolate!(y.mat.ATT_b, y.mat.ATT_s, y.mat.ATT)
+        depth_average!(y.mat.ATT_bar, y.mat.ATT,
+                       y.mat.ATT_b, y.mat.ATT_s, zeta_aa)
     elseif par.rf_method == 2
         if par_dyn.visc_method != 0 || par.n_glen != 1.0
             error("mat_step!: rf_method=2 only valid when " *
@@ -213,7 +235,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
         fill!(interior(y.mat.ATT_s),   att_val)
     else
         error("mat_step!: unknown rf_method=$(par.rf_method). " *
-              "Supported: -1, 0, 2 (rf_method=1 deferred to therm).")
+              "Supported: -1, 0, 1, 2.")
     end
 
     # 5. 3D Glen-law viscosity.
