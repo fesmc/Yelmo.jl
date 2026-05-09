@@ -163,9 +163,9 @@ function therm_step!(y::YelmoModel, dt::Float64)
     par     = y.p.ytherm
     method  = par.method
     c       = y.c
-    # Path B (commit 5a): use the cached `Vector{Float64}` snapshots
-    # of the ice grid axes from `y.thrm.scratch` instead of allocating
-    # a fresh `collect(znodes(...))` per `therm_step!` call.
+    # Use the cached `Vector{Float64}` snapshots of the ice grid axes
+    # from `y.thrm.scratch` instead of allocating a fresh
+    # `collect(znodes(...))` per `therm_step!` call.
     zeta_aa = y.thrm.scratch.zeta_aa
     zeta_ac = y.thrm.scratch.zeta_ac
 
@@ -182,10 +182,9 @@ function therm_step!(y::YelmoModel, dt::Float64)
     end
     calc_T_pmp_3D!(y.thrm.T_pmp, y.tpo.H_ice, zeta_aa,
                    c.T0, c.T_pmp_beta, c.rho_ice, c.g)
-    # Path B: also fill the dedicated 2D basal / surface T_pmp fields
-    # registered by `PATH_B_REGISTRY_ICE`, since `T_pmp[:,:,1]` is now
-    # the first interior layer at ζ_aa[1], not the basal boundary at
-    # ζ = 0.
+    # Also fill the dedicated 2D basal / surface T_pmp boundary fields,
+    # since `T_pmp[:,:,1]` is the first interior layer at ζ_aa[1],
+    # not the basal boundary at ζ = 0.
     calc_T_pmp_boundaries_2D!(y.thrm.T_pmp_b, y.thrm.T_pmp_s,
                               y.tpo.H_ice,
                               c.T0, c.T_pmp_beta, c.rho_ice, c.g)
@@ -409,10 +408,10 @@ function therm_step!(y::YelmoModel, dt::Float64)
                             y.thrm.T_pmp, y.thrm.cp, c.L_ice)
 
     # 8. Homologous-temperature + pressure-melting fraction.
-    #    Path B: T_prime_b / T_prime_s come from the dedicated
-    #    boundary fields (T_ice_b - T_pmp_b, T_ice_s - T_pmp_s),
-    #    not from T_prime[:, :, 1] / [:, :, end] (which are interior
-    #    layers under Path B). f_pmp reads T_ice_b / T_pmp_b.
+    #    T_prime_b / T_prime_s come from the dedicated 2D boundary
+    #    fields (T_ice_b - T_pmp_b, T_ice_s - T_pmp_s), not from
+    #    T_prime[:, :, 1] / [:, :, end] (which are interior layers).
+    #    f_pmp reads T_ice_b / T_pmp_b.
     _calc_T_prime_3D!(y.thrm.T_prime, y.thrm.T_prime_b, y.thrm.T_prime_s,
                       y.thrm.T_ice, y.thrm.T_pmp,
                       y.thrm.T_ice_b, y.thrm.T_pmp_b,
@@ -440,13 +439,13 @@ function _fill_bmb_w_scratch!(bmb_w::AbstractArray{Float64,3},
     return bmb_w
 end
 
-# Compute T_prime = T_ice - T_pmp (3D interior) plus the Path B
+# Compute T_prime = T_ice - T_pmp (3D interior) plus the 2D
 # boundary fields T_prime_b = T_ice_b - T_pmp_b (basal, ζ=0) and
 # T_prime_s = T_ice_s - T_pmp_s (surface, ζ=1). Mirrors the diagnostic
 # lines in Fortran `calc_ytherm` lines 248-249, but with the boundary
 # values pulled from their dedicated 2D fields rather than from
 # `T_prime[:, :, 1]` / `T_prime[:, :, end]` (which are interior
-# layer values, not boundary values, under Path B).
+# layer values, not boundary values).
 function _calc_T_prime_3D!(T_prime_field, T_prime_b_field, T_prime_s_field,
                             T_ice_field, T_pmp_field,
                             T_ice_b_field, T_pmp_b_field,

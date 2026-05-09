@@ -14,29 +14,27 @@
 # strain-rate tensor (`y.dyn.strn.de`) plus the mat rate factor
 # (`y.mat.ATT`) to compute material-property viscosities.
 #
-# Boundary endpoint convention (Path B):
+# Boundary-endpoint convention:
 #
 # In Fortran, `visc(:,:,1:nz_aa)` is allocated on the full aa-grid
 # where `zeta_aa(1) = 0` (bed) and `zeta_aa(nz_aa) = 1` (surface), so
 # `integrate_trapezoid1D_pt` covers the full `[0, 1]` interval using
 # the per-layer values directly.
 #
-# Under the Path B vertical convention (commit 1+ of the vert-split
-# refactor) Yelmo.jl 3D fields use Center vertical staggering —
-# interior layer midpoints only, length `Nz`, excluding the bed and
-# surface endpoints. Mat carries explicit 2D boundary fields
-# `visc_b` / `visc_s` / `enh_b` / `enh_s` populated by the boundary
-# registry (see `PATH_B_REGISTRY_ICE` in `YelmoCore.jl`); the depth
-# integrators below take them as explicit arguments and consume the
-# real basal / surface values rather than constant-extrapolating
-# from the nearest interior layer.
+# Yelmo.jl 3D fields use Center vertical staggering — interior layer
+# midpoints only, length `Nz`, excluding the bed and surface
+# endpoints. Mat carries explicit 2D boundary fields
+# `visc_b` / `visc_s` / `enh_b` / `enh_s` (see the boundary-fields
+# registry in `YelmoCore.jl`); the depth integrators below take them
+# as explicit arguments and consume the real basal / surface values
+# rather than constant-extrapolating from the nearest interior layer.
 #
 # A backward-compat 3-arg / 5-arg method overload still exists for
 # call sites that have not yet been wired to pass the boundary
 # fields (notably the synthetic-state unit tests in
 # `test/test_yelmo_mat_viscosity.jl`); those overloads constant-
-# extrapolate from the interior, equivalent to the pre-Path B
-# behaviour.
+# extrapolate from the interior, equivalent to the legacy
+# interior-extended layout.
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
@@ -108,8 +106,8 @@ end
 """
     calc_visc_int!(visc_int, visc, visc_b, visc_s, H_ice, f_ice, zeta_aa) -> visc_int
 
-Depth-integrated viscosity in Pa·yr·m, using explicit Path B boundary
-endpoint fields:
+Depth-integrated viscosity in Pa·yr·m, using the explicit 2D
+boundary-endpoint fields:
 
     visc_int(i, j) = ∫₀¹ visc(i, j, ζ) dζ · H_ice(i, j)    if f_ice == 1
                    = 0                                       otherwise
@@ -165,7 +163,7 @@ function calc_visc_int!(visc_int, visc, visc_b, visc_s, H_ice, f_ice,
 end
 
 # Backward-compat: constant-extrapolation. Equivalent to the legacy
-# pre-Path B implementation. Used by synthetic-state unit tests
+# interior-extended implementation. Used by synthetic-state unit tests
 # (`test/test_yelmo_mat_viscosity.jl`) that haven't been wired with
 # explicit boundary fields.
 function calc_visc_int!(visc_int, visc, H_ice, f_ice,
@@ -197,8 +195,8 @@ end
     depth_average!(out2D, var3D, var_b, var_s, zeta_aa) -> out2D
 
 Pure depth-average `∫₀¹ var(ζ) dζ` of a 3D Center-staggered field
-into a 2D Center-staggered field, using explicit Path B boundary
-endpoint fields `var_b` (ζ=0) and `var_s` (ζ=1).
+into a 2D Center-staggered field, using explicit 2D boundary-endpoint
+fields `var_b` (ζ=0) and `var_s` (ζ=1).
 
 Used by `mat_step!` to populate `mat.enh_bar` and `mat.visc_bar`
 from their respective 3D fields. Fortran analog:

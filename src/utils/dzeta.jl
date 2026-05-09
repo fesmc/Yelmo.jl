@@ -50,7 +50,7 @@ function calc_dzeta_terms!(dzeta_a::AbstractVector{Float64},
         dzeta_b[k] = 1.0 / ((zeta_ac[k+1] - zeta_ac[k]) * (zeta_aa[k+1] - zeta_aa[k]))
     end
 
-    # Path B endpoints: when `zeta_aa[1] > 0` (i.e. the first interior
+    # Boundary-endpoint weights: when `zeta_aa[1] > 0` (i.e. the first interior
     # centre is *strictly above* the basal boundary) and / or
     # `zeta_aa[nz_aa] < 1` (last interior centre strictly below the
     # surface), populate the half-cell weights so the implicit column

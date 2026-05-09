@@ -113,11 +113,11 @@ function _spatial_dims(field::Field{X,Y,Z}, ylmo) where {X,Y,Z}
 end
 
 # ---------------------------------------------------------------------------
-# Path B helpers
+# Split-boundary I/O helpers
 # ---------------------------------------------------------------------------
 
 # Glue a 2D basal slice + 3D interior + 2D surface slice along the
-# z-axis into a length-(Nz+2) slab matching the file's Path B
+# z-axis into a length-(Nz+2) slab matching the on-disk file
 # convention. Result is `Float64` (matched to the existing
 # `_get_data` element type) and is allocated fresh per call;
 # this only runs at file-write time so allocation is not on a
@@ -140,7 +140,7 @@ end
 # (z=1) slots. Used for non-registered 3D Center fields (cp, kt,
 # Q_strn, dQsdT, omega, advecxy, ...) so the file format stays
 # consistent with the registered fields. The NaN values are dropped
-# again on read by the Path B interior-slice helper.
+# again on read by the interior-slice helper.
 function _path_b_nan_pad(interior3d::AbstractArray{<:Real,3})
     Nx, Ny, Nz = size(interior3d)
     out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
@@ -258,15 +258,14 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     defDim(ds, "x_f",         x_f_size)
     defDim(ds, "y_c",         ylmo.g.Ny)
     defDim(ds, "y_f",         y_f_size)
-    # Path B convention: the on-disk `zeta` axis includes the basal
-    # (z=0) and surface (z=1) boundary endpoints alongside the
-    # interior centres, so its length is Yelmo's `gt.Nz + 2` (i.e.
-    # the file's pre-Path B `Nz_file`). This keeps the file format
-    # round-trippable with Mirror-style restarts: the Path B reader
-    # inverts `Yelmo Nz = length(file zeta) − 2`. Registered fields
-    # (T_ice, enth, ...) glue _b + interior + _s into this slab on
-    # write; non-registered 3D Center fields NaN-pad the boundary
-    # slots.
+    # The on-disk `zeta` axis includes the basal (z=0) and surface
+    # (z=1) boundary endpoints alongside the interior centres, so its
+    # length is Yelmo's `gt.Nz + 2` (the file's `Nz_file`). This keeps
+    # the file format round-trippable with Mirror-style restarts: the
+    # reader inverts `Yelmo Nz = length(file zeta) − 2`. Registered
+    # split-boundary fields (T_ice, enth, ...) glue _b + interior + _s
+    # into this slab on write; non-registered 3D Center fields NaN-pad
+    # the boundary slots.
     defDim(ds, "zeta",         ylmo.gt.Nz + 2)
     # `zeta_ac` uses Mirror convention (commit 2.5): Nz_file+1 = Nz+3
     # face levels. ZFace fields (uz, uz_star, ...) are extended with 1
@@ -290,7 +289,7 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     # `zeta` includes the basal (0) and surface (1) endpoints —
     # length Nz+2. Round-trips with Mirror-format restarts.
     # Interior values are the Oceananigans-derived Center positions
-    # (commit 5 will replace these with the file's exact pre-Path B
+    # (a future commit may replace these with the file's exact
     # interior centers via the thrm scratch struct).
     _defcoord(ds, "zeta",         Float64, ("zeta",),
               vcat(0.0, collect(znodes(ylmo.gt, Center())), 1.0),
@@ -327,10 +326,10 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
             group_nt[fname] isa Field || continue
             name = String(fname)
             _selected(name, gname, selection) || continue
-            # Path B: skip `_b` / `_s` of registered fields — they
-            # are written as part of the unified-name interior slab
-            # into the `zeta` axis (which is now length Nz_file =
-            # Nz + 2 with basal/surface endpoints).
+            # Skip `_b` / `_s` of registered split-boundary fields —
+            # they are written as part of the unified-name interior
+            # slab into the `zeta` axis (length Nz_file = Nz + 2 with
+            # basal/surface endpoints).
             if is_path_b_registered(fname)
                 kind = path_b_slice_kind(fname)
                 kind === :interior || continue
@@ -415,11 +414,11 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             nc_name === nothing && continue
             haskey(ds, nc_name) || continue
 
-            # Path B: registered `_b` / `_s` fields are skipped by
-            # `init_output` — they don't have an `nc_name` entry and
-            # the `nc_name === nothing` check above already filtered
-            # them. Registered interior fields glue with the matching
-            # `_b` / `_s` 2D fields into a unified slab here.
+            # Registered split-boundary `_b` / `_s` fields are skipped
+            # by `init_output` — they don't have an `nc_name` entry
+            # and the `nc_name === nothing` check above already
+            # filtered them. Registered interior fields glue with the
+            # matching `_b` / `_s` 2D fields into a unified slab here.
             if is_path_b_registered(fname) && path_b_slice_kind(fname) === :interior
                 bs = PATH_B_REGISTRY_ICE[fname]
                 interior_data = _get_data(group_nt[fname])

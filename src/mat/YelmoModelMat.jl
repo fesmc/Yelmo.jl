@@ -179,13 +179,14 @@ function mat_step!(y::YelmoModel, dt::Float64)
               "\"simple\", \"shear2D\", \"shear3D\".")
     end
 
-    # 3a. Path B: refresh enh_b / enh_s from the recomputed 3D enh
-    #     by constant extrapolation off the nearest interior layer.
-    #     Equivalent to the pre-Path B convention used by `enh_bar`'s
-    #     trapezoidal rule, but now stored explicitly so the registry
-    #     has authoritative boundary values (and so future commits
-    #     can replace this with a physically derived rule without
-    #     changing the integration call site).
+    # 3a. Refresh the 2D boundary fields enh_b / enh_s from the
+    #     recomputed 3D enh by constant extrapolation off the
+    #     nearest interior layer. Equivalent to the legacy
+    #     interior-extended convention used by `enh_bar`'s trapezoidal
+    #     rule, but now stored explicitly so the boundary registry
+    #     has authoritative values (and so future commits can replace
+    #     this with a physically derived rule without changing the
+    #     integration call site).
     _path_b_constant_extrapolate!(y.mat.enh_b, y.mat.enh_s, y.mat.enh)
 
     # 3b. Depth-averaged enhancement (explicit boundaries).
@@ -215,7 +216,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
         if par.rf_with_water
             scale_rate_factor_water!(y.mat.ATT, y.thrm.omega)
         end
-        # Path B refresh of basal / surface boundaries from the freshly
+        # Refresh the 2D ATT_b / ATT_s boundary fields from the freshly
         # computed 3D ATT, then depth-average — same convention as enh
         # (step 3a/3b above) and visc (step 5b/6 below).
         _path_b_constant_extrapolate!(y.mat.ATT_b, y.mat.ATT_s, y.mat.ATT)
@@ -243,8 +244,8 @@ function mat_step!(y::YelmoModel, dt::Float64)
                          n_glen=par.n_glen, visc_min=par.visc_min,
                          eps_0=par_dyn.eps_0)
 
-    # 5b. Path B: refresh visc_b / visc_s from interior limits — see
-    #     comment at step 3a.
+    # 5b. Refresh visc_b / visc_s from interior limits — see comment
+    #     at step 3a.
     _path_b_constant_extrapolate!(y.mat.visc_b, y.mat.visc_s, y.mat.visc)
 
     # 6. Depth-averaged and depth-integrated viscosity (explicit
@@ -257,13 +258,13 @@ function mat_step!(y::YelmoModel, dt::Float64)
     return y
 end
 
-# Path B helper: refresh a pair of 2D `_b` / `_s` boundary fields
-# from the basal / surface interior layers of a 3D Center field by
-# constant extrapolation. Used by `mat_step!` to keep the boundary
-# registry in sync with the recomputed interior viscosity / enh
-# fields. Equivalent to the pre-Path B `view(V, :, :, 1:1)` /
-# `view(V, :, :, Nz:Nz)` shortcut, but persisted into the registry's
-# 2D fields so I/O and downstream consumers see authoritative values.
+# Helper: refresh a pair of 2D `_b` / `_s` boundary fields from the
+# basal / surface interior layers of a 3D Center field by constant
+# extrapolation. Used by `mat_step!` to keep the boundary registry
+# in sync with the recomputed interior viscosity / enh fields.
+# Equivalent to the legacy `view(V, :, :, 1:1)` / `view(V, :, :, Nz:Nz)`
+# shortcut, but persisted into the dedicated 2D fields so I/O and
+# downstream consumers see authoritative boundary values.
 @inline function _path_b_constant_extrapolate!(field_b, field_s, field_3d)
     V  = interior(field_3d)
     Vb = interior(field_b)

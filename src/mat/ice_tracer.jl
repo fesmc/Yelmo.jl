@@ -17,14 +17,14 @@
 #   - the `*-tracer` enhancement-method paths in `mat_step!`
 #     (`enh_method ∈ {simple-tracer, shear2D-tracer, shear3D-tracer}`)
 #
-# Yelmo.jl convention (Path B): `zeta_aa` is *interior* layer centres
-# only (length `Nz_aa`, excludes `z = 0` and `z = 1`). `zeta_ac` is
-# the face axis (length `Nz_aa + 1`, includes both endpoints). The
+# Yelmo.jl convention: `zeta_aa` is *interior* layer centres only
+# (length `Nz_aa`, excludes `z = 0` and `z = 1`). `zeta_ac` is the
+# face axis (length `Nz_aa + 1`, includes both endpoints). The
 # Fortran tracer-column kernel uses Dirichlet pins at `k = 1` and
 # `k = nz_aa` because Fortran's `zeta_aa` includes the boundary
-# nodes; under Path B we mirror the thrm column-solver pattern
-# instead — fold `X_base` / `X_srf` into the RHS of the interior
-# stencil at `k = 1` / `k = Nz_aa` via the half-cell `dzeta_a[1]` /
+# nodes; we mirror the thrm column-solver pattern instead — fold
+# `X_base` / `X_srf` into the RHS of the interior stencil at
+# `k = 1` / `k = Nz_aa` via the half-cell `dzeta_a[1]` /
 # `dzeta_b[nz_aa]` weights. See `src/thrm/column_solver.jl` for the
 # template.
 #
@@ -118,8 +118,8 @@ function calc_tracer_3D!(X_ice, X_srf::Real,
     dp_buf   = Vector{Float64}(undef, Nz_aa)
 
     # `dzeta_a` / `dzeta_b` depend only on the (uniform) sigma axis,
-    # so compute once outside the column loop. Path B handles the
-    # half-cell weights at k = 1 and k = Nz_aa internally.
+    # so compute once outside the column loop. The dzeta helper handles
+    # the half-cell weights at k = 1 and k = Nz_aa internally.
     calc_dzeta_terms!(dzeta_a, dzeta_b, zeta_aa, zeta_ac)
 
     dt_f = Float64(dt)
@@ -205,10 +205,9 @@ end
 # ----------------------------------------------------------------------
 
 # Implicit (Crank-Nicolson backward-Euler) advection-diffusion column
-# solver. Path B convention — `zeta_aa` is interior centres only and
-# the boundary values `X_base` (z=0) / `X_srf` (z=1) enter via the
-# half-cell `dzeta_a[1]` / `dzeta_b[nz_aa]` weights folded into the
-# RHS. Mirrors `src/thrm/column_solver.jl`'s pattern. Faithful port
+# solver. `zeta_aa` is interior centres only and the boundary values
+# `X_base` (z=0) / `X_srf` (z=1) enter via the half-cell
+# `dzeta_a[1]` / `dzeta_b[nz_aa]` weights folded into the RHS. Mirrors `src/thrm/column_solver.jl`'s pattern. Faithful port
 # of Fortran `ice_tracer.f90:215-360 calc_tracer_column` for the
 # implicit branch (no test_expl_advecz, no Q_strn, no T_ref).
 #

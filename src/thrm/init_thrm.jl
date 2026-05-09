@@ -108,8 +108,8 @@ function init_thrm!(y::YelmoModel; thrm_method::AbstractString = "robin")
     end
 
     # 4. Populate 2D boundary fields T_ice_b / T_ice_s by constant
-    #    extrapolation from the first interior layer (Path B convention,
-    #    same as mat's enh / visc handling). Surface uses bnd.T_srf as
+    #    extrapolation from the first interior layer (same convention
+    #    as mat's enh / visc handling). Surface uses bnd.T_srf as
     #    the exact analytic boundary condition.
     _init_thrm_boundary_extrapolate!(y.thrm.T_ice_b, y.thrm.T_ice_s,
                                        y.thrm.T_ice, y.bnd.T_srf)

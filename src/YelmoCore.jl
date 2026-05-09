@@ -74,15 +74,13 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 # sites that import from YelmoCore.
 
 # ---------------------------------------------------------------------------
-# Path B boundary-fields registry
+# Boundary-fields registry
 # ---------------------------------------------------------------------------
 #
-# Under the Path B vertical convention (commit 1+ of the vert-split
-# refactor), the file format on disk stays unchanged: a 3D ice
-# variable like `T_ice` is stored as a length-`Nz_file` slab whose
-# first and last z-slices are the basal (z=0) and surface (z=1)
-# boundary values respectively, and whose interior `[:, :, 2:end-1]`
-# is the cell-centred interior.
+# The on-disk file format stores a 3D ice variable like `T_ice` as a
+# length-`Nz_file` slab whose first and last z-slices are the basal
+# (z=0) and surface (z=1) boundary values respectively, and whose
+# interior `[:, :, 2:end-1]` is the cell-centred interior.
 #
 # Inside Yelmo, that single file slab decomposes into three fields:
 #   - `<name>_b` — 2D, basal boundary value (z=0).
@@ -99,12 +97,12 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 #     `yelmo_set_var3D!`): same glue/split when bridging Yelmo
 #     fields to the Fortran-side length-`Nz_file` buffers.
 #
-# Only ice-grid fields are registered in commit 2. Bedrock fields
-# (`T_rock`, `enth_rock`) remain on the legacy grid convention (commit
-# 5c defers the bedrock Path B grid switch). `T_rock_b` is written as
-# a diagnostic from the deepest bedrock layer in `therm_step!`.
-# When the bedrock grid switches to Path B, `T_rock_s` will be aliased
-# to `T_ice_b` — encoded via a special-case entry rather than storage.
+# Only ice-grid fields are registered. Bedrock fields (`T_rock`,
+# `enth_rock`) currently use the interior-extended grid convention.
+# `T_rock_b` is written as a diagnostic from the deepest bedrock
+# layer in `therm_step!`; when the bedrock grid switches to the
+# split layout, `T_rock_s` will be aliased to `T_ice_b` (encoded
+# as a special-case registry entry rather than storage).
 #
 # Registry shape: a `NamedTuple` keyed by the unified-name `Symbol`,
 # each entry is `(b = <basal sym>, s = <surface sym>)`. The
@@ -154,7 +152,7 @@ end
     is_path_b_registered(sym::Symbol) -> Bool
 
 True iff `sym` is one of the interior, basal, or surface symbols of
-a Path B-registered field.
+a registered split-boundary field.
 """
 @inline is_path_b_registered(sym::Symbol) = haskey(_PATH_B_KIND, sym)
 
@@ -566,9 +564,9 @@ function load_grids_from_restart(filename::AbstractString;
                              x=xlims, y=ylims,
                              topology=(Tx, Ty, Flat))
 
-    # Path B vertical convention applies to the ICE grid only (commit
-    # 1 of the vertical-split refactor). Bedrock continues using the
-    # legacy convention until the bedrock thrm refactor (commit 5).
+    # Split-boundary vertical layout applies to the ICE grid only.
+    # Bedrock continues using the interior-extended convention until
+    # the bedrock thrm refactor.
     grid3d_ice  = _build_3d_grid(ds, "zeta",      "zeta_ac",      Nx, Ny, xlims, ylims, Tx, Ty; path_b=true)
     grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty; path_b=false)
 
@@ -578,15 +576,14 @@ end
 
 # Build a 3D RectilinearGrid for one of the vertical axes in `ds`.
 #
-# Two conventions are supported via `path_b`:
+# Two conventions are supported via the `path_b` flag:
 #
-#   - Legacy (`path_b=false`): file `zeta` is treated as the Yelmo
-#     `Center` axis (length Nz) and `zeta_ac` as the `Face` axis
-#     (length Nz+1). Yelmo's grid Nz equals the file's `zeta` length.
-#     This is the historical Yelmo.jl behaviour and remains in force
-#     for the bedrock grid until the bedrock refactor.
+#   - Interior-extended (`path_b=false`): file `zeta` is treated as
+#     the Yelmo `Center` axis (length Nz) and `zeta_ac` as the `Face`
+#     axis (length Nz+1). Yelmo's grid Nz equals the file's `zeta`
+#     length. This remains in force for the bedrock grid.
 #
-#   - Path B (`path_b=true`): file `zeta` is interpreted as
+#   - Split-boundary (`path_b=true`): file `zeta` is interpreted as
 #     `[0; centers...; 1]` (length Nz_file) — i.e. the basal and
 #     surface boundary endpoints are stored alongside the interior
 #     centers. Yelmo's interior grid takes file `zeta[2:end-1]` as the
@@ -594,9 +591,9 @@ end
 #     constructed as midpoints between consecutive interior centers,
 #     with endpoints clamped to {0, 1}.
 #
-# Under Path B the file's `zeta_ac` is *not* authoritative for the
-# Yelmo grid; it is only consulted at I/O time for the boundary
-# slices via the boundary-fields registry (commit 2).
+# In split-boundary mode the file's `zeta_ac` is *not* authoritative
+# for the Yelmo grid; it is only consulted at I/O time for the
+# boundary slices via the boundary-fields registry.
 function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims,
                         Tx::DataType, Ty::DataType; path_b::Bool=false)
     if path_b
@@ -627,7 +624,7 @@ function _faces_from_centers(zc::AbstractVector)
     return zf
 end
 
-# Path B Face construction: file `zeta` is `[0; interior_centers...; 1]`.
+# Split-boundary Face construction: file `zeta` is `[0; interior_centers...; 1]`.
 # Yelmo Nz = length(zeta) - 2, with `zeta_aa = zeta[2:end-1]`. The
 # returned `Face` axis (length Nz + 1) takes `Face[1] = 0`,
 # `Face[end] = 1`, and interior `Face[k] = (zeta_aa[k-1] + zeta_aa[k])/2`.
@@ -953,7 +950,7 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
 
     dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch, diva_scratch),))
 
-    # thrm scratch (Path B commit 5a, vert-split refactor). `zeta_aa`
+    # thrm scratch. `zeta_aa`
     # and `zeta_ac` are concrete `Vector{Float64}` snapshots of the
     # ice grid's Center / Face axes, materialised once at YelmoModel
     # construction so per-`therm_step!` calls no longer
@@ -1114,7 +1111,7 @@ in `restart_file`. `groups` selects which groups to load (default: all six);
 `strict=true` (default) errors on any missing variable in a loaded group,
 `strict=false` skips missing variables. Grids are not re-read.
 
-Path B vertical convention (Path B-registered fields like `T_ice`,
+Split-boundary vertical layout (registered fields like `T_ice`,
 `enth`, `T_pmp`, `T_prime`, `visc`, `ATT`, `enh`): the unified file
 slab is read once per group and decomposed into the basal `_b` 2D
 field (slice 1), the interior 3D field (slice 2:end-1), and the
@@ -1130,9 +1127,9 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
         for gname in groups
             group_nt = getfield(y, gname)
             metas    = getfield(y.v, gname)
-            # Cache the unified slab read for each Path B-registered
-            # interior name so we don't read the same NetCDF variable
-            # three times (once each for _b, interior, _s).
+            # Cache the unified slab read for each registered interior
+            # name so we don't read the same NetCDF variable three
+            # times (once each for _b, interior, _s).
             slab_cache = Dict{String, Array{Float64,3}}()
             for k in keys(metas)
                 meta = metas[k]
@@ -1140,7 +1137,7 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                     unified = path_b_unified_name(meta.name)
                     if !haskey(ds, unified)
                         strict && error(
-                            "Path B-registered variable `$(meta.name)` (group " *
+                            "Split-boundary registered variable `$(meta.name)` (group " *
                             "`$(gname)`) requires unified slab `$(unified)` in restart " *
                             "file $(restart_file); not found. Pass `strict=false` to skip.")
                         continue
@@ -1168,8 +1165,8 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
     return y
 end
 
-# Apply a Path B slice (`:basal`, `:interior`, `:surface`) of a
-# unified file slab into a Yelmo field. `slab` has shape
+# Apply a split-boundary slice (`:basal`, `:interior`, `:surface`)
+# of a unified file slab into a Yelmo field. `slab` has shape
 # `(Nx, Ny, Nz_file)` with `Nz_file = Nz_yelmo + 2`. Center fields
 # absorb the slice directly; XFace / YFace fields (e.g. `ux`) write
 # into `[2:end, ...]` slots and replicate the leading slot, matching
@@ -1358,17 +1355,16 @@ end
 
 @inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
-# Transitional Path B vertical-slice helper.
+# Transitional vertical-slice helper for the split-boundary layout.
 #
-# Under Path B (commit 1) the ice grid `Nz` drops to `Nz_file − 2`.
-# Until the boundary-fields registry lands (commit 2), restart files
-# whose 3D ice slabs still carry the basal (z=0) and surface (z=1)
-# endpoint slices need to have those endpoints stripped on load so
-# the interior of the field can absorb the centred values. Boundary
-# `_b` / `_s` 2D fields remain at their constructed default until the
-# registry properly populates them.
+# Under the split-boundary layout the ice grid `Nz` drops to
+# `Nz_file − 2`. For restart files whose 3D ice slabs still carry the
+# basal (z=0) and surface (z=1) endpoint slices, those endpoints must
+# be stripped on load so the interior of the field can absorb the
+# centred values. Boundary `_b` / `_s` 2D fields remain at their
+# constructed default unless the boundary registry populates them.
 #
-# The helper is a no-op on the legacy-convention rock grid (whose
+# The helper is a no-op on the interior-extended rock grid (whose
 # field `Nz` equals the file slab `Nz_file`).
 @inline function _path_b_interior_slice_3d(data::AbstractArray{T,3}, field_nz::Integer) where {T}
     nz_file = size(data, 3)
@@ -1378,8 +1374,8 @@ end
         return view(data, :, :, 2:nz_file - 1)
     else
         error("_path_b_interior_slice_3d: file z-dim $nz_file does not match " *
-              "field z-dim $field_nz (legacy) or $field_nz + 2 (Path B with " *
-              "boundary endpoints). Likely a grid / restart-file mismatch.")
+              "field z-dim $field_nz (interior-extended) or $field_nz + 2 " *
+              "(split-boundary with endpoints). Likely a grid / restart-file mismatch.")
     end
 end
 
