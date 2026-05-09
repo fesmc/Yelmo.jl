@@ -5,8 +5,8 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using NCDatasets
 using ..YelmoMeta
 using ..YelmoCore: AbstractYelmoModel, matches_patterns,
-                   PATH_B_REGISTRY_ICE, is_path_b_registered,
-                   path_b_slice_kind
+                   BOUNDARY_FIELD_REGISTRY_ICE, is_boundary_field_registered,
+                   boundary_slice_kind
 
 export init_output
 export OutputSelection
@@ -122,12 +122,12 @@ end
 # `_get_data` element type) and is allocated fresh per call;
 # this only runs at file-write time so allocation is not on a
 # hot path.
-function _path_b_glue(b2d::AbstractArray{<:Real,2},
+function _glue_boundary_slab(b2d::AbstractArray{<:Real,2},
                       interior3d::AbstractArray{<:Real,3},
                       s2d::AbstractArray{<:Real,2})
     Nx, Ny, Nz = size(interior3d)
-    size(b2d) == (Nx, Ny) || error("_path_b_glue: basal slice size $(size(b2d)) ≠ ($Nx, $Ny)")
-    size(s2d) == (Nx, Ny) || error("_path_b_glue: surface slice size $(size(s2d)) ≠ ($Nx, $Ny)")
+    size(b2d) == (Nx, Ny) || error("_glue_boundary_slab: basal slice size $(size(b2d)) ≠ ($Nx, $Ny)")
+    size(s2d) == (Nx, Ny) || error("_glue_boundary_slab: surface slice size $(size(s2d)) ≠ ($Nx, $Ny)")
     out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
     @inbounds out[:, :, 1]              .= b2d
     @inbounds out[:, :, 2:Nz + 1]       .= interior3d
@@ -141,7 +141,7 @@ end
 # Q_strn, dQsdT, omega, advecxy, ...) so the file format stays
 # consistent with the registered fields. The NaN values are dropped
 # again on read by the interior-slice helper.
-function _path_b_nan_pad(interior3d::AbstractArray{<:Real,3})
+function _nan_pad_boundary_slab(interior3d::AbstractArray{<:Real,3})
     Nx, Ny, Nz = size(interior3d)
     out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
     @inbounds out[:, :, 1]            .= NaN
@@ -330,8 +330,8 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
             # they are written as part of the unified-name interior
             # slab into the `zeta` axis (length Nz_file = Nz + 2 with
             # basal/surface endpoints).
-            if is_path_b_registered(fname)
-                kind = path_b_slice_kind(fname)
+            if is_boundary_field_registered(fname)
+                kind = boundary_slice_kind(fname)
                 kind === :interior || continue
             end
             dims = _spatial_dims(group_nt[fname], ylmo)
@@ -419,12 +419,12 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             # and the `nc_name === nothing` check above already
             # filtered them. Registered interior fields glue with the
             # matching `_b` / `_s` 2D fields into a unified slab here.
-            if is_path_b_registered(fname) && path_b_slice_kind(fname) === :interior
-                bs = PATH_B_REGISTRY_ICE[fname]
+            if is_boundary_field_registered(fname) && boundary_slice_kind(fname) === :interior
+                bs = BOUNDARY_FIELD_REGISTRY_ICE[fname]
                 interior_data = _get_data(group_nt[fname])
                 b_data        = _get_data(group_nt[bs.b])
                 s_data        = _get_data(group_nt[bs.s])
-                glued = _path_b_glue(b_data, interior_data, s_data)
+                glued = _glue_boundary_slab(b_data, interior_data, s_data)
                 ds[nc_name][1:size(glued, 1), 1:size(glued, 2), 1:size(glued, 3), t_idx] = glued
                 continue
             end
@@ -438,7 +438,7 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
                 if sz[3] == ylmo.gt.Nz
                     # 3D Center ice field: NaN-pad at the basal/surface
                     # boundary slots to fill the length-(Nz+2) `zeta` dim.
-                    padded = _path_b_nan_pad(data)
+                    padded = _nan_pad_boundary_slab(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
                 elseif sz[3] == ylmo.gt.Nz + 1
                     # ZFace ice field: extend to Mirror-format Nz+3 by
@@ -470,7 +470,7 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
                 if sz[3] == ylmo.gt.Nz
-                    padded = _path_b_nan_pad(data)
+                    padded = _nan_pad_boundary_slab(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
                 elseif sz[3] == ylmo.gt.Nz + 1
                     extended = _zface_extend(data)

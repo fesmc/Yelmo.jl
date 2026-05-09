@@ -160,7 +160,7 @@ Fill the 2D basal (`T_pmp_b`, ζ=0) and surface (`T_pmp_s`, ζ=1)
 pressure-corrected melting-point fields. At the bed the overlying ice
 column is the full `H_ice`; at the surface it is zero, so
 `T_pmp_s ≡ T0` everywhere. Companion of [`calc_T_pmp_3D!`](@ref) for
-the boundary fields registered in `PATH_B_REGISTRY_ICE`.
+the boundary fields registered in `BOUNDARY_FIELD_REGISTRY_ICE`.
 """
 function calc_T_pmp_boundaries_2D!(T_pmp_b_field, T_pmp_s_field, H_ice_field,
                                    T0::Real, beta::Real,

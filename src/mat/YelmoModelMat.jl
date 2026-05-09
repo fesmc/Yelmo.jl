@@ -187,7 +187,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
     #     has authoritative values (and so future commits can replace
     #     this with a physically derived rule without changing the
     #     integration call site).
-    _path_b_constant_extrapolate!(y.mat.enh_b, y.mat.enh_s, y.mat.enh)
+    _extrapolate_boundary_fields!(y.mat.enh_b, y.mat.enh_s, y.mat.enh)
 
     # 3b. Depth-averaged enhancement (explicit boundaries).
     depth_average!(y.mat.enh_bar, y.mat.enh, y.mat.enh_b, y.mat.enh_s, zeta_aa)
@@ -219,7 +219,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
         # Refresh the 2D ATT_b / ATT_s boundary fields from the freshly
         # computed 3D ATT, then depth-average — same convention as enh
         # (step 3a/3b above) and visc (step 5b/6 below).
-        _path_b_constant_extrapolate!(y.mat.ATT_b, y.mat.ATT_s, y.mat.ATT)
+        _extrapolate_boundary_fields!(y.mat.ATT_b, y.mat.ATT_s, y.mat.ATT)
         depth_average!(y.mat.ATT_bar, y.mat.ATT,
                        y.mat.ATT_b, y.mat.ATT_s, zeta_aa)
     elseif par.rf_method == 2
@@ -246,7 +246,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
 
     # 5b. Refresh visc_b / visc_s from interior limits — see comment
     #     at step 3a.
-    _path_b_constant_extrapolate!(y.mat.visc_b, y.mat.visc_s, y.mat.visc)
+    _extrapolate_boundary_fields!(y.mat.visc_b, y.mat.visc_s, y.mat.visc)
 
     # 6. Depth-averaged and depth-integrated viscosity (explicit
     #    boundaries).
@@ -265,7 +265,7 @@ end
 # Equivalent to the legacy `view(V, :, :, 1:1)` / `view(V, :, :, Nz:Nz)`
 # shortcut, but persisted into the dedicated 2D fields so I/O and
 # downstream consumers see authoritative boundary values.
-@inline function _path_b_constant_extrapolate!(field_b, field_s, field_3d)
+@inline function _extrapolate_boundary_fields!(field_b, field_s, field_3d)
     V  = interior(field_3d)
     Vb = interior(field_b)
     Vs = interior(field_s)
