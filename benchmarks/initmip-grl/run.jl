@@ -55,13 +55,18 @@ const BMB_SHLF_CONST = -0.5     # [m/yr] constant basal melt under shelves
 const NAMELIST_PATH = abspath(joinpath(@__DIR__, "yelmo_initmip_grl.nml"))
 const DATA_DIR      = abspath(joinpath(@__DIR__, "data", "GRL-16KM"))
 
-const OUTPUT_DIR    = abspath(joinpath(@__DIR__, "output"))
-const SNAPSHOTS_NC  = joinpath(OUTPUT_DIR, "snapshots.nc")
-const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
-
 const BACKEND = lowercase(get(ENV, "INITMIP_BACKEND", "yelmo"))
 BACKEND in ("yelmo", "mirror") ||
     error("Unsupported INITMIP_BACKEND=$(BACKEND); choose 'yelmo' or 'mirror'.")
+
+# Per-backend output directory so a Yelmo run and a Mirror run can
+# coexist for side-by-side comparison (restart fields, Fortran's
+# `yelmo:: timelog:` lines, etc.). `output/` is the conventional
+# spot for the default Yelmo run; Mirror lands in `output-mirror/`.
+const OUTPUT_DIR    = abspath(joinpath(@__DIR__,
+    BACKEND == "mirror" ? "output-mirror" : "output"))
+const SNAPSHOTS_NC  = joinpath(OUTPUT_DIR, "snapshots.nc")
+const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
 
 # ----------------------------------------------------------------------
 # Backend-specific build.
