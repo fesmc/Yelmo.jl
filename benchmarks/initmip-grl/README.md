@@ -104,7 +104,9 @@ both backends — only the build path differs:
 | Time stepping | Yelmo.jl adaptive PC (`dt_method = 2`) | Fortran's own time-stepping |
 | Regions API | yes (`region_domain.nc`) | no — currently `YelmoModel`-only |
 | Per-section timer | yes (`y.timer`, prints at end) | no |
-| Snapshots / restart | yes | not yet — `init_output` / `write_output!` assume the split-boundary file layout (Nz_file = Nz + 2 with 2D `_b`/`_s` siblings); Mirror uses interior-extended (Nz_file = Nz) and lacks those siblings. Needs a separate writer to land |
+| Snapshots / restart | yes (Nz_file = Nz + 2) | yes (Nz_file = Nz; `init_output` / `write_output!` branch on `uses_split_boundary_storage(y)`) |
+| `PCsub` / `PCrej` / `SSAit` columns | accurate | always 0 — Fortran's per-step counters aren't surfaced through the C-API. The `yelmo:: timelog:` lines in `run.log` carry per-outer-step `min_dt` / `max_dt` / `n_dtmin` instead |
+| `V_sle` | regions API (`V_ice_above_flotation × 1e-3 / 394.7`) | computed inline via `H_af = max(0, H_ice + min(0, z_bed − z_sl)·ρ_sw/ρ_ice)` |
 | Per-step `PCsub/PCrej/SSAit` | yes | shown as 0 (counters not surfaced) |
 
 ## Outputs

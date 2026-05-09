@@ -157,9 +157,20 @@ end
 _build() = BACKEND == "mirror" ? _build_mirror() : _build_yelmo()
 
 # ----------------------------------------------------------------------
-# Per-step diagnostics. The PC sub-step / Picard counters live on
-# `y.dyn.scratch.*` for the YelmoModel backend only; Mirror doesn't
-# expose them (the time-stepping is internal to Fortran).
+# Per-step diagnostics.
+#
+# YelmoModel backend: PC sub-step / Picard counters live on
+# `y.dyn.scratch.*`, read directly from the model.
+#
+# Mirror backend: time-stepping is internal to Fortran and the C-API
+# we use doesn't surface per-step counters. The Fortran-yelmo
+# `yelmo:: timelog:` lines (yelmo_ice.f90:538) DO carry max_dt /
+# min_dt / n_dtmin per outer step, and they flow to stdout naturally
+# alongside our diagnostics — `grep '^ yelmo:: timelog:' run.log`
+# to see them post-hoc. Capturing and parsing them per-step from
+# within Julia turned out to be fiddly (libc-side stdout buffering,
+# fd dup interaction with `redirect_stdout`), so the Mirror columns
+# below stay at 0 for now.
 # ----------------------------------------------------------------------
 
 mutable struct StepCounters
@@ -178,7 +189,8 @@ function _step_diagnostics(y, ctrs::StepCounters)
         ssa_it    = Int(y.dyn.scratch.ssa_iter_now[])
         return (pc_sub = pc_sub, pc_rej = pc_rej, ssa_it = ssa_it)
     else
-        # Mirror: counters not surfaced. Show 0 to keep the table aligned.
+        # Mirror: see comment block above. Counters stay 0; read
+        # Fortran's `yelmo:: timelog:` lines in run.log instead.
         return (pc_sub = 0, pc_rej = 0, ssa_it = 0)
     end
 end
@@ -195,15 +207,34 @@ end
 # Only the printed-line scalars are computed here; the snapshots and
 # restart files still carry the full state.
 function _domain_diag_mirror(y)
-    H = interior(y.tpo.H_ice)[:, :, 1]
+    H     = interior(y.tpo.H_ice)[:, :, 1]
+    z_bed = interior(y.bnd.z_bed)[:, :, 1]
+    z_sl  = interior(y.bnd.z_sl)[:, :, 1]
+
     dx = abs(Float64(y.g.Δxᶜᵃᵃ))
     dy = abs(Float64(y.g.Δyᵃᶜᵃ))
-    # Match regions API conventions: V_ice in km³ (sum of H[m] × cell
-    # area[m²] × m³→km³ factor), max H in m. V_sle requires H_af
-    # (above-flotation thickness) which lives in the regions API; we
-    # report NaN here rather than approximate.
-    V_ice = sum(H) * dx * dy * 1e-9                # m·m²·(km³/m³) = km³
-    return (V_ice = V_ice, V_sle = NaN, H_ice_max = maximum(H))
+
+    # Mirror keeps physical constants on the Fortran side; pull them
+    # from the parsed nml's `&phys` block (rho_ice = 910, rho_sw = 1028
+    # for `phys_const="Earth"`).
+    rho_ice = y.p.phys.rho_ice
+    rho_sw  = y.p.phys.rho_sw
+
+    # V_ice in km³ (matches regions API convention).
+    V_ice = sum(H) * dx * dy * 1e-9
+
+    # H_af = max(0, H_ice + min(0, z_bed - z_sl) · ρ_sw/ρ_ice). Mirrors
+    # `_calc_H_af` in `regions/calc_region.jl`. Then V_sl in km³ and
+    # V_sle in m s.l.e. via `1e-3 / 394.7` (Fortran yelmo_boundaries.f90:74).
+    sum_H_af = 0.0
+    @inbounds for i in eachindex(H)
+        z_diff = min(0.0, z_bed[i] - z_sl[i])
+        sum_H_af += max(0.0, H[i] + z_diff * (rho_sw / rho_ice))
+    end
+    V_sl  = sum_H_af * dx * dy * 1e-9               # km³ above flotation
+    V_sle = V_sl * (1.0e-3 / 394.7)                  # m s.l.e.
+
+    return (V_ice = V_ice, V_sle = V_sle, H_ice_max = maximum(H))
 end
 
 function _domain_diag_yelmo(regs)
@@ -217,6 +248,16 @@ end
 
 function main()
     mkpath(OUTPUT_DIR)
+
+    # Clear stale outputs from a previous run before producing fresh
+    # ones. Only files this script writes — leave any user files (e.g.
+    # the shell-redirected `run.log`) untouched.
+    for fname in ("region_domain.nc", "snapshots.nc", "restart_final.nc",
+                  "initmip_grl.nml")
+        path = joinpath(OUTPUT_DIR, fname)
+        isfile(path) && rm(path)
+    end
+
     @info "initmip-grl — backend=$(BACKEND), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
 
     y = _build()
@@ -228,24 +269,19 @@ function main()
     regs = BACKEND == "yelmo" ? init_regions(y; outdir = OUTPUT_DIR) : nothing
 
     # 2D snapshot file. Groups match Fortran write_step_2D.
-    # YelmoModel only for now: the file format used by init_output assumes
-    # the split-boundary 3D layout (Nz_file = Nz + 2 with 2D `_b` / `_s`
-    # siblings registered in BOUNDARY_FIELD_REGISTRY_ICE). YelmoMirror
-    # uses the interior-extended layout (Nz_file = Nz, no split fields)
-    # — wiring it through here needs a separate writer path.
-    snap_out = if BACKEND == "yelmo"
-        init_output(y, SNAPSHOTS_NC;
-                    selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
-    else
-        nothing
-    end
+    # `init_output` / `write_output!` branch internally on
+    # `uses_split_boundary_storage(y)`: Yelmo uses split-boundary
+    # storage (Nz_file = Nz + 2 with `_b` / `_s` glue), Mirror uses
+    # interior-extended (Nz_file = Nz, write as-is).
+    snap_out = init_output(y, SNAPSHOTS_NC;
+                           selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
 
     # Write t = 0 records.
     if regs !== nothing
         update_regions!(regs, y)
         write_regions!(regs, y, y.time)
     end
-    snap_out !== nothing && write_output!(snap_out, y)
+    write_output!(snap_out, y)
 
     diag0 = regs === nothing ? _domain_diag_mirror(y) : _domain_diag_yelmo(regs)
     @info "t=0 initialized" V_ice_km3=diag0.V_ice V_sle_m=diag0.V_sle
@@ -264,7 +300,7 @@ function main()
             write_regions!(regs, y, y.time)
         end
 
-        if snap_out !== nothing && k % steps_per_snapshot == 0
+        if k % steps_per_snapshot == 0
             write_output!(snap_out, y)
         end
 
@@ -276,18 +312,17 @@ function main()
         flush(stdout)
     end
 
-    snap_out !== nothing && close(snap_out.ds)
+    close(snap_out.ds)
 
-    # Restart file (full model state for continuation). YelmoModel only;
-    # see the snap_out comment for why Mirror is skipped here.
-    if BACKEND == "yelmo"
-        restart_out = init_output(y, RESTART_FINAL)
-        write_output!(restart_out, y)
-        close(restart_out.ds)
-        @info "done" backend=BACKEND snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
-    else
-        @info "done" backend=BACKEND
-    end
+    # Restart file (full model state for continuation). Same writer
+    # path as snapshots; both backends supported via the
+    # `uses_split_boundary_storage` branch inside `init_output` /
+    # `write_output!`.
+    restart_out = init_output(y, RESTART_FINAL)
+    write_output!(restart_out, y)
+    close(restart_out.ds)
+
+    @info "done" backend=BACKEND snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
 
     # Per-section timings — YelmoModel only (Mirror has no Julia-side timer).
     if BACKEND == "yelmo" && y.timer.enabled
