@@ -9,23 +9,34 @@
 # Settings follow the Fortran reference yelmo/tests/yelmo_initmip.f90
 # and yelmo/par/yelmo_initmip.nml as closely as the current port allows.
 #
+# Backend: select with the INITMIP_BACKEND environment variable.
+#   - "yelmo"  (default) — pure Julia `YelmoModel`.
+#   - "mirror"           — `YelmoMirror` over the Fortran-yelmo C-API.
+# Both backends share the same `yelmo_initmip_grl.nml`, the same
+# forcing-data path, and the same time-stepping configuration; the
+# build path differs (Yelmo loads topo/masks via Yelmo.jl helpers,
+# Mirror leans on Fortran's own loaders triggered by `yelmo_init`).
+#
 # Outputs (under output/, gitignored):
-#   - region_domain.nc    — whole-domain time-series via regions API.
+#   - region_domain.nc    — whole-domain time-series (yelmo backend only).
 #   - snapshots.nc        — 2D snapshots every SNAPSHOT_DT_YR.
 #   - restart_final.nc    — full model state at T_END_YR.
 #
 # Run from this directory:
-#   julia --project=. run.jl
+#   julia --project=. run.jl                       # yelmo backend
+#   INITMIP_BACKEND=mirror julia --project=. run.jl  # mirror backend
 
 cd(@__DIR__)   # data paths in the nml are relative to this directory
 
 using IceSheetBenchmarks
 using Yelmo
-using Yelmo: step!, init_state!, init_topo_load!
+using Yelmo: step!, init_state!, init_topo_load!, init_masks!
 using Yelmo: init_regions, update_regions!, write_regions!
 using Yelmo: init_output, write_output!, OutputSelection
 using Yelmo: print_timings
+using Yelmo: YelmoMirror
 using Yelmo.YelmoModelPar: YelmoModelParameters
+using Yelmo.YelmoPar: YelmoParameters
 using Oceananigans: interior
 using NCDatasets
 using Statistics
@@ -48,27 +59,28 @@ const OUTPUT_DIR    = abspath(joinpath(@__DIR__, "output"))
 const SNAPSHOTS_NC  = joinpath(OUTPUT_DIR, "snapshots.nc")
 const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
 
+const BACKEND = lowercase(get(ENV, "INITMIP_BACKEND", "yelmo"))
+BACKEND in ("yelmo", "mirror") ||
+    error("Unsupported INITMIP_BACKEND=$(BACKEND); choose 'yelmo' or 'mirror'.")
+
 # ----------------------------------------------------------------------
-# Build the model.
+# Backend-specific build.
 # ----------------------------------------------------------------------
 
-function _build()
-    b = InitMIPGRLBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
-    p = YelmoModelParameters(NAMELIST_PATH, "initmip_grl")
-    y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
-
-    # --- Topography from M17 ---
-    # init_topo_load! reads H_ice/z_bed/z_bed_sd from the nml path,
-    # applies z_bed_f_sd scaling, removes englacial lakes, and adjusts
-    # bedrock gradients. grad_lim_zb = 0.5 matches ytopo nml.
-    init_topo_load!(y; grad_lim_zb = 0.5)
-
-    # --- Climate and forcing: load directly into bnd fields ---
-    #
-    # Unit conversions match Fortran yelmo_data.f90:285-331:
-    #   - T_srf: °C → K (add 273.15) when minimum < 100.
-    #   - smb:   mm w.e./yr → m i.e./yr  (× 1e-3 · ρ_w/ρ_ice).
-    smb_conv = 1.0e-3 * y.c.rho_w / y.c.rho_ice
+# Apply the MAR / S04 forcing fields to a freshly-constructed model
+# (either YelmoModel or YelmoMirror). Mutating `y.bnd.*` directly works
+# for both backends — for Mirror the values get pushed to Fortran on
+# the next `init_state!` / `step!` via `yelmo_sync!`.
+#
+# Unit conversions match Fortran yelmo_data.f90:285-331:
+#   - T_srf: °C → K (add 273.15) when minimum < 100.
+#   - smb:   mm w.e./yr → m i.e./yr  (× 1e-3 · ρ_w/ρ_ice).
+#
+# rho_ice / rho_w are constants of the ice-sheet model — read from the
+# backend's own constants struct so YelmoMirror picks up Fortran's
+# `Earth` defaults rather than Yelmo.jl's.
+function _apply_forcing!(y, rho_ice::Real, rho_w::Real)
+    smb_conv = 1.0e-3 * rho_w / rho_ice
 
     NCDataset(joinpath(DATA_DIR, "GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc")) do ds
         smb_raw   = ds["smb"][:, :]
@@ -97,10 +109,107 @@ function _build()
     fill!(interior(y.bnd.bmb_shlf), BMB_SHLF_CONST)
     fill!(interior(y.bnd.z_sl), 0.0)
 
-    # --- Initialize state (thermodynamics with robin-cold profile) ---
+    return y
+end
+
+function _build_yelmo()
+    b = InitMIPGRLBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
+    p = YelmoModelParameters(NAMELIST_PATH, "initmip_grl")
+    y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
+
+    # Topography from M17 — init_topo_load! reads H_ice/z_bed/z_bed_sd
+    # from the nml path, applies z_bed_f_sd scaling, removes englacial
+    # lakes, and adjusts bedrock gradients. grad_lim_zb = 0.5 matches
+    # ytopo nml.
+    init_topo_load!(y; grad_lim_zb = 0.5)
+
+    # Basins / regions (used by data_compare!'s regional masks).
+    init_masks!(y)
+
+    # Climate, forcing, BCs.
+    _apply_forcing!(y, y.c.rho_ice, y.c.rho_w)
+
+    # Initialize state (thermodynamics with robin-cold profile).
     init_state!(y, 0.0; thrm_method = "robin-cold")
 
     return y
+end
+
+function _build_mirror()
+    # YelmoMirror reads the same nml; Fortran-side `yelmo_init` loads
+    # the topography (yelmo_init_topo block) and masks (yelmo_masks
+    # block) on its own. We then overwrite the climate / forcing
+    # fields on the Julia mirror — `init_state!` syncs them to
+    # Fortran before the analytic state init.
+    p = YelmoParameters(NAMELIST_PATH, "initmip_grl")
+    y = YelmoMirror(p, 0.0; rundir = OUTPUT_DIR, overwrite = true)
+
+    # YelmoMirror's `y.c` is constructed from `phys_const = "Earth"`
+    # in the nml (rho_ice = 910, rho_w = 1000 by default). Same
+    # conversion factor as the Yelmo backend.
+    _apply_forcing!(y, y.c.rho_ice, y.c.rho_w)
+
+    init_state!(y, 0.0; thrm_method = "robin-cold")
+
+    return y
+end
+
+_build() = BACKEND == "mirror" ? _build_mirror() : _build_yelmo()
+
+# ----------------------------------------------------------------------
+# Per-step diagnostics. The PC sub-step / Picard counters live on
+# `y.dyn.scratch.*` for the YelmoModel backend only; Mirror doesn't
+# expose them (the time-stepping is internal to Fortran).
+# ----------------------------------------------------------------------
+
+mutable struct StepCounters
+    pc_taken_prev::Int
+    pc_reject_prev::Int
+end
+StepCounters() = StepCounters(0, 0)
+
+function _step_diagnostics(y, ctrs::StepCounters)
+    if BACKEND == "yelmo"
+        pc        = y.dyn.scratch.pc_scratch[]
+        pc_sub    = pc === nothing ? 0 : pc.n_steps_taken - ctrs.pc_taken_prev
+        pc_rej    = pc === nothing ? 0 : pc.n_rejections - ctrs.pc_reject_prev
+        ctrs.pc_taken_prev  = pc === nothing ? 0 : pc.n_steps_taken
+        ctrs.pc_reject_prev = pc === nothing ? 0 : pc.n_rejections
+        ssa_it    = Int(y.dyn.scratch.ssa_iter_now[])
+        return (pc_sub = pc_sub, pc_rej = pc_rej, ssa_it = ssa_it)
+    else
+        # Mirror: counters not surfaced. Show 0 to keep the table aligned.
+        return (pc_sub = 0, pc_rej = 0, ssa_it = 0)
+    end
+end
+
+# ----------------------------------------------------------------------
+# Domain-mean diagnostics. For the YelmoModel backend we use the
+# regions API (whole-domain region) for the printed line; for Mirror
+# we compute the same scalars directly from the Field-mirror state
+# since the regions API isn't generalised to Mirror yet.
+# ----------------------------------------------------------------------
+
+# Lightweight whole-domain stats for the Mirror backend, since the
+# regions API (`regions/calc_region.jl`) is currently YelmoModel-only.
+# Only the printed-line scalars are computed here; the snapshots and
+# restart files still carry the full state.
+function _domain_diag_mirror(y)
+    H = interior(y.tpo.H_ice)[:, :, 1]
+    dx = abs(Float64(y.g.Δxᶜᵃᵃ))
+    dy = abs(Float64(y.g.Δyᵃᶜᵃ))
+    cell_km2  = dx * dy * 1e-6                         # m² → km²
+    V_ice_km3 = sum(H) * cell_km2 * 1e-3               # H[m]·area[km²]·1e-3
+    V_ice     = V_ice_km3 * 1e-6                       # match regions API (1e6 km³)
+    H_ice_max = maximum(H)
+    # V_sle requires H_af (above-flotation thickness) which lives in
+    # the regions API. Report NaN here rather than approximate.
+    return (V_ice = V_ice, V_sle = NaN, H_ice_max = H_ice_max)
+end
+
+function _domain_diag_yelmo(regs)
+    d = regs[1].diag
+    return (V_ice = d.V_ice, V_sle = d.V_sle, H_ice_max = d.H_ice_max)
 end
 
 # ----------------------------------------------------------------------
@@ -109,36 +218,31 @@ end
 
 function main()
     mkpath(OUTPUT_DIR)
-    @info "initmip-grl — t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
+    @info "initmip-grl — backend=$(BACKEND), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
 
     y = _build()
 
     n_steps            = Int(round(T_END_YR / DT_OUTER_YR))
     steps_per_snapshot = max(Int(round(SNAPSHOT_DT_YR / DT_OUTER_YR)), 1)
 
-    # --- Whole-domain regions time series ---
-    regs = init_regions(y; outdir = OUTPUT_DIR)
+    # Whole-domain regions time series — YelmoModel only.
+    regs = BACKEND == "yelmo" ? init_regions(y; outdir = OUTPUT_DIR) : nothing
 
-    # --- 2D snapshot file ---
-    # Groups match Fortran write_step_2D: tpo, dyn, mat, thrm, bnd, dta.
+    # 2D snapshot file. Groups match Fortran write_step_2D.
     snap_out = init_output(y, SNAPSHOTS_NC;
                            selection = OutputSelection(groups = [:tpo, :dyn, :mat, :thrm, :bnd, :dta]))
 
     # Write t = 0 records.
-    update_regions!(regs, y)
-    write_regions!(regs, y, y.time)
+    if regs !== nothing
+        update_regions!(regs, y)
+        write_regions!(regs, y, y.time)
+    end
     write_output!(snap_out, y)
 
-    @info "t=0 initialized" V_ice_km3=regs[1].diag.V_ice V_sle_m=regs[1].diag.V_sle
+    diag0 = regs === nothing ? _domain_diag_mirror(y) : _domain_diag_yelmo(regs)
+    @info "t=0 initialized" V_ice_km3=diag0.V_ice V_sle_m=diag0.V_sle
 
-    # Per-outer-step counters for the adaptive PC + SSA Picard loops.
-    # `pc_scratch[]` is allocated lazily on the first step!, so read
-    # cumulative `n_steps_taken / n_rejections` from it and diff per
-    # outer step. `ssa_iter_now[]` is the last Picard iteration count
-    # from the most recent SSA solve.
-    pc_taken_prev   = 0
-    pc_reject_prev  = 0
-
+    ctrs = StepCounters()
     @printf("  %6s  %10s  %10s  %8s  %5s  %5s  %5s\n",
             "t[yr]", "V_ice[km³]", "V_sle[m]", "max_H[m]",
             "PCsub", "PCrej", "SSAit")
@@ -147,39 +251,34 @@ function main()
     for k in 1:n_steps
         step!(y, DT_OUTER_YR)
 
-        update_regions!(regs, y)
-        write_regions!(regs, y, y.time)
+        if regs !== nothing
+            update_regions!(regs, y)
+            write_regions!(regs, y, y.time)
+        end
 
         if k % steps_per_snapshot == 0
             write_output!(snap_out, y)
         end
 
-        # Per-outer-step diagnostics: PC sub-steps + rejections (delta from
-        # cumulative counters), last SSA Picard iteration count.
-        pc        = y.dyn.scratch.pc_scratch[]
-        pc_sub    = pc === nothing ? 0 : pc.n_steps_taken - pc_taken_prev
-        pc_rej    = pc === nothing ? 0 : pc.n_rejections - pc_reject_prev
-        pc_taken_prev  = pc === nothing ? 0 : pc.n_steps_taken
-        pc_reject_prev = pc === nothing ? 0 : pc.n_rejections
-        ssa_it    = Int(y.dyn.scratch.ssa_iter_now[])
-
-        d = regs[1].diag
+        d  = regs === nothing ? _domain_diag_mirror(y) : _domain_diag_yelmo(regs)
+        sd = _step_diagnostics(y, ctrs)
         @printf("  %6.0f  %10.4e  %10.4f  %8.1f  %5d  %5d  %5d\n",
-                y.time, d.V_ice, d.V_sle, d.H_ice_max, pc_sub, pc_rej, ssa_it)
+                y.time, d.V_ice, d.V_sle, d.H_ice_max,
+                sd.pc_sub, sd.pc_rej, sd.ssa_it)
         flush(stdout)
     end
 
     close(snap_out.ds)
 
-    # --- Restart file (full model state for continuation) ---
+    # Restart file (full model state for continuation).
     restart_out = init_output(y, RESTART_FINAL)
     write_output!(restart_out, y)
     close(restart_out.ds)
 
-    @info "done" snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
+    @info "done" backend=BACKEND snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
 
-    # --- Per-section timings (yelmo.timing = True in nml) ---
-    if y.timer.enabled
+    # Per-section timings — YelmoModel only (Mirror has no Julia-side timer).
+    if BACKEND == "yelmo" && y.timer.enabled
         println("\n--- Section timings ---")
         print_timings(y)
         flush(stdout)

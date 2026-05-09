@@ -23,13 +23,17 @@ The setup follows the Fortran reference program
 |-------|--------|------|
 | Grid (xc, yc) | — | `GRL-16KM_REGIONS.nc` |
 | Initial topography (H_ice, z_bed) | Morlighem et al. 2017 (M17) | `GRL-16KM_TOPO-M17-v5.nc` |
+| Drainage basins (bnd.basins / basin_mask) | NASA / NEGIS | `GRL-16KM_BASINS-nasa.nc` |
+| Region mask (bnd.regions) | — | `GRL-16KM_REGIONS.nc` |
 | Surface mass balance (smb_ref) | MARv3.11 / ERA 1961–1990 mean | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
 | Surface temperature (T_srf) | MARv3.11 / ERA 1961–1990 mean | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
 | Geothermal heat flux (Q_geo) | Shapiro & Ritzwoller 2004 (S04) | `GRL-16KM_GHF-S04.nc` |
 | Basal melt (bmb_shlf) | Constant −0.5 m/yr | — |
 
-Additional reference files (`GRL-16KM_VEL-J18.nc`, `GRL-16KM_BASINS-nasa.nc`)
-are present in `data/` for future use but are not loaded by `run.jl`.
+Basins and regions are loaded by `init_masks!` (Yelmo backend) or by
+the Fortran-side `ybound_load_masks` (Mirror backend).
+The reference surface velocity file `GRL-16KM_VEL-J18.nc` is present
+in `data/` for future use but is not currently loaded.
 
 Unit conversions applied at load time (mirrors Fortran `yelmo_data.f90`):
 
@@ -76,14 +80,32 @@ spurious ice growth outside the present-day margin (mirrors Fortran
 
 ```bash
 cd benchmarks/initmip-grl
-julia --project=. run.jl        # produces output/*.nc
-julia --project=. summary.jl    # produces summary.json
+julia --project=. run.jl                            # yelmo backend (default)
+INITMIP_BACKEND=mirror julia --project=. run.jl     # YelmoMirror (Fortran-yelmo C-API)
+julia --project=. summary.jl                        # produces summary.json
 ```
 
 The script must be run from this directory because namelist data paths
 are relative to it (`data/GRL-16KM/`). The `cd(@__DIR__)` at the top
 of `run.jl` handles this automatically when Julia is invoked from the
 repo root via `julia --project=benchmarks/initmip-grl benchmarks/initmip-grl/run.jl`.
+
+### Backend selection
+
+The same `run.jl`, `yelmo_initmip_grl.nml`, and forcing data drive
+both backends — only the build path differs:
+
+| | yelmo (default) | mirror |
+|---|---|---|
+| Construction | `YelmoModel(b, t; p)` | `YelmoMirror(p, t; rundir, overwrite)` |
+| Topography load | `init_topo_load!` (Yelmo.jl) | Fortran `yelmo_init` reads it from the nml |
+| Mask load | `init_masks!` (Yelmo.jl) | Fortran `ybound_load_masks` reads it from the nml |
+| Forcing fields | direct field write to `y.bnd.*` | direct field write to `y.bnd.*`, pushed to Fortran on `init_state!` / `step!` via `yelmo_sync!` |
+| Time stepping | Yelmo.jl adaptive PC (`dt_method = 2`) | Fortran's own time-stepping |
+| Regions API | yes (`region_domain.nc`) | no — currently `YelmoModel`-only |
+| Per-section timer | yes (`y.timer`, prints at end) | no |
+| Snapshots / restart | yes | yes |
+| Per-step `PCsub/PCrej/SSAit` | yes | shown as 0 (counters not surfaced) |
 
 ## Outputs
 

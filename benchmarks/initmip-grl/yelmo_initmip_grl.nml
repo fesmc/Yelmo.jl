@@ -92,6 +92,15 @@
     H_rock          = 2000.0
 /
 
+&yelmo_masks
+    basins_load     = True
+    basins_path     = "data/GRL-16KM/GRL-16KM_BASINS-nasa.nc"
+    basins_nms      = "basin" "basin_mask"
+    regions_load    = True
+    regions_path    = "data/GRL-16KM/GRL-16KM_REGIONS.nc"
+    regions_nms     = "mask" "None"
+/
+
 &yelmo_init_topo
     init_topo_load  = True
     init_topo_path  = "data/GRL-16KM/GRL-16KM_TOPO-M17-v5.nc"
@@ -100,4 +109,24 @@
     z_bed_f_sd      = -1.0
     smooth_H_ice    = 0.0
     smooth_z_bed    = 0.0
+/
+
+&yelmo_data
+    pd_topo_load      = False
+    pd_topo_path      = "none"
+    pd_topo_names     = "H_ice" "z_bed" "z_bed_sd" "z_srf"
+    pd_tsrf_load      = False
+    pd_tsrf_path      = "none"
+    pd_tsrf_name      = "T_srf"
+    pd_tsrf_monthly   = False
+    pd_smb_load       = False
+    pd_smb_path       = "none"
+    pd_smb_name       = "smb"
+    pd_smb_monthly    = False
+    pd_vel_load       = False
+    pd_vel_path       = "none"
+    pd_vel_names      = "ux_srf" "uy_srf"
+    pd_age_load       = False
+    pd_age_path       = "none"
+    pd_age_names      = "age_iso" "depth_iso"
 /
