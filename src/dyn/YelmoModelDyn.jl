@@ -469,8 +469,10 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     # solver=="fixed" they retain whatever value was loaded from
     # the restart (no per-step diagnostic write needed). For
     # solver==sia/ssa/hybrid they are reassembled below from
-    # `ux_i_s + ux_b`. `uxy_s` is always re-derived from the
-    # current `ux_s` / `uy_s` magnitude.
+    # `ux_i_s + ux_b`. For solver=="diva" they are written by
+    # `calc_vel_surface_diva!` inside `calc_velocity_diva!` (using
+    # the full-column F1 integral). `uxy_s` is always re-derived
+    # from the current `ux_s` / `uy_s` magnitude.
     if solver in ("sia", "ssa", "hybrid")
         @views interior(y.dyn.ux_s)[:, :, 1] .=
             interior(y.dyn.scratch.ux_i_s)[:, :, 1] .+

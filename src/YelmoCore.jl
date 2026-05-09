@@ -942,6 +942,7 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # beta in the matrix-kernel inputs.
     diva_scratch = (
         diva_F2                 = CenterField(g),                 # 2D depth-integrated 1/η · (1−ζ)²
+        diva_F1_int             = CenterField(g),                 # 2D depth-integrated 1/η · (1−ζ)
         diva_F1_3D              = CenterField(gt),                # 3D cumulative 1/η · (1−ζ)
         diva_beta_eff           = CenterField(g),                 # Goldberg-2011 β_eff at aa-cells
         diva_beta_eff_acx       = XFaceField(g),                  # face-staggered β_eff

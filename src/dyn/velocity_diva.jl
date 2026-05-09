@@ -54,7 +54,8 @@ import ..YelmoCore: dyn_step!  # extended in YelmoModelDyn.jl
 export calc_velocity_diva!,
        calc_F_integral_2D!, calc_F1_integral_3D!,
        calc_beta_eff!, stagger_beta_eff!,
-       calc_vel_basal_diva!, calc_vel_horizontal_3D!
+       calc_vel_basal_diva!, calc_vel_surface_diva!,
+       calc_vel_horizontal_3D!
 
 
 # ======================================================================
@@ -349,6 +350,69 @@ function calc_vel_basal_diva!(ux_b, uy_b, ux_bar, uy_bar,
 
     return ux_b, uy_b
 end
+
+"""
+    calc_vel_surface_diva!(ux_s, uy_s, ux_b, uy_b,
+                           taub_acx, taub_acy, F1_int, f_ice) -> (ux_s, uy_s)
+
+Reconstruct the 2D surface horizontal velocity (ζ = 1) for the DIVA
+solver via Lipscomb (2019) Eq. 29 evaluated at the surface:
+
+    u_s = u_b + F1_full · τ_b
+
+where `F1_int` is the **full-column** integral
+`F1_full = ∫_0^1 (H_eff / η(ζ)) · (1 − ζ) dζ` (a 2D field, computed
+via `calc_F_integral_2D!` with `n = 1.0`). The face-staggering of
+`F1_int` mirrors `calc_vel_basal_diva!` (margin-aware face stagger
+via `_stagger_margin_face`).
+
+Without this, `ux_s` / `uy_s` retain their initialised zero values
+and downstream `uxy_s` / `f_vbvs` are uniformly zero for DIVA runs
+— Fortran-yelmo populates these by indexing the 3D `ux(:, :, nz_aa)`
+slice (its `nz_aa` axis includes ζ = 1), but Yelmo.jl stores `ux`
+interior-only so the boundary value must be reconstructed
+separately.
+"""
+function calc_vel_surface_diva!(ux_s, uy_s, ux_b, uy_b,
+                                taub_acx, taub_acy, F1_int, f_ice)
+    Uxs = interior(ux_s)
+    Uys = interior(uy_s)
+    Uxb = interior(ux_b)
+    Uyb = interior(uy_b)
+    Tx  = interior(taub_acx)
+    Ty  = interior(taub_acy)
+    Fc  = interior(F1_int)
+    Fi  = interior(f_ice)
+
+    Nx, Ny = size(Fc, 1), size(Fc, 2)
+    Tx_top = topology(ux_s.grid, 1)
+    Ty_top = topology(uy_s.grid, 2)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ip1  = _neighbor_ip1(i, Nx, Tx_top)
+        jp1  = _neighbor_jp1(j, Ny, Ty_top)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
+
+        F1_acx = _stagger_margin_face(Fc[i, j, 1], Fc[ip1, j, 1],
+                                      Fi[i, j, 1], Fi[ip1, j, 1])
+        Uxs[ip1f, j, 1] = Uxb[ip1f, j, 1] + F1_acx * Tx[ip1f, j, 1]
+
+        F1_acy = _stagger_margin_face(Fc[i, j, 1], Fc[i, jp1, 1],
+                                      Fi[i, j, 1], Fi[i, jp1, 1])
+        Uys[i, jp1f, 1] = Uyb[i, jp1f, 1] + F1_acy * Ty[i, jp1f, 1]
+    end
+
+    if Tx_top === Bounded
+        @views Uxs[1, :, :] .= Uxs[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Uys[:, 1, :] .= Uys[:, 2, :]
+    end
+
+    return ux_s, uy_s
+end
+
 
 # Margin-aware face stagger: when both cells are fully iced take their
 # average; when only one is iced take that side's value; when neither
@@ -716,15 +780,26 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
                          sc.diva_F2, y.tpo.f_ice_dyn;
                          no_slip = no_slip)
 
-    # 3. Compute F1 cumulative (3D).
+    # 3. Compute F1 cumulative (3D) and full-column F1 integral (2D).
     calc_F1_integral_3D!(sc.diva_F1_3D, y.dyn.visc_eff,
                          y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)
+    calc_F_integral_2D!(sc.diva_F1_int, y.dyn.visc_eff,
+                        y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c; n = 1.0)
 
     # 4. Reconstruct 3D ux, uy via Lipscomb (2019) Eq. 29.
     calc_vel_horizontal_3D!(y.dyn.ux, y.dyn.uy,
                             y.dyn.ux_b, y.dyn.uy_b,
                             y.dyn.taub_acx, y.dyn.taub_acy,
                             sc.diva_F1_3D, y.tpo.f_ice_dyn)
+
+    # 4b. Surface (ζ = 1) horizontal velocity for diagnostics. Without
+    #     this, ux_s / uy_s stay at their zero init and uxy_s collapses
+    #     to zero (Yelmo.jl stores ux/uy interior-only, so the surface
+    #     value must be reconstructed separately).
+    calc_vel_surface_diva!(y.dyn.ux_s, y.dyn.uy_s,
+                           y.dyn.ux_b, y.dyn.uy_b,
+                           y.dyn.taub_acx, y.dyn.taub_acy,
+                           sc.diva_F1_int, y.tpo.f_ice_dyn)
 
     # 5. Shearing component ux_i = ux − ux_b, depth-averaged ux_i_bar
     #    is also useful for diagnostics.
