@@ -24,6 +24,7 @@ using Yelmo
 using Yelmo: step!, init_state!, init_topo_load!
 using Yelmo: init_regions, update_regions!, write_regions!
 using Yelmo: init_output, write_output!, OutputSelection
+using Yelmo: print_timings
 using Yelmo.YelmoModelPar: YelmoModelParameters
 using Oceananigans: interior
 using NCDatasets
@@ -34,8 +35,8 @@ using Printf
 # Configuration (edit in place).
 # ----------------------------------------------------------------------
 
-const T_END_YR       = 100.0    # total simulated time [yr]
-const DT_OUTER_YR    = 10.0     # outer-loop dt [yr]; adaptive PC sub-steps inside
+const T_END_YR       = 10.0     # total simulated time [yr]
+const DT_OUTER_YR    = 1.0      # outer-loop dt [yr]; adaptive PC sub-steps inside
 const SNAPSHOT_DT_YR = 10.0     # 2D snapshot cadence [yr]
 
 const BMB_SHLF_CONST = -0.5     # [m/yr] constant basal melt under shelves
@@ -63,11 +64,21 @@ function _build()
     init_topo_load!(y; grad_lim_zb = 0.5)
 
     # --- Climate and forcing: load directly into bnd fields ---
+    #
+    # Unit conversions match Fortran yelmo_data.f90:285-331:
+    #   - T_srf: °C → K (add 273.15) when minimum < 100.
+    #   - smb:   mm w.e./yr → m i.e./yr  (× 1e-3 · ρ_w/ρ_ice).
+    smb_conv = 1.0e-3 * y.c.rho_w / y.c.rho_ice
 
-    # SMB and surface temperature from MAR present-day climatology.
     NCDataset(joinpath(DATA_DIR, "GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc")) do ds
-        interior(y.bnd.smb_ref)[:, :, 1] .= ds["smb"][:, :]
-        interior(y.bnd.T_srf)[:, :, 1]   .= ds["T_srf"][:, :]
+        smb_raw   = ds["smb"][:, :]
+        T_srf_raw = ds["T_srf"][:, :]
+        interior(y.bnd.smb_ref)[:, :, 1] .= smb_raw .* smb_conv
+        T_srf_field = @view interior(y.bnd.T_srf)[:, :, 1]
+        T_srf_field .= T_srf_raw
+        if minimum(T_srf_field) < 100.0
+            T_srf_field .+= 273.15
+        end
     end
 
     # Ice-free cells receive an additional -2 m/yr SMB penalty to
@@ -120,6 +131,19 @@ function main()
 
     @info "t=0 initialized" V_ice_km3=regs[1].diag.V_ice V_sle_m=regs[1].diag.V_sle
 
+    # Per-outer-step counters for the adaptive PC + SSA Picard loops.
+    # `pc_scratch[]` is allocated lazily on the first step!, so read
+    # cumulative `n_steps_taken / n_rejections` from it and diff per
+    # outer step. `ssa_iter_now[]` is the last Picard iteration count
+    # from the most recent SSA solve.
+    pc_taken_prev   = 0
+    pc_reject_prev  = 0
+
+    @printf("  %6s  %10s  %10s  %8s  %5s  %5s  %5s\n",
+            "t[yr]", "V_ice[km³]", "V_sle[m]", "max_H[m]",
+            "PCsub", "PCrej", "SSAit")
+    flush(stdout)
+
     for k in 1:n_steps
         step!(y, DT_OUTER_YR)
 
@@ -130,12 +154,19 @@ function main()
             write_output!(snap_out, y)
         end
 
-        if k % (steps_per_snapshot * 5) == 0
-            d = regs[1].diag
-            @printf("  t=%6.0f  V_ice=%.3e km³  A_ice=%.3e km²  V_sle=%.3f m\n",
-                    y.time, d.V_ice, d.A_ice, d.V_sle)
-            flush(stdout)
-        end
+        # Per-outer-step diagnostics: PC sub-steps + rejections (delta from
+        # cumulative counters), last SSA Picard iteration count.
+        pc        = y.dyn.scratch.pc_scratch[]
+        pc_sub    = pc === nothing ? 0 : pc.n_steps_taken - pc_taken_prev
+        pc_rej    = pc === nothing ? 0 : pc.n_rejections - pc_reject_prev
+        pc_taken_prev  = pc === nothing ? 0 : pc.n_steps_taken
+        pc_reject_prev = pc === nothing ? 0 : pc.n_rejections
+        ssa_it    = Int(y.dyn.scratch.ssa_iter_now[])
+
+        d = regs[1].diag
+        @printf("  %6.0f  %10.4e  %10.4f  %8.1f  %5d  %5d  %5d\n",
+                y.time, d.V_ice, d.V_sle, d.H_ice_max, pc_sub, pc_rej, ssa_it)
+        flush(stdout)
     end
 
     close(snap_out.ds)
@@ -146,6 +177,13 @@ function main()
     close(restart_out.ds)
 
     @info "done" snapshots=SNAPSHOTS_NC restart=RESTART_FINAL
+
+    # --- Per-section timings (yelmo.timing = True in nml) ---
+    if y.timer.enabled
+        println("\n--- Section timings ---")
+        print_timings(y)
+        flush(stdout)
+    end
 end
 
 main()
