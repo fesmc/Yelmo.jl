@@ -9,6 +9,8 @@
     nz_aa           = 10
     dt_method       = 2
     timing          = True
+    log_timestep    = True
+    pc_eta_masked   = True
 /
 
 &ytopo
