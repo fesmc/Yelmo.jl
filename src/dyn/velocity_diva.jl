@@ -693,25 +693,25 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         end
 
         # Step 3c — log-space Picard relaxation of viscosity (Sandip et
-        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Disabled
-        # for now; uncomment to enable.
+        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Mixes the
+        # newly-computed `visc_eff` with the previous Picard iter via
+        # `visc^rel · visc_prev^(1−rel)`.
         #
         # Effect on initmip-grl 10 yr (measured 2026-05-10):
         #
         #   - Bulk physics (means of uxy_s, V_ice, V_sle, max_H,
         #     visc_eff distributions): essentially unchanged.
-        #   - Fast outlet streams: max uxy_s jumps from 1260 m/yr
-        #     (relaxation OFF, stuck on a slow Picard fixed point) to
-        #     2634 m/yr (ON; YelmoMirror reference: 2961). This is
-        #     the practical reason to enable — it unsticks the fast-
-        #     flow regime on stiff geometries.
-        #   - Mean Picard iter count drops from 4.1 to 3.0.
-        #   - Walltime: +8% (the relaxation kernel itself is cheap;
-        #     the cost is downstream solvers converging to a
+        #   - Fast outlet streams: max uxy_s 2634 m/yr (relaxation
+        #     ON; YelmoMirror reference 2961) vs 1260 m/yr (OFF,
+        #     stuck on a slow Picard fixed point). This is the
+        #     practical reason it's on — relaxation unsticks the
+        #     fast-flow regime on stiff geometries.
+        #   - Mean SSA Picard iter count: 3.0 (vs 4.1 OFF).
+        #   - Walltime: +8% over OFF (relaxation kernel itself is
+        #     cheap; cost is downstream solvers converging to a
         #     slightly different fixed point).
-        #
-        # picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
-        #                    rel = ssa.picard_relax)
+        picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
+                           rel = ssa.picard_relax)
 
         # Step 3b — log-Picard relax visc.
         if iter > 1
