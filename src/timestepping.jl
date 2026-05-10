@@ -352,6 +352,18 @@ mutable struct PCScratch
     # `false` until the first accept; AB-SAM falls back to HEUN-style
     # predictor while `false`.
     ΔH_prev::Array{Float64,3}
+    # Predictor-state diagnostics, snapshotted by
+    # `_snapshot_pred_diagnostics!` immediately after each scheme
+    # records `H_pred`. Consumed by `_compute_pc_eta` to evaluate the
+    # Fortran `set_pc_mask` exclusions on the predictor side. The
+    # corrector-side diagnostics are read live from `y.tpo.f_ice` /
+    # `y.tpo.H_grnd` (refreshed by `update_diagnostics!` at the end of
+    # the corrector stage).
+    f_ice_pred::Array{Float64,3}
+    H_grnd_pred::Array{Float64,3}
+    # Per-cell `|tau|` field, populated only when `pc_eta_masked = true`.
+    # Used by the isolated-outlier check inside `_compute_pc_eta`.
+    pc_tau::Array{Float64,3}
     is_bootstrapped::Bool
     eta_history::Vector{Float64}   # newest at end; capped to history_max
     dt_history::Vector{Float64}    # likewise
@@ -365,15 +377,145 @@ function _alloc_pc_scratch(y)
     H = interior(y.tpo.H_ice)
     return PCScratch(
         _alloc_pc_snapshot(y),
-        zeros(Float64, size(H)),
-        zeros(Float64, size(H)),
-        zeros(Float64, size(H)),
+        zeros(Float64, size(H)),    # H_pred
+        zeros(Float64, size(H)),    # H_corr
+        zeros(Float64, size(H)),    # ΔH_prev
+        zeros(Float64, size(H)),    # f_ice_pred
+        zeros(Float64, size(H)),    # H_grnd_pred
+        zeros(Float64, size(H)),    # pc_tau
         false,
         Float64[],
         Float64[],
         0, 0,
     )
 end
+
+# Snapshot the predictor-state ice-fraction and flotation diagnostics
+# from `y.tpo` into the PC scratch. Called by every `pc_step!` method
+# at the moment when `y` holds the predictor state (i.e., immediately
+# after `copyto!(scratch.H_pred, ...)`). The snapshots are consumed by
+# `_compute_pc_eta` when evaluating the Fortran-style `set_pc_mask`
+# exclusions on the predictor side; the corrector-side equivalents are
+# read live from `y.tpo` after `update_diagnostics!` runs at the end
+# of the corrector stage.
+#
+# Cheap copies of two `Nx × Ny` slices — kept unconditionally (i.e.
+# regardless of the `pc_eta_masked` setting) so toggling masking on
+# at runtime never sees stale buffers.
+function _snapshot_pred_diagnostics!(scratch::PCScratch, y)
+    copyto!(scratch.f_ice_pred,  interior(y.tpo.f_ice))
+    copyto!(scratch.H_grnd_pred, interior(y.tpo.H_grnd))
+    return scratch
+end
+
+# ----------------------------------------------------------------------
+# Truncation-error proxy `eta` from a finished PC attempt.
+#
+# `factor` is the scheme-specific multiplier on `|H_corr − H_pred| / dt`
+# (1/6 for HEUN, 1/2 for FE-SBE, ζ/(3·(ζ+1)) for AB-SAM — the caller
+# supplies it).
+#
+# `y.p.yelmo.pc_eta_masked` selects between two evaluations:
+#
+#   - `false` (legacy / unmasked): the original Yelmo.jl behaviour —
+#     a global `max(|H_corr − H_pred|)` across every cell. Margin /
+#     calving-front / grounding-line cells dominate the result.
+#
+#   - `true` (default, Fortran-equivalent): port of Fortran's
+#     `set_pc_mask` (yelmo_timesteps.f90:166) + `calc_pc_eta`
+#     (yelmo_timesteps.f90:275). The maxval is taken only over cells
+#     that pass:
+#
+#       * H_pred ≥ 10 m AND H_corr ≥ 10 m (skip thin / transitioning).
+#       * No 9-neighbour `f_ice < 1` in either pred or corr (skip the
+#         ice-margin band).
+#       * H_grnd_pred > 0 AND H_grnd_corr > 0 (skip floating + GL).
+#       * Not an isolated outlier — `|tau| > 2·pc_eps` with no
+#         4-neighbour `|tau| > pc_eps` is also masked out.
+#
+#     Predictor-side `f_ice` / `H_grnd` come from `scratch.f_ice_pred`
+#     / `scratch.H_grnd_pred` (snapshotted by each scheme right after
+#     it records `H_pred`). Corrector-side comes live from `y.tpo`.
+# ----------------------------------------------------------------------
+function _compute_pc_eta(factor::Float64, scratch::PCScratch, y, dt::Float64)
+    H_pred = scratch.H_pred
+    H_corr = scratch.H_corr
+
+    if !y.p.yelmo.pc_eta_masked
+        diff_max = 0.0
+        @inbounds @simd for i in eachindex(H_corr)
+            d = abs(H_corr[i] - H_pred[i])
+            diff_max = max(diff_max, d)
+        end
+        return factor * diff_max / dt
+    end
+
+    # Build the per-cell |tau| field once so the isolated-outlier
+    # check below has neighbour values to compare against.
+    pc_tau = scratch.pc_tau
+    inv_dt_factor = factor / dt
+    @inbounds @simd for i in eachindex(pc_tau)
+        pc_tau[i] = abs(H_corr[i] - H_pred[i]) * inv_dt_factor
+    end
+
+    pc_eps     = Float64(y.p.yelmo.pc_eps)
+    fice_pred  = scratch.f_ice_pred
+    Hgrnd_pred = scratch.H_grnd_pred
+    fice_corr  = interior(y.tpo.f_ice)
+    Hgrnd_corr = interior(y.tpo.H_grnd)
+
+    H_lim = 10.0    # [m] — Fortran `set_pc_mask` constant.
+    nx = size(pc_tau, 1)
+    ny = size(pc_tau, 2)
+
+    eta_max = 0.0
+    @inbounds for j in 1:ny, i in 1:nx
+        # Thin / transitioning cell.
+        if H_pred[i, j, 1] < H_lim || H_corr[i, j, 1] < H_lim
+            continue
+        end
+
+        im1 = max(i - 1, 1)
+        ip1 = min(i + 1, nx)
+        jm1 = max(j - 1, 1)
+        jp1 = min(j + 1, ny)
+
+        # 9-neighbour margin check (any partial-ice neighbour disqualifies).
+        is_margin = false
+        for jj in jm1:jp1, ii in im1:ip1
+            if fice_pred[ii, jj, 1] < 1.0 || fice_corr[ii, jj, 1] < 1.0
+                is_margin = true
+                break
+            end
+        end
+        is_margin && continue
+
+        # Floating / grounding-line cell.
+        if Hgrnd_pred[i, j, 1] <= 0.0 || Hgrnd_corr[i, j, 1] <= 0.0
+            continue
+        end
+
+        # Isolated outlier: large local |tau| with no 4-neighbour above
+        # `pc_eps`. Fortran applies this regardless of the geometric
+        # exclusions above.
+        tau_ij = pc_tau[i, j, 1]
+        if tau_ij > 2.0 * pc_eps
+            n_above = 0
+            pc_tau[im1, j,   1] > pc_eps && (n_above += 1)
+            pc_tau[ip1, j,   1] > pc_eps && (n_above += 1)
+            pc_tau[i,   jm1, 1] > pc_eps && (n_above += 1)
+            pc_tau[i,   jp1, 1] > pc_eps && (n_above += 1)
+            n_above == 0 && continue
+        end
+
+        if tau_ij > eta_max
+            eta_max = tau_ij
+        end
+    end
+
+    return eta_max
+end
+
 
 # Push (eta, dt) onto the history rings, trimming to PC_HISTORY_MAX.
 function _push_history!(scratch::PCScratch, eta::Float64, dt::Float64)
@@ -423,6 +565,9 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     # Stage 1: full FE step  y_n  →  y_pred
     @timed_section y :pc_predictor _step_fe!(y, dt)
     copyto!(scratch.H_pred, interior(y.tpo.H_ice))
+    # Snapshot predictor-state f_ice / H_grnd before stage 2 overwrites
+    # them. Consumed by `_compute_pc_eta` for the masked-eta path.
+    _snapshot_pred_diagnostics!(scratch, y)
 
     # Stage 2: full FE step  y_pred  →  y_**
     @timed_section y :pc_corrector _step_fe!(y, dt)
@@ -456,14 +601,11 @@ function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
     # Fortran's "carry the predictor-state velocity" behaviour
     # (yelmo_ice.f90 outer loop — never re-solves dyn at the corrector
     # state). The Picard loop on the next step's predictor will tug
-    # the velocity back to consistency with the new H_n.
-    factor = pc_error_factor(HEUN())
-    diff_max = 0.0
-    @inbounds @simd for i in eachindex(scratch.H_corr)
-        d = abs(scratch.H_corr[i] - scratch.H_pred[i])
-        diff_max = max(diff_max, d)
-    end
-    return factor * diff_max / dt
+    # the velocity back to consistency with the new H_n. The maxval
+    # is masked when `pc_eta_masked = true` (default) to mirror
+    # Fortran's `set_pc_mask` filter on margin / GL / floating /
+    # thin-ice / isolated-outlier cells.
+    return _compute_pc_eta(pc_error_factor(HEUN()), scratch, y, dt)
 end
 
 """
@@ -506,6 +648,10 @@ function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
     # y is now at (H_pred, u_pred, mat_pred, therm_pred).
     @timed_section y :pc_predictor _step_fe!(y, dt)
     copyto!(scratch.H_pred, interior(y.tpo.H_ice))
+    # Snapshot predictor-state f_ice / H_grnd before `restore_H_only!`
+    # overwrites them via its embedded `update_diagnostics!`. Consumed
+    # by `_compute_pc_eta` for the masked-eta path.
+    _snapshot_pred_diagnostics!(scratch, y)
 
     # Stage 2 — restore H_ice + time to y_n; keep u_pred (and
     # mat_pred, therm_pred) in place. `update_diagnostics!` (called
@@ -523,15 +669,15 @@ function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
     @timed_section y :pc_corrector _step_fe!(y, dt)
     # y is now at (H_corr, u_corr, ...) with time = t_n + dt.
 
-    # Truncation-error proxy.
-    factor = pc_error_factor(FE_SBE())
-    H_corr = interior(y.tpo.H_ice)
-    diff_max = 0.0
-    @inbounds @simd for i in eachindex(H_corr)
-        d = abs(H_corr[i] - scratch.H_pred[i])
-        diff_max = max(diff_max, d)
-    end
-    return factor * diff_max / dt
+    # FE_SBE leaves `y.tpo.H_ice` at the corrector geometry but
+    # `scratch.H_corr` was last touched in a previous attempt — copy
+    # so `_compute_pc_eta` reads `H_corr` from the canonical place.
+    copyto!(scratch.H_corr, interior(y.tpo.H_ice))
+
+    # Truncation-error proxy. Masked maxval when
+    # `pc_eta_masked = true` (default), matching Fortran's
+    # `set_pc_mask` exclusions.
+    return _compute_pc_eta(pc_error_factor(FE_SBE()), scratch, y, dt)
 end
 
 """
@@ -574,6 +720,9 @@ function pc_step!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
     # reflect H_pred_FE; refresh from the AB-extrapolated H_pred.
     Yelmo.update_diagnostics!(y)
     copyto!(scratch.H_pred, H_now)
+    # Snapshot AB-predictor-state f_ice / H_grnd (post `update_diagnostics!`)
+    # before stage 2 overwrites them. Consumed by `_compute_pc_eta`.
+    _snapshot_pred_diagnostics!(scratch, y)
 
     # Stage 2: full FE step y_pred_AB → y_** (k_** at AB predictor state).
     @timed_section y :pc_corrector _step_fe!(y, dt)
@@ -589,14 +738,11 @@ function pc_step!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
     y.time = snap.time + dt
     Yelmo.update_diagnostics!(y)
 
-    # Truncation-error proxy: factor = ζ / (3·(ζ+1)).
+    # Truncation-error proxy: factor = ζ / (3·(ζ+1)). Masked maxval
+    # when `pc_eta_masked = true` (default), matching Fortran's
+    # `set_pc_mask` exclusions.
     factor = ζ / (3.0 * (ζ + 1.0))
-    diff_max = 0.0
-    @inbounds @simd for i in eachindex(scratch.H_corr)
-        d = abs(scratch.H_corr[i] - scratch.H_pred[i])
-        diff_max = max(diff_max, d)
-    end
-    return factor * diff_max / dt
+    return _compute_pc_eta(factor, scratch, y, dt)
 end
 
 
@@ -644,11 +790,15 @@ function _dt_ratio(::PI42, eta_n::Real, eta_nm1::Real,
            (eps / eta_nm1_safe) ^ (-k_p)
 end
 
-# Per-step clamp on the dt growth/shrink ratio so the controller can
-# only step in modest increments, smoothing transients. Söderlind &
-# Wang (2006) recommend [0.5, 2.0]; we use the same bracket Fortran
-# Yelmo applies after the controller (`dt_now = clamp(dt_n*rho, ...)`).
-_clamp_dt_ratio(rho) = clamp(rho, 0.5, 2.0)
+# Per-step clamp on the dt growth/shrink ratio. The Söderlind & Wang
+# (2006) recommendation is [0.5, 2.0], but Fortran Yelmo applies no
+# such clamp after the PI42 controller (`yelmo_timesteps.f90:506` —
+# `rhohat_n = rho_n` directly, the smoothing is commented out). We use
+# a wider [0.2, 10.0] bracket so dt can recover from transient
+# rejections faster without being capped at 2× per step. This keeps
+# Yelmo.jl's response curve closer to Fortran's while still limiting
+# pathological per-step swings.
+_clamp_dt_ratio(rho) = clamp(rho, 0.2, 10.0)
 
 
 # ===== Outer-step boundary limiter =====

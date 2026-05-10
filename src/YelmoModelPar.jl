@@ -82,6 +82,14 @@ Base.@kwdef struct YelmoParams
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
+    # Whether to mask out ice-margin / grounding-line / floating /
+    # thin-ice / isolated-outlier cells from the PC truncation-error
+    # `eta` (matches Fortran `set_pc_mask` + `calc_pc_eta`). With
+    # masking off, `eta` is the global `max(|H_corr − H_pred|) · factor / dt`
+    # over every cell — Yelmo.jl's pre-2026-05-10 behaviour. Keep on
+    # by default so the PI42 controller responds to interior smooth-ice
+    # truncation only, mirroring Fortran.
+    pc_eta_masked    ::Bool    = true
     # Per-section wall-clock timing scaffold (`y.timer`). Off by
     # default; turning it on populates `y.timer` via `@timed_section`
     # call sites at a small per-call overhead. See `src/timing.jl`
