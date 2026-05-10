@@ -156,11 +156,11 @@ end
     calc_T_pmp_boundaries_2D!(T_pmp_b, T_pmp_s, H_ice, T0, beta, rho_ice, g)
         -> nothing
 
-Fill the 2D Path B basal (`T_pmp_b`, ζ=0) and surface (`T_pmp_s`, ζ=1)
+Fill the 2D basal (`T_pmp_b`, ζ=0) and surface (`T_pmp_s`, ζ=1)
 pressure-corrected melting-point fields. At the bed the overlying ice
 column is the full `H_ice`; at the surface it is zero, so
 `T_pmp_s ≡ T0` everywhere. Companion of [`calc_T_pmp_3D!`](@ref) for
-the boundary fields registered in `PATH_B_REGISTRY_ICE`.
+the boundary fields registered in `BOUNDARY_FIELD_REGISTRY_ICE`.
 """
 function calc_T_pmp_boundaries_2D!(T_pmp_b_field, T_pmp_s_field, H_ice_field,
                                    T0::Real, beta::Real,
@@ -193,9 +193,9 @@ Compute the fraction of each basal cell at the pressure melting point
     inner `dT` floored at `-20 K` to avoid underflow at very cold cells.
 
 Greve (2005); Hindmarsh & Le Meur (2001). Direct port of Fortran
-`thermodynamics.f90:991-1050`. Under Path B the basal temperature and
+`thermodynamics.f90:991-1050`. The basal temperature and
 pressure-melting temperature live in the dedicated 2D `T_ice_b` /
-`T_pmp_b` fields rather than in `T_ice[:, :, 1]` / `T_pmp[:, :, 1]`
+`T_pmp_b` boundary fields rather than in `T_ice[:, :, 1]` / `T_pmp[:, :, 1]`
 (which are the first interior layer at ζ_aa[1], not the boundary at
 ζ = 0).
 """

@@ -305,7 +305,7 @@ function _make_paired_grid(template::RectilinearGrid, Nx::Int, Ny::Int)
             topology = (Tx, Ty, Tz))
     else
         # 3D: preserve the z face array exactly so vertical
-        # discretisation (Path B `[0; centers...; 1]` or otherwise) is
+        # discretisation (`[0; centers...; 1]` or otherwise) is
         # transferred to the new grid without re-derivation.
         Nz = size(template, 3)
         z_face = collect(Float64, znodes(template, Face()))

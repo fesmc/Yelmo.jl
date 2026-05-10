@@ -41,9 +41,9 @@ verbatim index. Center positions (forced to be Face midpoints) and
 file's center positions diverge — file's z=1 surface value lands at
 Yelmo's `zeta_aa[Nz] ≈ 0.948` (~5% below surface). `ux_b` / `ux_s`
 are presently redundant slice-shortcuts of the boundary-loaded
-3D field, not separately-stored boundary values per Option C. Path B
-fix (true interior + 2D `_b` / `_s` separation, file format
-unchanged via load-split / write-recombine) is documented in
+3D field, not separately-stored boundary values per Option C. The
+true interior + 2D `_b` / `_s` separation (file format unchanged
+via load-split / write-recombine) is documented in
 `.claude/PlanVerticalSplit.md`; deferred to a dedicated
 cross-cutting refactor branch.
 """
@@ -447,7 +447,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #   ux_s  = ux(:, :, nz_aa);  uy_s  = uy(:, :, nz_aa)
     #   uz_s  = uz(:, :, nz_ac);  uxy_s = uxy(:, :, nz_aa)
     #
-    # Under Path B `ux` / `uy` are interior-only (Nz_aa centers,
+    # `ux` / `uy` are interior-only Center fields (Nz_aa centers,
     # excluding the basal and surface boundary endpoints), so
     # `interior(y.dyn.ux)[:, :, end]` returns the topmost interior
     # Center value, not the surface (zeta = 1) value. The 2D
@@ -457,11 +457,11 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     # hybrid branches below from the solver-computed surface
     # segment.
     #
-    # `uz` / `uz_s` / `uz_b` are ZFace 3D — under Path B the Yelmo
-    # Face axis is `[0; midpoints...; 1]` (length Nz+1) with index
-    # 1 at z=0 (basal face) and index end at z=1 (surface face).
-    # Slicing `uz[:, :, 1]` and `uz[:, :, end]` therefore continues
-    # to give the actual basal / surface vertical velocity.
+    # `uz` / `uz_s` / `uz_b` are ZFace 3D — the Yelmo Face axis is
+    # `[0; midpoints...; 1]` (length Nz+1) with index 1 at z=0
+    # (basal face) and index end at z=1 (surface face). Slicing
+    # `uz[:, :, 1]` and `uz[:, :, end]` therefore gives the actual
+    # basal / surface vertical velocity.
     @views interior(y.dyn.uz_b)[:, :, 1] .= interior(y.dyn.uz)[:, :, 1]
     @views interior(y.dyn.uz_s)[:, :, 1] .= interior(y.dyn.uz)[:, :, end]
 
@@ -469,8 +469,10 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     # solver=="fixed" they retain whatever value was loaded from
     # the restart (no per-step diagnostic write needed). For
     # solver==sia/ssa/hybrid they are reassembled below from
-    # `ux_i_s + ux_b`. `uxy_s` is always re-derived from the
-    # current `ux_s` / `uy_s` magnitude.
+    # `ux_i_s + ux_b`. For solver=="diva" they are written by
+    # `calc_vel_surface_diva!` inside `calc_velocity_diva!` (using
+    # the full-column F1 integral). `uxy_s` is always re-derived
+    # from the current `ux_s` / `uy_s` magnitude.
     if solver in ("sia", "ssa", "hybrid")
         @views interior(y.dyn.ux_s)[:, :, 1] .=
             interior(y.dyn.scratch.ux_i_s)[:, :, 1] .+

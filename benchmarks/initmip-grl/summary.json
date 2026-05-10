@@ -1,0 +1,13 @@
+{
+  "benchmark": "initmip-grl",
+  "dV_ice_1e6km3": -0.005576888822052872,
+  "date": "2026-05-09T08:17:53.702",
+  "final_A_ice_1e6km2": 2.209536,
+  "final_H_ice_max_m": 3328.4667876322465,
+  "final_H_ice_mean_m": 1470.7232141409183,
+  "final_V_ice_1e6km3": 3.249615887680068,
+  "final_V_sle_m": 7.9824003812821855,
+  "n_timesteps": 11,
+  "t_end_yr": 10.080120405148143,
+  "yelmo_version": "0.1.0"
+}

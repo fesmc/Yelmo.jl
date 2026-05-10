@@ -35,6 +35,7 @@ analytical references, see `test/benchmarks/` instead.
 | [`mismip3d-stnd`](mismip3d-stnd)    | ✅       | MISMIP3D Stnd (Pattyn et al. 2013), SSA + grounding-line dynamics on a sloped marine bed. |
 | [`calvingmip-exp1`](calvingmip-exp1)| ✅       | CalvingMIP Exp1 (Cornford et al.) — equilibrium calving pinned at r = 750 km on the circular bowl. SSA + LSF + user-supplied calving hook. |
 | [`calvingmip-exp2`](calvingmip-exp2)| ✅       | CalvingMIP Exp2 — oscillating front law, chained from exp1 restart. Tracks an 8-direction asymmetry metric and aborts on threshold (symmetry-preservation test). |
+| [`initmip-grl`](initmip-grl)        | X        | Initmip Greenland ice sheet — steady-state, but realistic simulation of the PD GrIS. |
 
 ## Running a benchmark
 

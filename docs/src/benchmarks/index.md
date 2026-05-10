@@ -21,6 +21,7 @@ when you need to refresh after a physics change.
 | [CalvingMIP Exp 1](calvingmip.md) | SSA + level-set calving hook | YelmoMirror fixture | `test_calvingmip_exp1.jl` |
 | [Slab advection stability](slab-advection.md) | Advection kernel only | Unconditional stability of implicit scheme | `test_slab_advection.jl` |
 | [Adaptive predictor-corrector](adaptive-dt.md) | Adaptive timestepping (HEUN, FE-SBE, AB-SAM) | Snapshot/restore round-trip + MISMIP3D comparison | `test_adaptive_dt.jl` |
+| [initMIP Greenland](initmip-grl.md) | Full chain (DIVA + temp + calving) on real GRL-16KM forcing | Side-by-side `YelmoModel` vs `YelmoMirror` (no CI fixture) | `benchmarks/initmip-grl/run.jl` |
 
 ## How to run
 
@@ -40,6 +41,17 @@ julia --project=test test/benchmarks/test_trough_diva.jl
 julia --project=test test/benchmarks/test_calvingmip_exp1.jl
 julia --project=test test/benchmarks/test_slab_advection.jl
 julia --project=test test/benchmarks/test_adaptive_dt.jl
+```
+
+The initMIP Greenland real-domain benchmark uses its own project
+under `benchmarks/initmip-grl/` (separate from the `test/` CI tree)
+and supports both backends:
+
+```bash
+cd benchmarks/initmip-grl
+julia --project=. run.jl                            # YelmoModel
+INITMIP_BACKEND=mirror julia --project=. run.jl     # YelmoMirror
+julia --project=. summary.jl                        # post-processing
 ```
 
 The EISMINT-1 lockstep test, trough, and CalvingMIP regression tests require

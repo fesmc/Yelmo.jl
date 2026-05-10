@@ -53,7 +53,7 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel, RMSEStats,
 using ..YelmoUtils: remove_englacial_lakes!, adjust_topography_gradients!,
                     smooth_gauss_2D!
 
-export init_topo_load!, data_load!, data_compare!
+export init_topo_load!, init_masks!, data_load!, data_compare!
 # Note: `RMSEStats` is defined and exported in `YelmoCore` so the type
 # is in scope inside `_alloc_yelmo_groups` without forward references.
 # We re-import it here for `data_compare!`.
@@ -220,6 +220,104 @@ function init_topo_load!(y::YelmoModel;
     @info "init_topo_load!: range(z_bed)    = " minimum(z_bed)    maximum(z_bed)
     @info "init_topo_load!: range(z_bed_sd) = " minimum(z_bed_sd) maximum(z_bed_sd)
     @info "init_topo_load!: z_bed_f_sd      = " par.z_bed_f_sd
+
+    return y
+end
+
+# ---------------------------------------------------------------------------
+# init_masks!
+# ---------------------------------------------------------------------------
+
+# Domain-default region indices, matching Fortran `bnd%index_*` in
+# `yelmo_defs.f90:755-757`. Used when `regions_load = false` (or the
+# regions file is absent) so the regional mask in `data_compare!`
+# still works on real-domain runs.
+const _DOMAIN_REGION_INDEX = Dict(
+    "Greenland"  => 1.3,
+    "Antarctica" => 2.0,
+    "North"      => 1.0,
+)
+
+"""
+    init_masks!(y::YelmoModel) -> y
+
+Load the basin- and region-mask boundary fields (`y.bnd.basins`,
+`y.bnd.basin_mask`, `y.bnd.regions`, `y.bnd.region_mask`) from the
+NetCDF files specified in `y.p.yelmo_masks`. Mirrors Fortran
+`ybound_load_masks` (`yelmo/src/yelmo_boundaries.f90:108-189`).
+
+Behaviour:
+
+  - `basin_mask` and `basins` are seeded with `1.0` everywhere so a
+    `basins_load = false` run still has a sensible default.
+  - `region_mask` is seeded with `1.0`. `regions` is seeded with the
+    domain-specific default index from `_DOMAIN_REGION_INDEX`
+    (Greenland → 1.3, Antarctica → 2.0, North → 1.0, otherwise 1.0).
+    This matches the Fortran `select case(domain)` block.
+  - When `basins_load = true`, reads `basins_nms[1]` into `bnd.basins`
+    and (if `basins_nms[2] != "None"`) `basins_nms[2]` into
+    `bnd.basin_mask`.
+  - When `regions_load = true`, reads `regions_nms[1]` into
+    `bnd.regions` and (if `regions_nms[2] != "None"`) `regions_nms[2]`
+    into `bnd.region_mask`.
+  - Paths support the `{domain}` / `{grid_name}` placeholders (same
+    `_parse_path` helper as `init_topo_load!`).
+
+This is a load-time helper. Call once after `YelmoModel` construction
+and before `init_state!` if you need `bnd.basins` / `bnd.regions`
+populated for downstream regional diagnostics (`data_compare!`,
+custom region masks via `add_region!`, basin-aware physics hooks).
+"""
+function init_masks!(y::YelmoModel)
+    y.p === nothing && error(
+        "init_masks!: y.p must be a YelmoModelParameters value " *
+        "(with `yelmo_masks` filled in).")
+
+    par       = y.p.yelmo_masks
+    domain    = y.p.yelmo.domain
+    grid_name = y.p.yelmo.grid_name
+
+    basins      = @view interior(y.bnd.basins)[:, :, 1]
+    basin_mask  = @view interior(y.bnd.basin_mask)[:, :, 1]
+    regions     = @view interior(y.bnd.regions)[:, :, 1]
+    region_mask = @view interior(y.bnd.region_mask)[:, :, 1]
+
+    # ----- Defaults --------------------------------------------------
+    fill!(basins,     1.0)
+    fill!(basin_mask, 1.0)
+    fill!(region_mask, 1.0)
+    fill!(regions, get(_DOMAIN_REGION_INDEX, domain, 1.0))
+
+    # ----- basins ----------------------------------------------------
+    if par.basins_load
+        filename = _parse_path(par.basins_path, domain, grid_name)
+        nms = par.basins_nms
+        length(nms) >= 1 || error(
+            "init_masks!: basins_nms must have length >= 1 " *
+            "(got $(length(nms))).")
+        @info "init_masks!: reading basins from $(filename)"
+        _read_to!(basins, filename, nms[1])
+        if length(nms) >= 2 && _name_present(nms[2])
+            _read_to!(basin_mask, filename, nms[2])
+        end
+    end
+
+    # ----- regions ---------------------------------------------------
+    if par.regions_load
+        filename = _parse_path(par.regions_path, domain, grid_name)
+        nms = par.regions_nms
+        length(nms) >= 1 || error(
+            "init_masks!: regions_nms must have length >= 1 " *
+            "(got $(length(nms))).")
+        @info "init_masks!: reading regions from $(filename)"
+        _read_to!(regions, filename, nms[1])
+        if length(nms) >= 2 && _name_present(nms[2])
+            _read_to!(region_mask, filename, nms[2])
+        end
+    end
+
+    @info "init_masks!: range(basins)  = " minimum(basins)  maximum(basins)
+    @info "init_masks!: range(regions) = " minimum(regions) maximum(regions)
 
     return y
 end

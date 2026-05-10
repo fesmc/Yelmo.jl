@@ -54,7 +54,9 @@ import ..YelmoCore: dyn_step!  # extended in YelmoModelDyn.jl
 export calc_velocity_diva!,
        calc_F_integral_2D!, calc_F1_integral_3D!,
        calc_beta_eff!, stagger_beta_eff!,
-       calc_vel_basal_diva!, calc_vel_horizontal_3D!
+       calc_vel_basal_diva!, calc_vel_surface_diva!,
+       calc_vel_horizontal_3D!,
+       calc_vertical_shear_3D!
 
 
 # ======================================================================
@@ -350,6 +352,143 @@ function calc_vel_basal_diva!(ux_b, uy_b, ux_bar, uy_bar,
     return ux_b, uy_b
 end
 
+"""
+    calc_vel_surface_diva!(ux_s, uy_s, ux_b, uy_b,
+                           taub_acx, taub_acy, F1_int, f_ice) -> (ux_s, uy_s)
+
+Reconstruct the 2D surface horizontal velocity (ζ = 1) for the DIVA
+solver via Lipscomb (2019) Eq. 29 evaluated at the surface:
+
+    u_s = u_b + F1_full · τ_b
+
+where `F1_int` is the **full-column** integral
+`F1_full = ∫_0^1 (H_eff / η(ζ)) · (1 − ζ) dζ` (a 2D field, computed
+via `calc_F_integral_2D!` with `n = 1.0`). The face-staggering of
+`F1_int` mirrors `calc_vel_basal_diva!` (margin-aware face stagger
+via `_stagger_margin_face`).
+
+Without this, `ux_s` / `uy_s` retain their initialised zero values
+and downstream `uxy_s` / `f_vbvs` are uniformly zero for DIVA runs
+— Fortran-yelmo populates these by indexing the 3D `ux(:, :, nz_aa)`
+slice (its `nz_aa` axis includes ζ = 1), but Yelmo.jl stores `ux`
+interior-only so the boundary value must be reconstructed
+separately.
+"""
+function calc_vel_surface_diva!(ux_s, uy_s, ux_b, uy_b,
+                                taub_acx, taub_acy, F1_int, f_ice)
+    Uxs = interior(ux_s)
+    Uys = interior(uy_s)
+    Uxb = interior(ux_b)
+    Uyb = interior(uy_b)
+    Tx  = interior(taub_acx)
+    Ty  = interior(taub_acy)
+    Fc  = interior(F1_int)
+    Fi  = interior(f_ice)
+
+    Nx, Ny = size(Fc, 1), size(Fc, 2)
+    Tx_top = topology(ux_s.grid, 1)
+    Ty_top = topology(uy_s.grid, 2)
+
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ip1  = _neighbor_ip1(i, Nx, Tx_top)
+        jp1  = _neighbor_jp1(j, Ny, Ty_top)
+        ip1f = _ip1_modular(i, Nx, Tx_top)
+        jp1f = _jp1_modular(j, Ny, Ty_top)
+
+        F1_acx = _stagger_margin_face(Fc[i, j, 1], Fc[ip1, j, 1],
+                                      Fi[i, j, 1], Fi[ip1, j, 1])
+        Uxs[ip1f, j, 1] = Uxb[ip1f, j, 1] + F1_acx * Tx[ip1f, j, 1]
+
+        F1_acy = _stagger_margin_face(Fc[i, j, 1], Fc[i, jp1, 1],
+                                      Fi[i, j, 1], Fi[i, jp1, 1])
+        Uys[i, jp1f, 1] = Uyb[i, jp1f, 1] + F1_acy * Ty[i, jp1f, 1]
+    end
+
+    if Tx_top === Bounded
+        @views Uxs[1, :, :] .= Uxs[2, :, :]
+    end
+    if Ty_top === Bounded
+        @views Uys[:, 1, :] .= Uys[:, 2, :]
+    end
+
+    return ux_s, uy_s
+end
+
+
+"""
+    calc_vertical_shear_3D!(duxdz, duydz, taub_acx, taub_acy,
+                            visc_eff, f_ice, zeta_aa) -> (duxdz, duydz)
+
+Compute the 3D vertical-shear strain rates (Lipscomb 2019 Eq. 36):
+
+    du/dz(i, j, k) = (τ_b_acx(i, j) / η_eff_acx(i, j, k)) · (1 − ζ_k)
+    dv/dz(i, j, k) = (τ_b_acy(i, j) / η_eff_acy(i, j, k)) · (1 − ζ_k)
+
+`η_eff_ac{x,y}` is `visc_eff` margin-aware face-staggered to the
+acx / acy faces (the same `_stagger_margin_face` helper as
+`calc_vel_basal_diva!`). Faces with zero staggered viscosity yield
+zero shear (matches Fortran's safety guard at
+`velocity_diva.f90:533-537`).
+
+Output `duxdz` is an `XFaceField`-staggered 3D field with values at
+the acx faces and aa-cell vertical centers; `duydz` lives on the
+acy faces. Inputs `taub_acx` / `taub_acy` are 2D face-staggered
+basal-stress fields; `visc_eff` is a 3D Center field; `f_ice` is
+the 2D ice fraction used for the margin-aware stagger.
+
+Port of Fortran `velocity_diva.f90:493 calc_vertical_shear_3D`.
+Used inside the DIVA Picard loop ahead of the viscosity update so
+the next `calc_visc_eff_3D_nodes!` call sees an up-to-date vertical
+shear contribution to the strain rate.
+"""
+function calc_vertical_shear_3D!(duxdz, duydz, taub_acx, taub_acy,
+                                  visc_eff, f_ice,
+                                  zeta_aa::AbstractVector{<:Real})
+    Uxz = interior(duxdz)
+    Uyz = interior(duydz)
+    Tx  = interior(taub_acx)
+    Ty  = interior(taub_acy)
+    V   = interior(visc_eff)
+    Fi  = interior(f_ice)
+
+    Nx, Ny, Nz = size(V)
+    Tx_top = topology(duxdz.grid, 1)
+    Ty_top = topology(duydz.grid, 2)
+
+    @inbounds for k in 1:Nz
+        one_minus_zeta = 1.0 - Float64(zeta_aa[k])
+        for j in 1:Ny, i in 1:Nx
+            ip1  = _neighbor_ip1(i, Nx, Tx_top)
+            jp1  = _neighbor_jp1(j, Ny, Ty_top)
+            ip1f = _ip1_modular(i, Nx, Tx_top)
+            jp1f = _jp1_modular(j, Ny, Ty_top)
+
+            # x-face (acx) between cell (i, j) and (ip1, j) — slot [ip1f, j].
+            visc_acx = _stagger_margin_face(V[i, j, k], V[ip1, j, k],
+                                            Fi[i, j, 1], Fi[ip1, j, 1])
+            Uxz[ip1f, j, k] = visc_acx > 0.0 ?
+                (Tx[ip1f, j, 1] / visc_acx) * one_minus_zeta : 0.0
+
+            # y-face (acy) between cell (i, j) and (i, jp1) — slot [i, jp1f].
+            visc_acy = _stagger_margin_face(V[i, j, k], V[i, jp1, k],
+                                            Fi[i, j, 1], Fi[i, jp1, 1])
+            Uyz[i, jp1f, k] = visc_acy > 0.0 ?
+                (Ty[i, jp1f, 1] / visc_acy) * one_minus_zeta : 0.0
+        end
+
+        # Replicate the leading face slot under Bounded for downstream readers.
+        if Tx_top === Bounded
+            @views Uxz[1, :, k] .= Uxz[2, :, k]
+        end
+        if Ty_top === Bounded
+            @views Uyz[:, 1, k] .= Uyz[:, 2, k]
+        end
+    end
+
+    return duxdz, duydz
+end
+
+
 # Margin-aware face stagger: when both cells are fully iced take their
 # average; when only one is iced take that side's value; when neither
 # is iced return 0. Mirrors Fortran `calc_staggered_margin`
@@ -517,23 +656,33 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         interior(sc.diva_picard_ux_bar_nm1)  .= interior(y.dyn.ux_bar)
         interior(sc.diva_picard_uy_bar_nm1)  .= interior(y.dyn.uy_bar)
 
-        # Step 3 — viscosity from current depth-averaged velocity.
-        # NOTE: Fortran's DIVA recomputes viscosity from a 3D velocity
-        # built from ux_bar via vertical shear; here we feed `ux_bar`
-        # directly to `calc_visc_eff_3D_*` since that helper interprets
-        # its velocity argument as the depth-averaged horizontal
-        # component for strain-rate purposes (matching how SSA uses
-        # ux_b == ux_bar). The vertical-shear contribution is added by
-        # the basal-stress / F-integral coupling — not re-injected
-        # here. Follow-up: port Fortran's `calc_vertical_shear_3D` if
-        # 3D-strain corrections become important for our benchmarks.
+        # Step 3a — vertical shear strain rates from previous iter's
+        # `taub_acx/y` and `visc_eff` (Lipscomb 2019 Eq. 36, Fortran
+        # `velocity_diva.f90:219`). On iter 1, `taub_acx/y` are zero
+        # (or the basal-stress recompute of the previous outer step
+        # leaves them set); `visc_eff` carries the previous-step
+        # value through `update_diagnostics!`. Either way, this
+        # populates `duxdz/duydz` so the next viscosity recompute
+        # sees the full strain rate including the vertical shear.
+        calc_vertical_shear_3D!(y.dyn.duxdz, y.dyn.duydz,
+                                y.dyn.taub_acx, y.dyn.taub_acy,
+                                y.dyn.visc_eff, y.tpo.f_ice_dyn,
+                                zeta_c)
+
+        # Step 3b — viscosity from current depth-averaged velocity +
+        # vertical shear. Mirrors Fortran DIVA's `calc_visc_eff_3D_*`
+        # call which takes both `ux_bar/uy_bar` (horizontal) and
+        # `duxdz/duydz` (vertical shear); the latter contributes
+        # `0.25·dudz_n² + 0.25·dvdz_n²` to the strain-rate squared
+        # at each Gauss node (`velocity_diva.f90:233-241`).
         if p_ydyn.visc_method == 0
             fill!(interior(y.dyn.visc_eff), Float64(p_ydyn.visc_const))
         elseif p_ydyn.visc_method == 1
             calc_visc_eff_3D_nodes!(y.dyn.visc_eff, y.dyn.ux_bar, y.dyn.uy_bar,
                                     y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                                     zeta_c, dx, dy,
-                                    p_ymat.n_glen, p_ydyn.eps_0)
+                                    p_ymat.n_glen, p_ydyn.eps_0;
+                                    duxdz = y.dyn.duxdz, duydz = y.dyn.duydz)
         elseif p_ydyn.visc_method == 2
             calc_visc_eff_3D_aa!(y.dyn.visc_eff, y.dyn.ux_bar, y.dyn.uy_bar,
                                  y.mat.ATT, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
@@ -542,6 +691,27 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         else
             error("calc_velocity_diva!: visc_method=$(p_ydyn.visc_method) not supported.")
         end
+
+        # Step 3c — log-space Picard relaxation of viscosity (Sandip et
+        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Mixes the
+        # newly-computed `visc_eff` with the previous Picard iter via
+        # `visc^rel · visc_prev^(1−rel)`.
+        #
+        # Effect on initmip-grl 10 yr (measured 2026-05-10):
+        #
+        #   - Bulk physics (means of uxy_s, V_ice, V_sle, max_H,
+        #     visc_eff distributions): essentially unchanged.
+        #   - Fast outlet streams: max uxy_s 2634 m/yr (relaxation
+        #     ON; YelmoMirror reference 2961) vs 1260 m/yr (OFF,
+        #     stuck on a slow Picard fixed point). This is the
+        #     practical reason it's on — relaxation unsticks the
+        #     fast-flow regime on stiff geometries.
+        #   - Mean SSA Picard iter count: 3.0 (vs 4.1 OFF).
+        #   - Walltime: +8% over OFF (relaxation kernel itself is
+        #     cheap; cost is downstream solvers converging to a
+        #     slightly different fixed point).
+        picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
+                           rel = ssa.picard_relax)
 
         # Step 3b — log-Picard relax visc.
         if iter > 1
@@ -716,15 +886,26 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
                          sc.diva_F2, y.tpo.f_ice_dyn;
                          no_slip = no_slip)
 
-    # 3. Compute F1 cumulative (3D).
+    # 3. Compute F1 cumulative (3D) and full-column F1 integral (2D).
     calc_F1_integral_3D!(sc.diva_F1_3D, y.dyn.visc_eff,
                          y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)
+    calc_F_integral_2D!(sc.diva_F1_int, y.dyn.visc_eff,
+                        y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c; n = 1.0)
 
     # 4. Reconstruct 3D ux, uy via Lipscomb (2019) Eq. 29.
     calc_vel_horizontal_3D!(y.dyn.ux, y.dyn.uy,
                             y.dyn.ux_b, y.dyn.uy_b,
                             y.dyn.taub_acx, y.dyn.taub_acy,
                             sc.diva_F1_3D, y.tpo.f_ice_dyn)
+
+    # 4b. Surface (ζ = 1) horizontal velocity for diagnostics. Without
+    #     this, ux_s / uy_s stay at their zero init and uxy_s collapses
+    #     to zero (Yelmo.jl stores ux/uy interior-only, so the surface
+    #     value must be reconstructed separately).
+    calc_vel_surface_diva!(y.dyn.ux_s, y.dyn.uy_s,
+                           y.dyn.ux_b, y.dyn.uy_b,
+                           y.dyn.taub_acx, y.dyn.taub_acy,
+                           sc.diva_F1_int, y.tpo.f_ice_dyn)
 
     # 5. Shearing component ux_i = ux − ux_b, depth-averaged ux_i_bar
     #    is also useful for diagnostics.

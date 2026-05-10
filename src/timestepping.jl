@@ -729,7 +729,15 @@ function _adaptive_step!(y, dt_outer::Float64,
             clamp(dt_n * _clamp_dt_ratio(rho), dt_min, dt_ceil)
         end
 
-        dt_attempt = max(_limit_step(dt_now, remaining), dt_min)
+        # Clip to `remaining` so the outer step lands exactly on
+        # `target_time`. The `dt_min` floor is honoured only while we
+        # still have at least `dt_min` of remaining; once `remaining`
+        # falls below `dt_min` (the final fragment of the outer step),
+        # we take the small remainder rather than overshoot. Without
+        # this, output cadence drifts by up to `dt_min` per outer call
+        # — visible as restart times like 10.08 yr instead of 10.0 yr.
+        dt_attempt = min(max(_limit_step(dt_now, remaining), dt_min),
+                         remaining)
         eta = NaN
         accepted_iter = 0
         wallclock_s = 0.0

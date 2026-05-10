@@ -58,6 +58,7 @@ makedocs(
             "CalvingMIP Exp 1"                => "benchmarks/calvingmip.md",
             "Slab advection stability"        => "benchmarks/slab-advection.md",
             "Adaptive predictor-corrector"    => "benchmarks/adaptive-dt.md",
+            "initMIP Greenland"               => "benchmarks/initmip-grl.md",
         ],
         "API reference" => [
             "Core model"      => "api/core.md",

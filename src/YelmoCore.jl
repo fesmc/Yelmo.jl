@@ -29,7 +29,8 @@ export make_field, matches_patterns, yelmo_define_grids
 export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
 export fill_halo_regions!, fill_corner_halos!
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
-export PATH_B_REGISTRY_ICE, is_path_b_registered, path_b_slice_kind, path_b_unified_name
+export BOUNDARY_FIELD_REGISTRY_ICE, is_boundary_field_registered, boundary_slice_kind, boundary_unified_name
+export uses_split_boundary_storage
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
@@ -74,15 +75,13 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 # sites that import from YelmoCore.
 
 # ---------------------------------------------------------------------------
-# Path B boundary-fields registry
+# Boundary-fields registry
 # ---------------------------------------------------------------------------
 #
-# Under the Path B vertical convention (commit 1+ of the vert-split
-# refactor), the file format on disk stays unchanged: a 3D ice
-# variable like `T_ice` is stored as a length-`Nz_file` slab whose
-# first and last z-slices are the basal (z=0) and surface (z=1)
-# boundary values respectively, and whose interior `[:, :, 2:end-1]`
-# is the cell-centred interior.
+# The on-disk file format stores a 3D ice variable like `T_ice` as a
+# length-`Nz_file` slab whose first and last z-slices are the basal
+# (z=0) and surface (z=1) boundary values respectively, and whose
+# interior `[:, :, 2:end-1]` is the cell-centred interior.
 #
 # Inside Yelmo, that single file slab decomposes into three fields:
 #   - `<name>_b` — 2D, basal boundary value (z=0).
@@ -99,17 +98,17 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 #     `yelmo_set_var3D!`): same glue/split when bridging Yelmo
 #     fields to the Fortran-side length-`Nz_file` buffers.
 #
-# Only ice-grid fields are registered in commit 2. Bedrock fields
-# (`T_rock`, `enth_rock`) remain on the legacy grid convention (commit
-# 5c defers the bedrock Path B grid switch). `T_rock_b` is written as
-# a diagnostic from the deepest bedrock layer in `therm_step!`.
-# When the bedrock grid switches to Path B, `T_rock_s` will be aliased
-# to `T_ice_b` — encoded via a special-case entry rather than storage.
+# Only ice-grid fields are registered. Bedrock fields (`T_rock`,
+# `enth_rock`) currently use the interior-extended grid convention.
+# `T_rock_b` is written as a diagnostic from the deepest bedrock
+# layer in `therm_step!`; when the bedrock grid switches to the
+# split layout, `T_rock_s` will be aliased to `T_ice_b` (encoded
+# as a special-case registry entry rather than storage).
 #
 # Registry shape: a `NamedTuple` keyed by the unified-name `Symbol`,
 # each entry is `(b = <basal sym>, s = <surface sym>)`. The
 # unified key itself is the interior-field symbol.
-const PATH_B_REGISTRY_ICE = (
+const BOUNDARY_FIELD_REGISTRY_ICE = (
     T_ice   = (b = :T_ice_b,   s = :T_ice_s),
     enth    = (b = :enth_b,    s = :enth_s),
     T_pmp   = (b = :T_pmp_b,   s = :T_pmp_s),
@@ -117,15 +116,16 @@ const PATH_B_REGISTRY_ICE = (
     visc    = (b = :visc_b,    s = :visc_s),
     ATT     = (b = :ATT_b,     s = :ATT_s),
     enh     = (b = :enh_b,     s = :enh_s),
-    # 3D dyn velocity components are added with commit 3 (the dyn
-    # refactor). The existing 2D `ux_b` / `ux_s` / `uy_b` / `uy_s`
-    # fields are now true boundary storage rather than redundant
-    # slice-1 / slice-end copies of the 3D fields. On read the file's
-    # unified `ux` / `uy` slab decomposes into `_b` (slice 1),
+    # 3D dyn velocity components. The 2D `_b` / `_s` fields are true
+    # boundary storage (populated by `calc_velocity_*` and
+    # `finalize_velocity_3D!` in dyn) rather than redundant slice-1 /
+    # slice-end copies of the 3D fields. On read the file's unified
+    # `ux` / `uy` / `uxy` slab decomposes into `_b` (slice 1),
     # interior (slice 2:end-1), and `_s` (slice end). On write the
     # three Yelmo fields glue back into one unified slab.
     ux      = (b = :ux_b,      s = :ux_s),
     uy      = (b = :uy_b,      s = :uy_s),
+    uxy     = (b = :uxy_b,     s = :uxy_s),
 )
 
 # Reverse-lookup tables built once at module load. Map every
@@ -133,16 +133,16 @@ const PATH_B_REGISTRY_ICE = (
 #   - its slice kind (`:basal`, `:interior`, `:surface`)
 #   - the unified file-variable name (always the interior sym as
 #     a `String`).
-const _PATH_B_KIND      = let d = Dict{Symbol, Symbol}()
-    for (interior_sym, bs) in pairs(PATH_B_REGISTRY_ICE)
+const _BOUNDARY_FIELD_KIND      = let d = Dict{Symbol, Symbol}()
+    for (interior_sym, bs) in pairs(BOUNDARY_FIELD_REGISTRY_ICE)
         d[interior_sym] = :interior
         d[bs.b]         = :basal
         d[bs.s]         = :surface
     end
     d
 end
-const _PATH_B_UNIFIED   = let d = Dict{Symbol, String}()
-    for (interior_sym, bs) in pairs(PATH_B_REGISTRY_ICE)
+const _BOUNDARY_FIELD_UNIFIED   = let d = Dict{Symbol, String}()
+    for (interior_sym, bs) in pairs(BOUNDARY_FIELD_REGISTRY_ICE)
         d[interior_sym] = String(interior_sym)
         d[bs.b]         = String(interior_sym)
         d[bs.s]         = String(interior_sym)
@@ -151,30 +151,34 @@ const _PATH_B_UNIFIED   = let d = Dict{Symbol, String}()
 end
 
 """
-    is_path_b_registered(sym::Symbol) -> Bool
+    is_boundary_field_registered(sym::Symbol) -> Bool
 
 True iff `sym` is one of the interior, basal, or surface symbols of
-a Path B-registered field.
+a registered split-boundary field.
 """
-@inline is_path_b_registered(sym::Symbol) = haskey(_PATH_B_KIND, sym)
+@inline is_boundary_field_registered(sym::Symbol) = haskey(_BOUNDARY_FIELD_KIND, sym)
 
 """
-    path_b_slice_kind(sym::Symbol) -> Symbol
+    boundary_slice_kind(sym::Symbol) -> Symbol
 
 Return `:basal`, `:interior`, or `:surface` for a registered `sym`.
 Throws `KeyError` if `sym` is not registered — guard with
-`is_path_b_registered`.
+`is_boundary_field_registered`.
 """
-@inline path_b_slice_kind(sym::Symbol) = _PATH_B_KIND[sym]
+@inline boundary_slice_kind(sym::Symbol) = _BOUNDARY_FIELD_KIND[sym]
 
 """
-    path_b_unified_name(sym::Symbol) -> String
+    boundary_unified_name(sym::Symbol) -> String
 
 Return the unified disk / Fortran variable name for a registered
 `sym` (i.e. the name of the file slab that combines basal + interior
 + surface). Throws `KeyError` if `sym` is not registered.
 """
-@inline path_b_unified_name(sym::Symbol) = _PATH_B_UNIFIED[sym]
+@inline boundary_unified_name(sym::Symbol) = _BOUNDARY_FIELD_UNIFIED[sym]
+
+# Forward declaration; method dispatching on `AbstractYelmoModel` is
+# defined right after the abstract type.
+function uses_split_boundary_storage end
 
 # ---------------------------------------------------------------------------
 # Pattern matching
@@ -438,6 +442,23 @@ must expose the fields `alias`, `rundir`, `time`, `p`, `g`, `gt`, `gr`, `v`,
 """
 abstract type AbstractYelmoModel end
 
+"""
+    uses_split_boundary_storage(y) -> Bool
+
+Whether `y` stores 3D ice fields under the split-boundary convention
+(Yelmo.jl: 3D interior + 2D `_b` / `_s` boundary fields → file
+`Nz_file = Nz + 2`) or the interior-extended convention
+(`YelmoMirror`: 3D includes the basal/surface endpoints → file
+`Nz_file = Nz`). Used by the I/O writer to pick file dimensions
+and decide whether to glue boundary fields into the unified slab
+on write.
+
+Default `true` for any `AbstractYelmoModel`; `YelmoMirror` overrides
+in `YelmoMirrorCoreFields.jl`.
+"""
+uses_split_boundary_storage(::AbstractYelmoModel) = true
+
+
 # ---------------------------------------------------------------------------
 # RMSEStats: scalar comparison metrics for the `dta` group
 # ---------------------------------------------------------------------------
@@ -509,9 +530,9 @@ function load_grids_with_regrid(restart_file::AbstractString,
     # Vertical from restart.
     ds_src = NCDataset(restart_file)
     grid3d_ice  = _build_3d_grid(ds_src, "zeta",      "zeta_ac",
-                                 Nx, Ny, xlims, ylims, Tx, Ty; path_b = true)
+                                 Nx, Ny, xlims, ylims, Tx, Ty; split_boundary = true)
     grid3d_rock = _build_3d_grid(ds_src, "zeta_rock", "zeta_rock_ac",
-                                 Nx, Ny, xlims, ylims, Tx, Ty; path_b = false)
+                                 Nx, Ny, xlims, ylims, Tx, Ty; split_boundary = false)
     close(ds_src)
     return grid2d, grid3d_ice, grid3d_rock
 end
@@ -566,11 +587,11 @@ function load_grids_from_restart(filename::AbstractString;
                              x=xlims, y=ylims,
                              topology=(Tx, Ty, Flat))
 
-    # Path B vertical convention applies to the ICE grid only (commit
-    # 1 of the vertical-split refactor). Bedrock continues using the
-    # legacy convention until the bedrock thrm refactor (commit 5).
-    grid3d_ice  = _build_3d_grid(ds, "zeta",      "zeta_ac",      Nx, Ny, xlims, ylims, Tx, Ty; path_b=true)
-    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty; path_b=false)
+    # Split-boundary vertical layout applies to the ICE grid only.
+    # Bedrock continues using the interior-extended convention until
+    # the bedrock thrm refactor.
+    grid3d_ice  = _build_3d_grid(ds, "zeta",      "zeta_ac",      Nx, Ny, xlims, ylims, Tx, Ty; split_boundary=true)
+    grid3d_rock = _build_3d_grid(ds, "zeta_rock", "zeta_rock_ac", Nx, Ny, xlims, ylims, Tx, Ty; split_boundary=false)
 
     close(ds)
     return grid2d, grid3d_ice, grid3d_rock
@@ -578,15 +599,14 @@ end
 
 # Build a 3D RectilinearGrid for one of the vertical axes in `ds`.
 #
-# Two conventions are supported via `path_b`:
+# Two conventions are supported via the `split_boundary` flag:
 #
-#   - Legacy (`path_b=false`): file `zeta` is treated as the Yelmo
-#     `Center` axis (length Nz) and `zeta_ac` as the `Face` axis
-#     (length Nz+1). Yelmo's grid Nz equals the file's `zeta` length.
-#     This is the historical Yelmo.jl behaviour and remains in force
-#     for the bedrock grid until the bedrock refactor.
+#   - Interior-extended (`split_boundary=false`): file `zeta` is treated as
+#     the Yelmo `Center` axis (length Nz) and `zeta_ac` as the `Face`
+#     axis (length Nz+1). Yelmo's grid Nz equals the file's `zeta`
+#     length. This remains in force for the bedrock grid.
 #
-#   - Path B (`path_b=true`): file `zeta` is interpreted as
+#   - Split-boundary (`split_boundary=true`): file `zeta` is interpreted as
 #     `[0; centers...; 1]` (length Nz_file) — i.e. the basal and
 #     surface boundary endpoints are stored alongside the interior
 #     centers. Yelmo's interior grid takes file `zeta[2:end-1]` as the
@@ -594,15 +614,15 @@ end
 #     constructed as midpoints between consecutive interior centers,
 #     with endpoints clamped to {0, 1}.
 #
-# Under Path B the file's `zeta_ac` is *not* authoritative for the
-# Yelmo grid; it is only consulted at I/O time for the boundary
-# slices via the boundary-fields registry (commit 2).
+# In split-boundary mode the file's `zeta_ac` is *not* authoritative
+# for the Yelmo grid; it is only consulted at I/O time for the
+# boundary slices via the boundary-fields registry.
 function _build_3d_grid(ds, center_var, face_var, Nx, Ny, xlims, ylims,
-                        Tx::DataType, Ty::DataType; path_b::Bool=false)
-    if path_b
+                        Tx::DataType, Ty::DataType; split_boundary::Bool=false)
+    if split_boundary
         haskey(ds, center_var) || return nothing
         z_center_file = Vector{Float64}(ds[center_var][:])
-        z_face = _path_b_faces_from_centers(z_center_file)
+        z_face = _split_boundary_faces_from_centers(z_center_file)
     elseif haskey(ds, face_var)
         z_face = Vector{Float64}(ds[face_var][:])
     elseif haskey(ds, center_var)
@@ -627,7 +647,7 @@ function _faces_from_centers(zc::AbstractVector)
     return zf
 end
 
-# Path B Face construction: file `zeta` is `[0; interior_centers...; 1]`.
+# Split-boundary Face construction: file `zeta` is `[0; interior_centers...; 1]`.
 # Yelmo Nz = length(zeta) - 2, with `zeta_aa = zeta[2:end-1]`. The
 # returned `Face` axis (length Nz + 1) takes `Face[1] = 0`,
 # `Face[end] = 1`, and interior `Face[k] = (zeta_aa[k-1] + zeta_aa[k])/2`.
@@ -641,9 +661,9 @@ end
 # basal and surface cells. Yelmo solvers that need exact center
 # positions should consult a separately-stored `zeta_aa` (introduced
 # with the thrm scratch struct in commit 5), not `znodes(grid, Center())`.
-function _path_b_faces_from_centers(zeta_file::AbstractVector)
+function _split_boundary_faces_from_centers(zeta_file::AbstractVector)
     N = length(zeta_file)
-    N >= 3 || error("_path_b_faces_from_centers: need length ≥ 3, got $N. " *
+    N >= 3 || error("_split_boundary_faces_from_centers: need length ≥ 3, got $N. " *
                     "File `zeta` must include both the z=0 and z=1 endpoints.")
     Nz = N - 2
     zf = Vector{Float64}(undef, Nz + 1)
@@ -942,6 +962,7 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # beta in the matrix-kernel inputs.
     diva_scratch = (
         diva_F2                 = CenterField(g),                 # 2D depth-integrated 1/η · (1−ζ)²
+        diva_F1_int             = CenterField(g),                 # 2D depth-integrated 1/η · (1−ζ)
         diva_F1_3D              = CenterField(gt),                # 3D cumulative 1/η · (1−ζ)
         diva_beta_eff           = CenterField(g),                 # Goldberg-2011 β_eff at aa-cells
         diva_beta_eff_acx       = XFaceField(g),                  # face-staggered β_eff
@@ -952,7 +973,7 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
 
     dyn = merge(dyn, (scratch = merge(sia_scratch, ssa_scratch, pc_scratch, diva_scratch),))
 
-    # thrm scratch (Path B commit 5a, vert-split refactor). `zeta_aa`
+    # thrm scratch. `zeta_aa`
     # and `zeta_ac` are concrete `Vector{Float64}` snapshots of the
     # ice grid's Center / Face axes, materialised once at YelmoModel
     # construction so per-`therm_step!` calls no longer
@@ -1113,7 +1134,7 @@ in `restart_file`. `groups` selects which groups to load (default: all six);
 `strict=true` (default) errors on any missing variable in a loaded group,
 `strict=false` skips missing variables. Grids are not re-read.
 
-Path B vertical convention (Path B-registered fields like `T_ice`,
+Split-boundary vertical layout (registered fields like `T_ice`,
 `enth`, `T_pmp`, `T_prime`, `visc`, `ATT`, `enh`): the unified file
 slab is read once per group and decomposed into the basal `_b` 2D
 field (slice 1), the interior 3D field (slice 2:end-1), and the
@@ -1129,17 +1150,17 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
         for gname in groups
             group_nt = getfield(y, gname)
             metas    = getfield(y.v, gname)
-            # Cache the unified slab read for each Path B-registered
-            # interior name so we don't read the same NetCDF variable
-            # three times (once each for _b, interior, _s).
+            # Cache the unified slab read for each registered interior
+            # name so we don't read the same NetCDF variable three
+            # times (once each for _b, interior, _s).
             slab_cache = Dict{String, Array{Float64,3}}()
             for k in keys(metas)
                 meta = metas[k]
-                if is_path_b_registered(meta.name)
-                    unified = path_b_unified_name(meta.name)
+                if is_boundary_field_registered(meta.name)
+                    unified = boundary_unified_name(meta.name)
                     if !haskey(ds, unified)
                         strict && error(
-                            "Path B-registered variable `$(meta.name)` (group " *
+                            "Split-boundary registered variable `$(meta.name)` (group " *
                             "`$(gname)`) requires unified slab `$(unified)` in restart " *
                             "file $(restart_file); not found. Pass `strict=false` to skip.")
                         continue
@@ -1147,7 +1168,7 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                     slab = get!(slab_cache, unified) do
                         Array{Float64,3}(_read_nc_3d_mps(ds[unified], mps, unified))
                     end
-                    _apply_path_b_slice!(group_nt[k], slab, path_b_slice_kind(meta.name))
+                    _apply_boundary_slice!(group_nt[k], slab, boundary_slice_kind(meta.name))
                 else
                     name_str = String(meta.name)
                     if !haskey(ds, name_str)
@@ -1167,26 +1188,26 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
     return y
 end
 
-# Apply a Path B slice (`:basal`, `:interior`, `:surface`) of a
-# unified file slab into a Yelmo field. `slab` has shape
+# Apply a split-boundary slice (`:basal`, `:interior`, `:surface`)
+# of a unified file slab into a Yelmo field. `slab` has shape
 # `(Nx, Ny, Nz_file)` with `Nz_file = Nz_yelmo + 2`. Center fields
 # absorb the slice directly; XFace / YFace fields (e.g. `ux`) write
 # into `[2:end, ...]` slots and replicate the leading slot, matching
 # the convention used by `_load_into_field!`.
-function _apply_path_b_slice!(field, slab::AbstractArray{<:Real,3}, kind::Symbol)
+function _apply_boundary_slice!(field, slab::AbstractArray{<:Real,3}, kind::Symbol)
     nz_file = size(slab, 3)
-    nz_file >= 3 || error("_apply_path_b_slice!: slab z-dim $nz_file < 3 (need ≥ 3 to split _b/interior/_s).")
+    nz_file >= 3 || error("_apply_boundary_slice!: slab z-dim $nz_file < 3 (need ≥ 3 to split _b/interior/_s).")
     if kind === :basal
         slice = view(slab, :, :, 1)
-        _apply_path_b_2d_slice!(field, slice)
+        _apply_boundary_2d_slice!(field, slice)
     elseif kind === :surface
         slice = view(slab, :, :, nz_file)
-        _apply_path_b_2d_slice!(field, slice)
+        _apply_boundary_2d_slice!(field, slice)
     elseif kind === :interior
         slice = view(slab, :, :, 2:nz_file - 1)
-        _apply_path_b_3d_interior!(field, slice)
+        _apply_boundary_3d_interior!(field, slice)
     else
-        error("_apply_path_b_slice!: unknown kind $kind.")
+        error("_apply_boundary_slice!: unknown kind $kind.")
     end
     return field
 end
@@ -1198,7 +1219,7 @@ end
 # so the loader must accept both that and the Mirror `(Nx, Ny)`
 # convention (the latter writes into `[2:end, …]` with a leading
 # slot replicate).
-function _apply_path_b_2d_slice!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
+function _apply_boundary_2d_slice!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
     Nx_int = size(int, 1)
@@ -1209,18 +1230,18 @@ function _apply_path_b_2d_slice!(field::Field{Face, Center, Center}, slice::Abst
             int[2:end, :, 1] .= slice
             int[1,     :, 1] .= @view slice[1, :]
         else
-            error("_apply_path_b_2d_slice!(XFaceField): slab x-dim $(size(slice, 1)) " *
+            error("_apply_boundary_2d_slice!(XFaceField): slab x-dim $(size(slice, 1)) " *
                   "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
         end
     elseif Tx === Periodic
         int[:, :, 1] .= slice
     else
-        error("_apply_path_b_2d_slice!(XFaceField): unsupported x-topology $Tx")
+        error("_apply_boundary_2d_slice!(XFaceField): unsupported x-topology $Tx")
     end
     return field
 end
 
-function _apply_path_b_2d_slice!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
+function _apply_boundary_2d_slice!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,2}) where {Face, Center}
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
     Ny_int = size(int, 2)
@@ -1231,18 +1252,18 @@ function _apply_path_b_2d_slice!(field::Field{Center, Face, Center}, slice::Abst
             int[:, 2:end, 1] .= slice
             int[:, 1,     1] .= @view slice[:, 1]
         else
-            error("_apply_path_b_2d_slice!(YFaceField): slab y-dim $(size(slice, 2)) " *
+            error("_apply_boundary_2d_slice!(YFaceField): slab y-dim $(size(slice, 2)) " *
                   "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
         end
     elseif Ty === Periodic
         int[:, :, 1] .= slice
     else
-        error("_apply_path_b_2d_slice!(YFaceField): unsupported y-topology $Ty")
+        error("_apply_boundary_2d_slice!(YFaceField): unsupported y-topology $Ty")
     end
     return field
 end
 
-function _apply_path_b_2d_slice!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,2}) where {Center}
+function _apply_boundary_2d_slice!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,2}) where {Center}
     int = interior(field)
     int[:, :, 1] .= slice
     return field
@@ -1251,7 +1272,7 @@ end
 # 3D interior copy into a field. Z-dim of slice already trimmed to
 # the interior. Same Yelmo / Mirror dual-shape handling as the 2D
 # variant above.
-function _apply_path_b_3d_interior!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
+function _apply_boundary_3d_interior!(field::Field{Face, Center, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
     Tx, _Ty, _Tz = topology(field.grid)
     int = interior(field)
     Nx_int = size(int, 1)
@@ -1262,18 +1283,18 @@ function _apply_path_b_3d_interior!(field::Field{Face, Center, Center}, slice::A
             int[2:end, :, :] .= slice
             int[1,     :, :] .= @view slice[1, :, :]
         else
-            error("_apply_path_b_3d_interior!(XFaceField): slab x-dim $(size(slice, 1)) " *
+            error("_apply_boundary_3d_interior!(XFaceField): slab x-dim $(size(slice, 1)) " *
                   "matches neither $Nx_int (Yelmo) nor $(Nx_int - 1) (Mirror).")
         end
     elseif Tx === Periodic
         int[:, :, :] .= slice
     else
-        error("_apply_path_b_3d_interior!(XFaceField): unsupported x-topology $Tx")
+        error("_apply_boundary_3d_interior!(XFaceField): unsupported x-topology $Tx")
     end
     return field
 end
 
-function _apply_path_b_3d_interior!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
+function _apply_boundary_3d_interior!(field::Field{Center, Face, Center}, slice::AbstractArray{<:Real,3}) where {Face, Center}
     _Tx, Ty, _Tz = topology(field.grid)
     int = interior(field)
     Ny_int = size(int, 2)
@@ -1284,18 +1305,18 @@ function _apply_path_b_3d_interior!(field::Field{Center, Face, Center}, slice::A
             int[:, 2:end, :] .= slice
             int[:, 1,     :] .= @view slice[:, 1, :]
         else
-            error("_apply_path_b_3d_interior!(YFaceField): slab y-dim $(size(slice, 2)) " *
+            error("_apply_boundary_3d_interior!(YFaceField): slab y-dim $(size(slice, 2)) " *
                   "matches neither $Ny_int (Yelmo) nor $(Ny_int - 1) (Mirror).")
         end
     elseif Ty === Periodic
         int[:, :, :] .= slice
     else
-        error("_apply_path_b_3d_interior!(YFaceField): unsupported y-topology $Ty")
+        error("_apply_boundary_3d_interior!(YFaceField): unsupported y-topology $Ty")
     end
     return field
 end
 
-function _apply_path_b_3d_interior!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,3}) where {Center}
+function _apply_boundary_3d_interior!(field::Field{Center, Center, Center}, slice::AbstractArray{<:Real,3}) where {Center}
     interior(field) .= slice
     return field
 end
@@ -1357,28 +1378,27 @@ end
 
 @inline _is_3d_field(int::AbstractArray) = ndims(int) == 3 && size(int, 3) > 1
 
-# Transitional Path B vertical-slice helper.
+# Transitional vertical-slice helper for the split-boundary layout.
 #
-# Under Path B (commit 1) the ice grid `Nz` drops to `Nz_file − 2`.
-# Until the boundary-fields registry lands (commit 2), restart files
-# whose 3D ice slabs still carry the basal (z=0) and surface (z=1)
-# endpoint slices need to have those endpoints stripped on load so
-# the interior of the field can absorb the centred values. Boundary
-# `_b` / `_s` 2D fields remain at their constructed default until the
-# registry properly populates them.
+# Under the split-boundary layout the ice grid `Nz` drops to
+# `Nz_file − 2`. For restart files whose 3D ice slabs still carry the
+# basal (z=0) and surface (z=1) endpoint slices, those endpoints must
+# be stripped on load so the interior of the field can absorb the
+# centred values. Boundary `_b` / `_s` 2D fields remain at their
+# constructed default unless the boundary registry populates them.
 #
-# The helper is a no-op on the legacy-convention rock grid (whose
+# The helper is a no-op on the interior-extended rock grid (whose
 # field `Nz` equals the file slab `Nz_file`).
-@inline function _path_b_interior_slice_3d(data::AbstractArray{T,3}, field_nz::Integer) where {T}
+@inline function _strip_boundary_endpoints_3d(data::AbstractArray{T,3}, field_nz::Integer) where {T}
     nz_file = size(data, 3)
     if nz_file == field_nz
         return data
     elseif nz_file == field_nz + 2
         return view(data, :, :, 2:nz_file - 1)
     else
-        error("_path_b_interior_slice_3d: file z-dim $nz_file does not match " *
-              "field z-dim $field_nz (legacy) or $field_nz + 2 (Path B with " *
-              "boundary endpoints). Likely a grid / restart-file mismatch.")
+        error("_strip_boundary_endpoints_3d: file z-dim $nz_file does not match " *
+              "field z-dim $field_nz (interior-extended) or $field_nz + 2 " *
+              "(split-boundary with endpoints). Likely a grid / restart-file mismatch.")
     end
 end
 
@@ -1401,7 +1421,7 @@ function _load_into_field!(field::Field{Face, Center, Center}, ncvar;
     Nx_int = size(int, 1)
     if _is_3d_field(int)
         data_full = _read_nc_3d_mps(ncvar, mps, varname)
-        data = _path_b_interior_slice_3d(data_full, size(int, 3))
+        data = _strip_boundary_endpoints_3d(data_full, size(int, 3))
         if Tx === Bounded
             if size(data, 1) == Nx_int
                 int[:, :, :] .= data
@@ -1453,7 +1473,7 @@ function _load_into_field!(field::Field{Center, Face, Center}, ncvar;
     Ny_int = size(int, 2)
     if _is_3d_field(int)
         data_full = _read_nc_3d_mps(ncvar, mps, varname)
-        data = _path_b_interior_slice_3d(data_full, size(int, 3))
+        data = _strip_boundary_endpoints_3d(data_full, size(int, 3))
         if Ty === Bounded
             if size(data, 2) == Ny_int
                 int[:, :, :] .= data
@@ -1524,7 +1544,7 @@ function _load_into_field!(field::Field{Center, Center, Center}, ncvar;
     int = interior(field)
     if _is_3d_field(int)
         data_full = _read_nc_3d_mps(ncvar, mps, varname)
-        data = _path_b_interior_slice_3d(data_full, size(int, 3))
+        data = _strip_boundary_endpoints_3d(data_full, size(int, 3))
         int[:, :, :] .= data
     else
         int[:, :, 1] .= _read_nc_2d_mps(ncvar, mps, varname)

@@ -56,7 +56,7 @@ using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
-       stagger_visc_aa_ab!
+       stagger_visc_aa_ab!, picard_relax_visc!
 
 const _VISC_MIN = 1e5      # [Pa·yr] safety floor (Fortran line 386 / 651)
 
@@ -190,14 +190,17 @@ end
 
 """
     calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
-                            zeta_aa, dx, dy, n_glen, eps_0) -> visc_eff
+                            zeta_aa, dx, dy, n_glen, eps_0;
+                            duxdz = nothing, duydz = nothing) -> visc_eff
 
 Glen-flow effective viscosity via Gauss quadrature on aa-cells. Same
 formula as `calc_visc_eff_3D_aa!` but the strain rates and ATT are
 bilinearly interpolated to 4 Gauss nodes per cell, then the viscosity
 is averaged across the nodes:
 
-    eps_sq_n   = dudx_n² + dvdy_n² + dudx_n·dvdy_n + 0.25·(dudy_n + dvdx_n)² + eps_0²
+    eps_sq_n   = dudx_n² + dvdy_n² + dudx_n·dvdy_n + 0.25·(dudy_n + dvdx_n)²
+                 [+ 0.25·dudz_n² + 0.25·dvdz_n²]   ← only when duxdz/duydz given
+                 + eps_0²
     visc_n     = 0.5 · eps_sq_n^p1 · ATT_n^p2
     visc(i, j) = sum_p (visc_n(p) · wt(p)) / wt_tot
 
@@ -219,14 +222,26 @@ Note the Fortran convention: `dudx`, `dudy`, `dvdx`, `dvdy` are all on
 on aa, but the Fortran `_acx` corner-staggering recipe is applied to
 it. We reproduce that exact recipe here.
 
-Port of `velocity_ssa.f90:337 calc_visc_eff_3D_nodes` (use_gq3D=false
-branch — 2D Gauss quadrature only; the 3D variant is hard-coded off in
-Fortran via `logical, parameter :: use_gq3D = .FALSE.`).
+The optional `duxdz` / `duydz` keyword arguments add the vertical-shear
+contribution to the strain-rate squared, used by DIVA but not by SSA.
+`duxdz` is an `XFaceField`-staggered 3D field (acx faces, aa-cell
+vertical centers); `duydz` is `YFaceField`-staggered. Their corner
+staggering uses the same `_acx` / `_acy` recipes as the 2D fields.
+This matches Fortran `velocity_diva.f90:556 calc_visc_eff_3D_nodes`
+(the DIVA-specific overload of the same name; not the SSA one in
+`velocity_ssa.f90:337`).
+
+When `duxdz === nothing` (default), the kernel reduces to the SSA
+flavour exactly. When provided, both must be supplied.
+
+Port of `velocity_diva.f90:556 calc_visc_eff_3D_nodes` (DIVA variant,
+`use_gq3D=false` branch — 2D Gauss quadrature only).
 """
 function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                                  zeta_aa::AbstractVector{<:Real},
                                  dx::Real, dy::Real,
-                                 n_glen::Real, eps_0::Real)
+                                 n_glen::Real, eps_0::Real;
+                                 duxdz = nothing, duydz = nothing)
     # Wrapper: lift to halo-inclusive `field.data` OffsetArrays, allocate
     # the per-call strain-rate scratch matrices, look up topology, and
     # dispatch into the parametric kernel below. Allocation in the
@@ -259,8 +274,16 @@ function calc_visc_eff_3D_nodes!(visc_eff, ux, uy, ATT, H_ice, f_ice,
                                      Float64(dx), Float64(dy),
                                      Tx_top, Ty_top)
 
+    # Optional vertical-shear inputs (`.data` / nothing). When present
+    # they're passed through to the kernel and consumed per-layer.
+    duxdz_int = duxdz === nothing ? nothing : duxdz.data
+    duydz_int = duydz === nothing ? nothing : duydz.data
+    (duxdz_int === nothing) == (duydz_int === nothing) || error(
+        "calc_visc_eff_3D_nodes!: pass both duxdz AND duydz, or neither.")
+
     _calc_visc_eff_3D_nodes_kernel!(
         V, ATT_int, fi_int, dudx, dudy, dvdx, dvdy,
+        duxdz_int, duydz_int,
         Float64(n_glen), Float64(eps_0),
         Tx_top, Ty_top, Nx, Ny, Nz)
 
@@ -270,14 +293,25 @@ end
 # Compute kernel for `calc_visc_eff_3D_nodes!`. Parametric topology,
 # plain arrays, typed scalars. The Gauss-quadrature `xr/yr/wt/wt_tot`
 # are pulled inside the kernel since they're constant tuples.
+#
+# `duxdz_int` / `duydz_int` may be `Nothing` (SSA path — no vertical
+# shear) or `OffsetArray{Float64,3}` halo views of the dyn fields
+# `y.dyn.duxdz` / `y.dyn.duydz` (DIVA path — adds the
+# `0.25·dudz_n² + 0.25·dvdz_n²` contribution per Fortran
+# `velocity_diva.f90:556 calc_visc_eff_3D_nodes`). The branch is
+# resolved at compile time via Julia's specialisation on the
+# argument concrete types — no runtime `isnothing` overhead in the
+# hot path.
 function _calc_visc_eff_3D_nodes_kernel!(
         V, ATT_int, fi_int,
         dudx::Matrix{Float64}, dudy::Matrix{Float64},
         dvdx::Matrix{Float64}, dvdy::Matrix{Float64},
+        duxdz_int, duydz_int,
         n_glen_f::Float64, eps_0_f::Float64,
         ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int, Nz::Int,
     ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
+    has_shear = !(duxdz_int isa Nothing)
     p1 = (1.0 - n_glen_f) / (2.0 * n_glen_f)
     p2 = -1.0 / n_glen_f
     eps_0_sq = eps_0_f^2
@@ -342,12 +376,25 @@ function _calc_visc_eff_3D_nodes_kernel!(
             dvdxn = ntuple(p -> gq2d_interp_to_node(v_ab_dvdx, xr[p], yr[p]), 4)
             dvdyn = ntuple(p -> gq2d_interp_to_node(v_ab_dvdy, xr[p], yr[p]), 4)
 
-            # Effective squared strain rate at each node (Fortran line 462).
-            eps_sq_n = ntuple(p ->
+            # Horizontal contribution to the effective squared strain rate
+            # (Fortran line 462; constant across z because dudx/etc are 2D).
+            eps_sq_n_horiz = ntuple(p ->
                 dudxn[p]^2 + dvdyn[p]^2 + dudxn[p] * dvdyn[p] +
                 0.25 * (dudyn[p] + dvdxn[p])^2 + eps_0_sq, 4)
 
-            # Loop over layers — ATT can vary in z (Fortran line 464-474).
+            # Yelmo face-storage indices for the duxdz / duydz lookups
+            # (only used when `has_shear`). Fortran's `dudz(i, j, k)` is
+            # acx-staggered, stored at Yelmo's `duxdz_int[ip1f_of_i, j, k]`;
+            # similarly `dvdz` is acy-staggered.
+            ux_im1 = _ip1_modular(im1, Nx, Tx_top)
+            ux_i   = _ip1_modular(i,   Nx, Tx_top)
+            ux_ip1 = _ip1_modular(ip1, Nx, Tx_top)
+            uy_jm1 = _jp1_modular(jm1, Ny, Ty_top)
+            uy_j   = _jp1_modular(j,   Ny, Ty_top)
+            uy_jp1 = _jp1_modular(jp1, Ny, Ty_top)
+
+            # Loop over layers — ATT and (optionally) duxdz/duydz vary in z
+            # (Fortran line 464-474 / DIVA variant 683-701).
             for k in 1:Nz
                 # ATT corner staggering (`gq2D_to_nodes_aa`, Fortran
                 # line 350-353):
@@ -364,6 +411,31 @@ function _calc_visc_eff_3D_nodes_kernel!(
                             ATT_int[im1, jp1, k] + ATT_int[i,   jp1, k]),
                 )
                 ATTn = ntuple(p -> gq2d_interp_to_node(v_ab_ATT, xr[p], yr[p]), 4)
+
+                # Vertical-shear contribution (DIVA, Fortran line 686-691).
+                # `_acx` recipe applied to `duxdz(:, :, k)`, `_acy` recipe
+                # to `duydz(:, :, k)`. Adds `0.25·dudz_n² + 0.25·dvdz_n²`
+                # per node.
+                eps_sq_n = if has_shear
+                    v_ab_dudz = (
+                        0.5 * (duxdz_int[ux_im1, jm1, k] + duxdz_int[ux_im1, j,   k]),
+                        0.5 * (duxdz_int[ux_i,   jm1, k] + duxdz_int[ux_i,   j,   k]),
+                        0.5 * (duxdz_int[ux_i,   j,   k] + duxdz_int[ux_i,   jp1, k]),
+                        0.5 * (duxdz_int[ux_im1, j,   k] + duxdz_int[ux_im1, jp1, k]),
+                    )
+                    v_ab_dvdz = (
+                        0.5 * (duydz_int[im1, uy_jm1, k] + duydz_int[i,   uy_jm1, k]),
+                        0.5 * (duydz_int[i,   uy_jm1, k] + duydz_int[ip1, uy_jm1, k]),
+                        0.5 * (duydz_int[i,   uy_j,   k] + duydz_int[ip1, uy_j,   k]),
+                        0.5 * (duydz_int[im1, uy_j,   k] + duydz_int[i,   uy_j,   k]),
+                    )
+                    dudzn = ntuple(p -> gq2d_interp_to_node(v_ab_dudz, xr[p], yr[p]), 4)
+                    dvdzn = ntuple(p -> gq2d_interp_to_node(v_ab_dvdz, xr[p], yr[p]), 4)
+                    ntuple(p ->
+                        eps_sq_n_horiz[p] + 0.25 * dudzn[p]^2 + 0.25 * dvdzn[p]^2, 4)
+                else
+                    eps_sq_n_horiz
+                end
 
                 # Fortran line 471: viscn = 0.5 * eps_sq_n^p1 * ATTn^p2.
                 # Fortran line 472: visc(i,j,k) = sum(viscn * wt) / wt_tot.
@@ -542,4 +614,45 @@ function _stagger_visc_aa_ab_kernel!(
         end
     end
     return nothing
+end
+
+
+"""
+    picard_relax_visc!(visc_eff, visc_eff_prev; rel = 0.7) -> visc_eff
+
+Log-space Picard relaxation of effective viscosity (Sandip et al.,
+GMD 2023). Replaces each cell's `visc_eff` with the geometric mean
+of the current and previous-iter values, weighted by `rel`:
+
+    visc_eff = exp((1 - rel)·log(visc_eff_prev) + rel·log(visc_eff))
+             = visc_eff_prev^(1 - rel) · visc_eff^rel
+
+`rel = 1` is no-op (full new value); `rel = 0` freezes at the
+previous iter; `rel = 0.7` (the typical Fortran-yelmo default,
+`ydyn.ssa_iter_rel`) is a moderate damping that helps convergence
+on stiff geometries where the visc–velocity Picard iteration
+oscillates.
+
+Cells where either `visc_eff` or `visc_eff_prev` is non-positive
+(ice-free, partial ice with `visc = 0`, or first-iter zero initial
+value) are passed through unchanged — log-space averaging is
+undefined there. Both fields must share the same grid.
+
+Port of Fortran `picard_relax_visc` (`velocity_general.f90:2107`).
+"""
+function picard_relax_visc!(visc_eff, visc_eff_prev; rel::Real = 0.7)
+    V    = interior(visc_eff)
+    Vnm1 = interior(visc_eff_prev)
+    size(V) == size(Vnm1) ||
+        error("picard_relax_visc!: shape mismatch $(size(V)) vs $(size(Vnm1))")
+    rel_f = Float64(rel)
+    one_minus_rel = 1.0 - rel_f
+    @inbounds for i in eachindex(V)
+        v_now  = V[i]
+        v_prev = Vnm1[i]
+        if v_now > 0.0 && v_prev > 0.0
+            V[i] = exp(one_minus_rel * log(v_prev) + rel_f * log(v_now))
+        end
+    end
+    return visc_eff
 end

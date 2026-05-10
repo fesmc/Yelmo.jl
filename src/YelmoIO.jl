@@ -5,8 +5,8 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 using NCDatasets
 using ..YelmoMeta
 using ..YelmoCore: AbstractYelmoModel, matches_patterns,
-                   PATH_B_REGISTRY_ICE, is_path_b_registered,
-                   path_b_slice_kind
+                   BOUNDARY_FIELD_REGISTRY_ICE, is_boundary_field_registered,
+                   boundary_slice_kind, uses_split_boundary_storage
 
 export init_output
 export OutputSelection
@@ -113,21 +113,21 @@ function _spatial_dims(field::Field{X,Y,Z}, ylmo) where {X,Y,Z}
 end
 
 # ---------------------------------------------------------------------------
-# Path B helpers
+# Split-boundary I/O helpers
 # ---------------------------------------------------------------------------
 
 # Glue a 2D basal slice + 3D interior + 2D surface slice along the
-# z-axis into a length-(Nz+2) slab matching the file's Path B
+# z-axis into a length-(Nz+2) slab matching the on-disk file
 # convention. Result is `Float64` (matched to the existing
 # `_get_data` element type) and is allocated fresh per call;
 # this only runs at file-write time so allocation is not on a
 # hot path.
-function _path_b_glue(b2d::AbstractArray{<:Real,2},
+function _glue_boundary_slab(b2d::AbstractArray{<:Real,2},
                       interior3d::AbstractArray{<:Real,3},
                       s2d::AbstractArray{<:Real,2})
     Nx, Ny, Nz = size(interior3d)
-    size(b2d) == (Nx, Ny) || error("_path_b_glue: basal slice size $(size(b2d)) ≠ ($Nx, $Ny)")
-    size(s2d) == (Nx, Ny) || error("_path_b_glue: surface slice size $(size(s2d)) ≠ ($Nx, $Ny)")
+    size(b2d) == (Nx, Ny) || error("_glue_boundary_slab: basal slice size $(size(b2d)) ≠ ($Nx, $Ny)")
+    size(s2d) == (Nx, Ny) || error("_glue_boundary_slab: surface slice size $(size(s2d)) ≠ ($Nx, $Ny)")
     out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
     @inbounds out[:, :, 1]              .= b2d
     @inbounds out[:, :, 2:Nz + 1]       .= interior3d
@@ -140,8 +140,8 @@ end
 # (z=1) slots. Used for non-registered 3D Center fields (cp, kt,
 # Q_strn, dQsdT, omega, advecxy, ...) so the file format stays
 # consistent with the registered fields. The NaN values are dropped
-# again on read by the Path B interior-slice helper.
-function _path_b_nan_pad(interior3d::AbstractArray{<:Real,3})
+# again on read by the interior-slice helper.
+function _nan_pad_boundary_slab(interior3d::AbstractArray{<:Real,3})
     Nx, Ny, Nz = size(interior3d)
     out = Array{Float64,3}(undef, Nx, Ny, Nz + 2)
     @inbounds out[:, :, 1]            .= NaN
@@ -258,21 +258,26 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     defDim(ds, "x_f",         x_f_size)
     defDim(ds, "y_c",         ylmo.g.Ny)
     defDim(ds, "y_f",         y_f_size)
-    # Path B convention: the on-disk `zeta` axis includes the basal
-    # (z=0) and surface (z=1) boundary endpoints alongside the
-    # interior centres, so its length is Yelmo's `gt.Nz + 2` (i.e.
-    # the file's pre-Path B `Nz_file`). This keeps the file format
-    # round-trippable with Mirror-style restarts: the Path B reader
-    # inverts `Yelmo Nz = length(file zeta) − 2`. Registered fields
-    # (T_ice, enth, ...) glue _b + interior + _s into this slab on
-    # write; non-registered 3D Center fields NaN-pad the boundary
-    # slots.
-    defDim(ds, "zeta",         ylmo.gt.Nz + 2)
-    # `zeta_ac` uses Mirror convention (commit 2.5): Nz_file+1 = Nz+3
-    # face levels. ZFace fields (uz, uz_star, ...) are extended with 1
-    # replicated boundary face at each end on write (`_zface_extend`)
-    # and stripped back to Yelmo-internal Nz+1 on read.
-    defDim(ds, "zeta_ac",      ylmo.gt.Nz + 3)
+    # `zeta` dimension depends on the model's storage convention:
+    #
+    #   - Yelmo split-boundary (`uses_split_boundary_storage(ylmo) == true`):
+    #     the on-disk `zeta` axis includes the basal (z=0) and surface
+    #     (z=1) endpoints alongside the interior centres, so its length
+    #     is `gt.Nz + 2`. Registered split-boundary fields (T_ice, enth,
+    #     ux, uy, uxy, …) glue `_b + interior + _s` into this slab on
+    #     write; non-registered 3D Center fields NaN-pad the boundary
+    #     slots. `zeta_ac` length is `gt.Nz + 3` (Mirror-extended faces).
+    #   - YelmoMirror interior-extended: Fortran-yelmo stores the basal /
+    #     surface values in-line in the 3D array, so the file's `zeta`
+    #     length matches `gt.Nz` directly. `zeta_ac` length is
+    #     `gt.Nz + 1` (the standard Face count).
+    if uses_split_boundary_storage(ylmo)
+        defDim(ds, "zeta",    ylmo.gt.Nz + 2)
+        defDim(ds, "zeta_ac", ylmo.gt.Nz + 3)
+    else
+        defDim(ds, "zeta",    ylmo.gt.Nz)
+        defDim(ds, "zeta_ac", ylmo.gt.Nz + 1)
+    end
     defDim(ds, "zeta_rock",    ylmo.gr.Nz)
     defDim(ds, "zeta_rock_ac", ylmo.gr.Nz + 1)
     defDim(ds, "time",         Inf)
@@ -287,21 +292,32 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
     _defcoord(ds, "y_f", Float64, ("y_f",), ynodes(ylmo.g, Face()),   "m", "y-coordinate, face")
     _defcoord(ds, "xc",  Float64, ("x_c",), xnodes(ylmo.g, Center()), "m", "x-coordinate, center (Mirror alias)")
     _defcoord(ds, "yc",  Float64, ("y_c",), ynodes(ylmo.g, Center()), "m", "y-coordinate, center (Mirror alias)")
-    # `zeta` includes the basal (0) and surface (1) endpoints —
-    # length Nz+2. Round-trips with Mirror-format restarts.
-    # Interior values are the Oceananigans-derived Center positions
-    # (commit 5 will replace these with the file's exact pre-Path B
-    # interior centers via the thrm scratch struct).
-    _defcoord(ds, "zeta",         Float64, ("zeta",),
-              vcat(0.0, collect(znodes(ylmo.gt, Center())), 1.0),
-              "1", "normalised ice layer (basal endpoint, interior centers, surface endpoint)")
-    _defcoord(ds, "zeta_ac",      Float64, ("zeta_ac",),
-              let zf = znodes(ylmo.gt, Face())
-                  # Extend to Mirror-format Nz+3 by extrapolating 1 face
-                  # beyond each boundary (mirrors Fortran's ζ_ac convention).
-                  vcat(2*zf[1] - zf[2], collect(Float64, zf), 2*zf[end] - zf[end-1])
-              end,
-              "1", "normalised ice layer interface (Mirror-extended: Nz_file+1 levels)")
+    # `zeta` / `zeta_ac` coordinate values track the same split as the
+    # dimensions defined above.
+    if uses_split_boundary_storage(ylmo)
+        _defcoord(ds, "zeta",    Float64, ("zeta",),
+                  vcat(0.0, collect(znodes(ylmo.gt, Center())), 1.0),
+                  "1",
+                  "normalised ice layer (basal endpoint, interior centers, surface endpoint)")
+        _defcoord(ds, "zeta_ac", Float64, ("zeta_ac",),
+                  let zf = znodes(ylmo.gt, Face())
+                      # Mirror-format extension: extrapolate 1 face beyond
+                      # each boundary so length matches `Nz_file + 1`.
+                      vcat(2*zf[1] - zf[2], collect(Float64, zf),
+                           2*zf[end] - zf[end-1])
+                  end,
+                  "1",
+                  "normalised ice layer interface (Mirror-extended: Nz_file+1 levels)")
+    else
+        # Interior-extended (YelmoMirror): basal/surface live inline at
+        # the first/last Center; faces are the standard Nz+1 set.
+        _defcoord(ds, "zeta",    Float64, ("zeta",),
+                  collect(znodes(ylmo.gt, Center())),
+                  "1", "normalised ice layer center")
+        _defcoord(ds, "zeta_ac", Float64, ("zeta_ac",),
+                  collect(znodes(ylmo.gt, Face())),
+                  "1", "normalised ice layer interface")
+    end
     _defcoord(ds, "zeta_rock",    Float64, ("zeta_rock",),
               znodes(ylmo.gr, Center()), "1", "normalised bedrock layer midpoint")
     _defcoord(ds, "zeta_rock_ac", Float64, ("zeta_rock_ac",),
@@ -327,12 +343,15 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
             group_nt[fname] isa Field || continue
             name = String(fname)
             _selected(name, gname, selection) || continue
-            # Path B: skip `_b` / `_s` of registered fields — they
-            # are written as part of the unified-name interior slab
-            # into the `zeta` axis (which is now length Nz_file =
-            # Nz + 2 with basal/surface endpoints).
-            if is_path_b_registered(fname)
-                kind = path_b_slice_kind(fname)
+            # Under split-boundary storage, skip `_b` / `_s` of
+            # registered fields — they are written as part of the
+            # unified-name interior slab into the `zeta` axis (length
+            # Nz_file = Nz + 2). Under interior-extended storage
+            # (YelmoMirror) the boundary fields don't exist as
+            # separate entries, so this skip is a no-op.
+            if uses_split_boundary_storage(ylmo) &&
+               is_boundary_field_registered(fname)
+                kind = boundary_slice_kind(fname)
                 kind === :interior || continue
             end
             dims = _spatial_dims(group_nt[fname], ylmo)
@@ -415,17 +434,19 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             nc_name === nothing && continue
             haskey(ds, nc_name) || continue
 
-            # Path B: registered `_b` / `_s` fields are skipped by
-            # `init_output` — they don't have an `nc_name` entry and
-            # the `nc_name === nothing` check above already filtered
-            # them. Registered interior fields glue with the matching
-            # `_b` / `_s` 2D fields into a unified slab here.
-            if is_path_b_registered(fname) && path_b_slice_kind(fname) === :interior
-                bs = PATH_B_REGISTRY_ICE[fname]
+            # Under split-boundary storage, registered interior fields
+            # glue with the matching 2D `_b` / `_s` boundary fields
+            # into a unified slab here. The `_b` / `_s` symbols
+            # themselves were filtered out by `init_output` (no
+            # `nc_name` entry).
+            if uses_split_boundary_storage(ylmo) &&
+               is_boundary_field_registered(fname) &&
+               boundary_slice_kind(fname) === :interior
+                bs = BOUNDARY_FIELD_REGISTRY_ICE[fname]
                 interior_data = _get_data(group_nt[fname])
                 b_data        = _get_data(group_nt[bs.b])
                 s_data        = _get_data(group_nt[bs.s])
-                glued = _path_b_glue(b_data, interior_data, s_data)
+                glued = _glue_boundary_slab(b_data, interior_data, s_data)
                 ds[nc_name][1:size(glued, 1), 1:size(glued, 2), 1:size(glued, 3), t_idx] = glued
                 continue
             end
@@ -436,18 +457,23 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             if ndims(data) == 2
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
-                if sz[3] == ylmo.gt.Nz
-                    # 3D Center ice field: NaN-pad at the basal/surface
-                    # boundary slots to fill the length-(Nz+2) `zeta` dim.
-                    padded = _path_b_nan_pad(data)
+                if uses_split_boundary_storage(ylmo) && sz[3] == ylmo.gt.Nz
+                    # 3D Center ice field under split-boundary storage:
+                    # NaN-pad at the basal/surface slots to fill the
+                    # length-(Nz+2) `zeta` dim.
+                    padded = _nan_pad_boundary_slab(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
-                elseif sz[3] == ylmo.gt.Nz + 1
-                    # ZFace ice field: extend to Mirror-format Nz+3 by
-                    # replicating the boundary face at each end.
+                elseif uses_split_boundary_storage(ylmo) && sz[3] == ylmo.gt.Nz + 1
+                    # ZFace ice field under split-boundary storage:
+                    # extend to file Nz+3 by replicating boundary faces.
                     extended = _zface_extend(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(extended, 3), t_idx] = extended
                 else
-                    # Bedrock field or other: write as-is.
+                    # Interior-extended storage (YelmoMirror) or bedrock:
+                    # field array shape already matches the file dim,
+                    # write as-is. For Mirror, 3D Center ice fields are
+                    # `(Nx, Ny, Nz)` matching `zeta = Nz`, and ZFace are
+                    # `(Nx, Ny, Nz+1)` matching `zeta_ac = Nz+1`.
                     ds[nc_name][1:sz[1], 1:sz[2], 1:sz[3], t_idx] = data
                 end
             end
@@ -471,7 +497,7 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
                 ds[nc_name][1:sz[1], 1:sz[2], t_idx] = data
             elseif ndims(data) == 3
                 if sz[3] == ylmo.gt.Nz
-                    padded = _path_b_nan_pad(data)
+                    padded = _nan_pad_boundary_slab(data)
                     ds[nc_name][1:sz[1], 1:sz[2], 1:size(padded, 3), t_idx] = padded
                 elseif sz[3] == ylmo.gt.Nz + 1
                     extended = _zface_extend(data)

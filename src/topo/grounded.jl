@@ -89,7 +89,7 @@ This matches `calc_f_grnd_subgrid_linear!` and
 `calc_f_grnd_subgrid_area!` so that consumers can read the same array
 shape regardless of which `gl_sep` algorithm produced it. The Fortran
 port stored these at "i+1/2" (face east-of-cell-i) in `(Nx, Ny)`
-arrays — the NetCDF restart loader's `_apply_path_b_2d_slice!` translates
+arrays — the NetCDF restart loader's `_apply_boundary_2d_slice!` translates
 between the two conventions automatically by writing Fortran's slot `i`
 into Julia's slot `i+1`.
 
