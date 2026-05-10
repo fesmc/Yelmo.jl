@@ -444,6 +444,8 @@ shear contribution to the strain rate.
 function calc_vertical_shear_3D!(duxdz, duydz, taub_acx, taub_acy,
                                   visc_eff, f_ice,
                                   zeta_aa::AbstractVector{<:Real})
+    # Wrapper: lift Field views, look up topology, dispatch into the
+    # parametric kernel below. Same template as calc_vel_horizontal_3D!.
     Uxz = interior(duxdz)
     Uyz = interior(duydz)
     Tx  = interior(taub_acx)
@@ -454,6 +456,16 @@ function calc_vertical_shear_3D!(duxdz, duydz, taub_acx, taub_acy,
     Nx, Ny, Nz = size(V)
     Tx_top = topology(duxdz.grid, 1)
     Ty_top = topology(duydz.grid, 2)
+
+    _calc_vertical_shear_3D_kernel!(Uxz, Uyz, Tx, Ty, V, Fi, zeta_aa,
+                                    Tx_top, Ty_top, Nx, Ny, Nz)
+    return duxdz, duydz
+end
+
+function _calc_vertical_shear_3D_kernel!(Uxz, Uyz, Tx, Ty, V, Fi,
+        zeta_aa::AbstractVector{<:Real},
+        ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int, Nz::Int,
+    ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
     @inbounds for k in 1:Nz
         one_minus_zeta = 1.0 - Float64(zeta_aa[k])
@@ -485,7 +497,7 @@ function calc_vertical_shear_3D!(duxdz, duydz, taub_acx, taub_acy,
         end
     end
 
-    return duxdz, duydz
+    return nothing
 end
 
 
@@ -712,12 +724,6 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         #     slightly different fixed point).
         picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
                            rel = ssa.picard_relax)
-
-        # Step 3b — log-Picard relax visc.
-        if iter > 1
-            picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1,
-                               ssa.picard_relax)
-        end
 
         # Step 4 — depth-integrated viscosity (same as SSA).
         @views interior(sc.ssa_visc_eff_b)[:, :, 1] .=
