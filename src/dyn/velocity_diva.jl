@@ -693,12 +693,22 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         end
 
         # Step 3c — log-space Picard relaxation of viscosity (Sandip et
-        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Damps
-        # iter-to-iter visc oscillations on stiff geometries (helps
-        # outlet glaciers reach a finer steady state). Disabled for
-        # now — initmip-grl 10 yr converges in ≤6 SSA Picard iters
-        # without it; enable when chasing slow convergence on a
-        # specific configuration.
+        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Disabled
+        # for now; uncomment to enable.
+        #
+        # Effect on initmip-grl 10 yr (measured 2026-05-10):
+        #
+        #   - Bulk physics (means of uxy_s, V_ice, V_sle, max_H,
+        #     visc_eff distributions): essentially unchanged.
+        #   - Fast outlet streams: max uxy_s jumps from 1260 m/yr
+        #     (relaxation OFF, stuck on a slow Picard fixed point) to
+        #     2634 m/yr (ON; YelmoMirror reference: 2961). This is
+        #     the practical reason to enable — it unsticks the fast-
+        #     flow regime on stiff geometries.
+        #   - Mean Picard iter count drops from 4.1 to 3.0.
+        #   - Walltime: +8% (the relaxation kernel itself is cheap;
+        #     the cost is downstream solvers converging to a
+        #     slightly different fixed point).
         #
         # picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
         #                    rel = ssa.picard_relax)
