@@ -56,7 +56,7 @@ using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
 export calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
-       stagger_visc_aa_ab!
+       stagger_visc_aa_ab!, picard_relax_visc!
 
 const _VISC_MIN = 1e5      # [Pa·yr] safety floor (Fortran line 386 / 651)
 
@@ -614,4 +614,45 @@ function _stagger_visc_aa_ab_kernel!(
         end
     end
     return nothing
+end
+
+
+"""
+    picard_relax_visc!(visc_eff, visc_eff_prev; rel = 0.7) -> visc_eff
+
+Log-space Picard relaxation of effective viscosity (Sandip et al.,
+GMD 2023). Replaces each cell's `visc_eff` with the geometric mean
+of the current and previous-iter values, weighted by `rel`:
+
+    visc_eff = exp((1 - rel)·log(visc_eff_prev) + rel·log(visc_eff))
+             = visc_eff_prev^(1 - rel) · visc_eff^rel
+
+`rel = 1` is no-op (full new value); `rel = 0` freezes at the
+previous iter; `rel = 0.7` (the typical Fortran-yelmo default,
+`ydyn.ssa_iter_rel`) is a moderate damping that helps convergence
+on stiff geometries where the visc–velocity Picard iteration
+oscillates.
+
+Cells where either `visc_eff` or `visc_eff_prev` is non-positive
+(ice-free, partial ice with `visc = 0`, or first-iter zero initial
+value) are passed through unchanged — log-space averaging is
+undefined there. Both fields must share the same grid.
+
+Port of Fortran `picard_relax_visc` (`velocity_general.f90:2107`).
+"""
+function picard_relax_visc!(visc_eff, visc_eff_prev; rel::Real = 0.7)
+    V    = interior(visc_eff)
+    Vnm1 = interior(visc_eff_prev)
+    size(V) == size(Vnm1) ||
+        error("picard_relax_visc!: shape mismatch $(size(V)) vs $(size(Vnm1))")
+    rel_f = Float64(rel)
+    one_minus_rel = 1.0 - rel_f
+    @inbounds for i in eachindex(V)
+        v_now  = V[i]
+        v_prev = Vnm1[i]
+        if v_now > 0.0 && v_prev > 0.0
+            V[i] = exp(one_minus_rel * log(v_prev) + rel_f * log(v_now))
+        end
+    end
+    return visc_eff
 end

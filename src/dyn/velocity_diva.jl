@@ -692,6 +692,17 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
             error("calc_velocity_diva!: visc_method=$(p_ydyn.visc_method) not supported.")
         end
 
+        # Step 3c — log-space Picard relaxation of viscosity (Sandip et
+        # al., GMD 2023; Fortran `velocity_diva.f90:252`). Damps
+        # iter-to-iter visc oscillations on stiff geometries (helps
+        # outlet glaciers reach a finer steady state). Disabled for
+        # now — initmip-grl 10 yr converges in ≤6 SSA Picard iters
+        # without it; enable when chasing slow convergence on a
+        # specific configuration.
+        #
+        # picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
+        #                    rel = ssa.picard_relax)
+
         # Step 3b — log-Picard relax visc.
         if iter > 1
             picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1,
