@@ -137,9 +137,23 @@ per-section wall-clock totals.
   Yelmo.jl).
 - With the GRL-16KM topography and present-day forcing, the adaptive
   PC controller (`pc_method = "AB-SAM"`, default `pc_eps`) typically
-  takes ~10 sub-steps per 1 yr outer step (effective dt ≈ 0.1 yr).
+  takes ~9 sub-steps per 1 yr outer step (effective dt ≈ 0.11 yr).
   Walltime scales linearly: ≈ 1.3 min per 10 yr after first-call
   Julia compilation.
+- **Scheme-choice cost.** With the default `pc_method = "AB-SAM"`,
+  Yelmo.jl currently takes ~2× more sub-steps than it would with
+  `pc_method = "HEUN"` on this benchmark (92 vs 47 sub-steps over
+  10 yr). The cause is the full-cascade-twice PC structure shared by
+  all Yelmo.jl PC schemes (see `pc_eta_masking_outcome.md` memory):
+  the AB-SAM predictor's history extrapolation amplifies per-stage
+  disagreement at margin/calving-active cells. The default is kept
+  at `AB-SAM` for consistency with YelmoMirror, which uses the same
+  Fortran default; closing the cost gap is the deferred PC refactor
+  (`pc_refactor_design.md`). To temporarily run with HEUN, add
+  `pc_method = "HEUN"` to the `&yelmo` block of
+  `yelmo_initmip_grl.nml` — but note this also flips Mirror to HEUN
+  (its nml is regenerated from the parsed parameters), still apples-
+  to-apples.
 - The Fortran reference runs two brief equilibration passes before the
   main loop (`yelmo_update_equil` with `topo_fixed=false` and
   `topo_fixed=true`). These are not replicated here; the run starts

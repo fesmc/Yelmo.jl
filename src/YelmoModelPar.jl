@@ -67,14 +67,27 @@ Base.@kwdef struct YelmoParams
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    # Fortran namelist default is "AB-SAM" (unimplemented); Yelmo.jl
-    # has "HEUN" and "FE-SBE". HEUN is the default because empirically
-    # it picks ~3× larger sub-step dt for the same `pc_tol` (FE-SBE's
-    # truncation-factor is 1/2 vs HEUN's 1/6, and FE-SBE's
-    # |H_corr − H_pred| has no Heun-style k1≈k2 cancellation). Use
-    # "FE-SBE" when nonlinear cascade kernels (LSF calving, finite
+    # Matches Fortran Yelmo's default ("AB-SAM") so a benchmark nml
+    # without an explicit `pc_method` line gets the same scheme on both
+    # backends. All three schemes — "HEUN", "FE-SBE", "AB-SAM" — are
+    # implemented; see the per-scheme docstrings in `src/timestepping.jl`.
+    #
+    # Empirical ranking is benchmark-dependent:
+    #
+    #   - MISMIP3D Stnd (smooth flow, no margin / MB activity): AB-SAM
+    #     slightly better than HEUN (≈ 3 % fewer substeps); FE-SBE
+    #     worse (~20 % more substeps). See `test_adaptive_dt.jl`.
+    #   - initmip-grl 16-km (active margin, calving, MB): HEUN currently
+    #     beats AB-SAM (~2× fewer substeps), because Yelmo.jl runs the
+    #     full topo cascade (advect + SMB + BMB + calving + cleanup)
+    #     twice per outer step and AB-SAM's predictor extrapolates last-
+    #     step ΔH, amplifying any per-stage disagreement. This is the
+    #     deferred PC refactor's territory — see memory
+    #     `pc_eta_masking_outcome.md` and `pc_refactor_design.md`.
+    #
+    # Use "FE-SBE" when nonlinear cascade kernels (LSF calving, finite
     # `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n geometry.
-    pc_method        ::String  = "HEUN"
+    pc_method        ::String  = "AB-SAM"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
@@ -82,6 +95,14 @@ Base.@kwdef struct YelmoParams
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
+    # Whether to mask out ice-margin / grounding-line / floating /
+    # thin-ice / isolated-outlier cells from the PC truncation-error
+    # `eta` (matches Fortran `set_pc_mask` + `calc_pc_eta`). With
+    # masking off, `eta` is the global `max(|H_corr − H_pred|) · factor / dt`
+    # over every cell — Yelmo.jl's pre-2026-05-10 behaviour. Keep on
+    # by default so the PI42 controller responds to interior smooth-ice
+    # truncation only, mirroring Fortran.
+    pc_eta_masked    ::Bool    = true
     # Per-section wall-clock timing scaffold (`y.timer`). Off by
     # default; turning it on populates `y.timer` via `@timed_section`
     # call sites at a small per-call overhead. See `src/timing.jl`

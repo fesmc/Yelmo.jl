@@ -319,6 +319,16 @@ function main()
 
     close(snap_out.ds)
 
+    # Flush the PC timestep log to NetCDF (Yelmo backend only — the
+    # Mirror backend has Fortran writing its own file). Yelmo's
+    # timestep log is buffered in memory by `write_timestep_row!` and
+    # only persisted on `close`; without this call the log is lost at
+    # process exit.
+    if BACKEND == "yelmo"
+        log = y.dyn.scratch.timestep_log[]
+        log === nothing || close(log)
+    end
+
     # Restart file (full model state for continuation). Same writer
     # path as snapshots; both backends supported via the
     # `uses_split_boundary_storage` branch inside `init_output` /
