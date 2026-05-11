@@ -52,9 +52,9 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, yther
 
 # Adaptive HEUN+PI42 + SIA-only parameters. Mirrors the Fortran
 # `par-gmd/yelmo_EISMINT_moving.nml` where the relevant subset overlaps
-# (solver = "sia", uz_method = 3, n_glen = 3, rf_const = 1e-16). Fortran
-# uses pc_method = "AB-SAM" but Yelmo.jl only has HEUN implemented;
-# HEUN with PI42 is the closest analog.
+# (solver = "sia", uz_method = 3, n_glen = 3, rf_const = 1e-16). Pinned
+# to `pc_method = "HEUN"` here for reproducibility of the committed
+# reference values (the package default is `"AB-SAM"`).
 function _eismint_moving_params()
     return YelmoModelParameters("eismint_moving";
         yelmo = yelmo_params(

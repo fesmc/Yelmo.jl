@@ -6,7 +6,7 @@
 #
 #   - `dt_method`     : 0 = fixed forward Euler (default),
 #                       2 = adaptive predictor-corrector.
-#   - `pc_method`     : "HEUN" (default), "FE-SBE", "AB-SAM".
+#   - `pc_method`     : "AB-SAM" (default), "HEUN", "FE-SBE".
 #   - `pc_controller` : "PI42" (this PR), other Söderlind variants future.
 #   - `pc_tol`        : rejection threshold on truncation-error proxy
 #                       `eta` (m/yr).
@@ -19,8 +19,8 @@
 #
 # Architecture:
 #
-#   - `PCScheme`      : abstract type. Concrete: `HEUN` (default),
-#                       `FE_SBE`, `AB_SAM`.
+#   - `PCScheme`      : abstract type. Concrete: `AB_SAM` (default),
+#                       `HEUN`, `FE_SBE`.
 #   - `PIController`  : abstract type. Concrete: `PI42`; further
 #                       controllers (H312b, H321PID, …) plug in via
 #                       methods on `_dt_ratio`.
@@ -105,9 +105,12 @@ for the current test suite.
 For configurations with active LSF calving, finite `H_min_flt` /
 `H_min_grnd`, or `topo_rel != 0`, consider `FE_SBE`, which uses the
 "both stages start from `H_n`" pattern where the topo cascade only
-sees `H_n`'s geometry. (HEUN is the default because it's
-substantially faster wall-clock; see the FE_SBE docstring's
-performance note.)
+sees `H_n`'s geometry.
+
+`AB_SAM` (the package default `pc_method`, matching Fortran) is
+identical to HEUN here except its predictor uses an Adams-Bashforth
+extrapolation that pulls in the previous outer step's ΔH; HEUN is
+the bootstrap form (`β2 = 0` — no history term).
 """
 struct HEUN <: PCScheme end
 
@@ -134,13 +137,13 @@ thresholds, `H_min_*` cleanup, level-set front events) — these only
 ever see `H_n`'s geometry under FE-SBE.
 
 **Performance note.** Empirically `FE_SBE` is significantly slower
-wall-clock than `HEUN` on smooth-flow benchmarks at the same
-`pc_tol`. Two compounding effects: (a) the truncation-factor is
-`1/2` vs `HEUN`'s `1/6`, so the controller picks ~3× smaller dt
-for the same `|H_corr − H_pred|`; (b) `FE_SBE`'s
-`|H_corr − H_pred|` is structurally larger because it lacks the
-Heun-style `k1 ≈ k2` cancellation. As a result `HEUN` is the
-default; reach for `FE_SBE` when nonlinear cascade kernels are
+wall-clock than `HEUN` or `AB_SAM` on smooth-flow benchmarks at the
+same `pc_tol`. Two compounding effects: (a) the truncation-factor is
+`1/2` vs `HEUN`'s `1/6` (and `AB_SAM`'s ζ/(3·(ζ+1)) ≈ 1/6), so the
+controller picks ~3× smaller dt for the same `|H_corr − H_pred|`;
+(b) `FE_SBE`'s `|H_corr − H_pred|` is structurally larger because
+it lacks the Heun-style `k1 ≈ k2` cancellation. The package default
+is `AB_SAM`; reach for `FE_SBE` when nonlinear cascade kernels are
 active and the geometric correctness matters more than wall time.
 
 Velocity carried forward is `u_corr` (the post-corrector SSA
@@ -227,7 +230,7 @@ function _resolve_pc_scheme(name::AbstractString)
     name == "FE-SBE" && return FE_SBE()
     name == "AB-SAM" && return AB_SAM()
     error("Unknown pc_method=\"$name\". " *
-          "Supported: \"HEUN\" (default), \"FE-SBE\", \"AB-SAM\".")
+          "Supported: \"AB-SAM\" (default), \"HEUN\", \"FE-SBE\".")
 end
 
 function _resolve_pc_controller(name::AbstractString)
@@ -1090,10 +1093,12 @@ function _select_step!(y, dt::Float64)
     method  = Int(y.p.yelmo.dt_method)
     scratch = _ensure_pc_scratch!(y)
     if method == 0
-        # Heun is the only PC scheme implemented. Hardcode it here so a
-        # default `pc_method = "AB-SAM"` (currently a stub) still gives
-        # a usable diagnostic eta. `pc_method` is read but only honoured
-        # when it matches an implemented scheme.
+        # Fixed-FE branch always uses HEUN as the diagnostic-eta scheme,
+        # regardless of `pc_method`. The fixed-dt path doesn't actually
+        # adapt, so the only role of the PC scheme here is computing
+        # `eta` as a diagnostic. HEUN's bootstrap-form predictor is
+        # history-free and avoids the AB-SAM `dt_zeta` bookkeeping that
+        # would otherwise need a meaningful previous-step dt.
         return _fixed_step!(y, dt, HEUN(), scratch, y.p.yelmo)
     elseif method == 2
         scheme     = _resolve_pc_scheme(y.p.yelmo.pc_method)
