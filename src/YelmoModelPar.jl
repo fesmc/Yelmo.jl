@@ -92,6 +92,17 @@ Base.@kwdef struct YelmoParams
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
     pc_corr_vel      ::Bool    = false
+    # When `true`, the adaptive PC schemes run Fortran's advective-only
+    # predictor-corrector: ONE `dyn_step!` per substep, with the
+    # β-mixing applied to the advective tendency `dHidt_dyn` only (full
+    # MB cascade runs in both predictor and corrector blocks). When
+    # `false` (default for now), uses the legacy Yelmo.jl path that
+    # runs two full `_step_fe!` cascades per substep (predictor and
+    # lookahead corrector) and mixes the *full*-cascade tendency.
+    # See `src/timestepping.jl` and memory `pc_refactor_design.md`.
+    # Default will flip to `true` once the reject-path symmetry
+    # regression at large `dt_outer` is understood.
+    pc_advective     ::Bool    = false
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
