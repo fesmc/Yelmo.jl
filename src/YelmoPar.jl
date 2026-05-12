@@ -55,7 +55,14 @@ Base.@kwdef struct YelmoParams
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    pc_method        ::String  = "AB-SAM"
+    # Default flipped from "AB-SAM" → "HEUN" on 2026-05-12 after
+    # initmip-grl 16-km speed tests showed AB-SAM (both adaptive and
+    # fixed-dt) is slower than HEUN on margin-heavy Greenland on
+    # Yelmo.jl. Fortran's native default is still "AB-SAM" — Mirror
+    # users wanting bit-for-bit Fortran behaviour should set
+    # `pc_method = "AB-SAM"` explicitly in the nml. See memory note
+    # `pc_advective_port_status.md`.
+    pc_method        ::String  = "HEUN"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
