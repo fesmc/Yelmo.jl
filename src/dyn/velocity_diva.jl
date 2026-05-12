@@ -781,20 +781,46 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
 
         # Step 7 — assemble SSA matrix with β_eff in place of β.
         # The kernel and inputs are otherwise identical to SSA.
-        _assemble_ssa_matrix!(
-            sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
-            sc.ssa_b_vec, sc.ssa_nnz,
-            y.dyn.ux_bar, y.dyn.uy_bar,
-            sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
-            y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
-            y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
-            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
-            y.dyn.taud_acx, y.dyn.taud_acy,
-            y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-            dx, dy, p_ydyn.beta_min;
-            boundaries = _ssa_boundaries_symbol(y),
-            lateral_bc = p_ydyn.ssa_lat_bc,
-        )
+        # Dispatch on `ssa.method` (mirror of `calc_velocity_ssa!`
+        # Step 7); see velocity_ssa.jl:1658 for the formulation notes.
+        if ssa.method === :residual
+            _assemble_ssa_matrix!(
+                sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                sc.ssa_b_vec, sc.ssa_nnz,
+                y.dyn.ux_bar, y.dyn.uy_bar,
+                sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
+                y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
+                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
+                y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+                y.dyn.taud_acx, y.dyn.taud_acy,
+                y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+                dx, dy, p_ydyn.beta_min;
+                boundaries = _ssa_boundaries_symbol(y),
+                lateral_bc = p_ydyn.ssa_lat_bc,
+            )
+        elseif ssa.method === :energy_quadratic
+            _assemble_ssa_matrix_energy!(
+                sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
+                sc.ssa_b_vec, sc.ssa_nnz,
+                y.dyn.ux_bar, y.dyn.uy_bar,
+                sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
+                y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
+                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
+                y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
+                y.dyn.taud_acx, y.dyn.taud_acy,
+                y.dyn.taul_int_acx, y.dyn.taul_int_acy,
+                dx, dy, p_ydyn.beta_min;
+                boundaries = _ssa_boundaries_symbol(y),
+                lateral_bc = p_ydyn.ssa_lat_bc,
+            )
+        elseif ssa.method === :energy_nonlinear
+            error("calc_velocity_diva!: method = :energy_nonlinear is reserved " *
+                  "for the future fully-nonlinear energy-minimisation solver. " *
+                  "Not yet implemented.")
+        else
+            error("calc_velocity_diva!: unrecognised method=$(ssa.method). " *
+                  "Expected :residual, :energy_quadratic, or :energy_nonlinear.")
+        end
 
         # Step 8 — build (or refresh) sparse CSC + Krylov solve.
         # On `iter == 1` builds A from COO via `sparse(...)` and caches

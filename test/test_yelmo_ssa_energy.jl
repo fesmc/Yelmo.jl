@@ -76,10 +76,11 @@ end
 
 function _build_slab_model(path; method::Symbol, linear_method::Symbol,
                                   precond::Symbol = :jacobi,
-                                  boundaries::Symbol = :bounded)
+                                  boundaries::Symbol = :bounded,
+                                  solver::String = "ssa")
     p = YelmoModelParameters("ssa_slab_energy";
         ydyn = ydyn_params(
-            solver         = "ssa",
+            solver         = solver,
             visc_method    = 0,
             visc_const     = 1e7,
             beta_method    = 0,
@@ -188,6 +189,48 @@ end
     diff_abs = maximum(abs.(ux_eng .- ux_res))
     diff_rel = diff_abs / max(maximum(abs, ux_res), eps())
     @info "free-slip equivalence" diff_abs diff_rel
+    @test diff_abs < 1e-3
+    @test diff_rel < 1e-4
+end
+
+@testset "DIVA energy_quadratic vs residual: SLAB-S06 equivalence" begin
+    # Mirrors the first SSA testset but routes through
+    # `calc_velocity_diva!` (solver = "diva"). The DIVA Step 7
+    # dispatch (`velocity_diva.jl`) was added alongside the SSA one;
+    # this test guards the parallel branch against regression.
+    # DIVA's beta_eff and depth-integrated viscosity flow into either
+    # `_assemble_ssa_matrix!` (residual) or `_assemble_ssa_matrix_energy!`
+    # (energy_quadratic) — both must converge to the same `ux_bar`.
+    Nx, Ny = 51, 41
+    dx = 2_000.0
+    fdir = mktempdir(; prefix="diva_slab_s06_fixture_")
+    path = joinpath(fdir, "restart.nc")
+    _write_slab_s06_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
+                             H_const=1000.0, alpha=1e-3, Nz=4)
+
+    y_res = _build_slab_model(path; method = :residual,
+                                     linear_method = :bicgstab,
+                                     precond = :jacobi,
+                                     solver  = "diva")
+    Yelmo.YelmoModelDyn.dyn_step!(y_res, 1.0)
+    ux_res = copy(interior(y_res.dyn.ux_bar))
+    iter_res = y_res.dyn.scratch.ssa_iter_now[]
+    @info "DIVA residual run" iter_res ux_max = maximum(abs, ux_res)
+
+    y_eng = _build_slab_model(path; method = :energy_quadratic,
+                                     linear_method = :cg,
+                                     precond = :jacobi,
+                                     solver  = "diva")
+    Yelmo.YelmoModelDyn.dyn_step!(y_eng, 1.0)
+    ux_eng = copy(interior(y_eng.dyn.ux_bar))
+    iter_eng = y_eng.dyn.scratch.ssa_iter_now[]
+    @info "DIVA energy_quadratic run" iter_eng ux_max = maximum(abs, ux_eng)
+
+    @test all(isfinite, ux_eng)
+    @test iter_eng < 100
+    diff_abs = maximum(abs.(ux_eng .- ux_res))
+    diff_rel = diff_abs / max(maximum(abs, ux_res), eps())
+    @info "DIVA ux_bar equivalence" diff_abs diff_rel
     @test diff_abs < 1e-3
     @test diff_rel < 1e-4
 end

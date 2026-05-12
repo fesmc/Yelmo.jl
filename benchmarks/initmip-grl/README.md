@@ -126,6 +126,65 @@ adaptive sub-steps, `PCrej` rejected, `SSAit` last Picard count), and
 `yelmo.timing = True` triggers a `print_timings` table at the end with
 per-section wall-clock totals.
 
+## SSA solver: residual vs energy_quadratic
+
+The DIVA matrix assembly can use either the strong-form residual
+Jacobian (`SSASolver(method = :residual)`, the Fortran-faithful default;
+BiCGStab + Jacobi inner solve) or the symmetric Hessian of the discrete
+viscous-energy functional (`SSASolver(method = :energy_quadratic)`;
+CG + Jacobi). The energy formulation is SPD by construction, so the
+inner Krylov drops from BiCGStab to CG. See [`src/dyn/solvers.jl`](../../src/dyn/solvers.jl)
+for the `SSASolver` API and [`src/dyn/velocity_ssa_energy.jl`](../../src/dyn/velocity_ssa_energy.jl)
+for the assembly.
+
+Run the energy formulation via the `INITMIP_SSA_METHOD` env var:
+
+```bash
+# residual (default)
+INITMIP_NML=yelmo_initmip_grl-fixed-HEUN-legacy.nml \
+  julia --project=. run.jl
+
+# energy_quadratic
+INITMIP_NML=yelmo_initmip_grl-fixed-HEUN-legacy.nml \
+INITMIP_SSA_METHOD=energy_quadratic \
+INITMIP_OUTPUT_SUBDIR=output/fixed-HEUN-legacy-energy \
+  julia --project=. run.jl
+```
+
+Apples-to-apples comparison on this benchmark (HEUN-legacy nml,
+`dt_method = 0`, `dt_outer = 1 yr`, 20 yr, same machine):
+
+| Metric | `:residual` (BiCGStab) | `:energy_quadratic` (CG) | Δ |
+|---|---:|---:|---:|
+| Wall-clock | 37.06 s | 35.87 s | **−3.2%** |
+| PC substeps | 20 | 20 | 0 (fixed dt) |
+| PC rejects | 0 | 0 | 0 |
+| SSA Picard iters / outer step | 3.9 mean (2–6 range) | **2 (constant)** | **−49%** |
+| Total Picard iters | 78 | 40 | −49% |
+| `dyn` section total | 8.84 s (221 ms / call) | 6.70 s (167 ms / call) | −24% |
+| `mat` / `topo` / `thrm` | 2.82 / 4.96 / 0.21 s | 2.94 / 5.15 / 0.22 s | +2–4% (noise) |
+| V_ice at t = 20 yr | 3.2463 × 10⁶ km³ | 3.2469 × 10⁶ km³ | +0.02% |
+| V_sle at t = 20 yr | 7.9646 m | 7.9670 m | +0.03% |
+| max H at t = 20 yr | 3319.8 m | 3320.1 m | +0.01% |
+
+Findings:
+
+- **Picard convergence is twice as fast and dead-steady under
+  `:energy_quadratic`** — 2 iters per outer step at every step,
+  versus residual's 2–6 with frequent excursions to 5–6.
+- **Wall-clock saving is modest (~3%)** because `dyn` is only ~24–50%
+  of the per-substep cost on this benchmark; the cascade
+  (`topo` + `mat` + `thrm` + output writer) dominates and is
+  unaffected by the SSA inner-loop change. The 49% Picard reduction
+  translates to a 24% `dyn` reduction but only a 3% total reduction.
+- **Trajectories agree to ≤0.05%** at t = 20 yr — the documented
+  calving-front discretization difference of the energy formulation
+  doesn't show up at scale on initmip-grl (which uses `vm-l19` calving
+  without an LSF level set).
+
+Equivalence is also unit-tested on the SLAB-S06 fixture for both the
+pure-SSA and DIVA paths in [`test/test_yelmo_ssa_energy.jl`](../../test/test_yelmo_ssa_energy.jl).
+
 ## Notes
 
 - The default run is 10 yr (`T_END_YR = 10.0`, `DT_OUTER_YR = 1.0`) as
