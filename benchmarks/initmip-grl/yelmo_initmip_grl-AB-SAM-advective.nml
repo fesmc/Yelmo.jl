@@ -12,7 +12,7 @@
     log_timestep    = True
     pc_eta_masked   = True
     pc_method       = "AB-SAM"
-    pc_advective    = False
+    pc_advective    = True
 /
 
 &ytopo

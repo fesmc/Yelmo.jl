@@ -46,25 +46,33 @@ using Printf
 # Configuration (edit in place).
 # ----------------------------------------------------------------------
 
-const T_END_YR       = 10.0     # total simulated time [yr]
+const T_END_YR       = parse(Float64, get(ENV, "INITMIP_T_END_YR", "20.0"))
 const DT_OUTER_YR    = 1.0      # outer-loop dt [yr]; adaptive PC sub-steps inside
 const SNAPSHOT_DT_YR = 10.0     # 2D snapshot cadence [yr]
 
 const BMB_SHLF_CONST = -0.5     # [m/yr] constant basal melt under shelves
 
-const NAMELIST_PATH = abspath(joinpath(@__DIR__, "yelmo_initmip_grl.nml"))
+# Namelist file. Defaults to the standard initmip-grl configuration
+# (AB-SAM + `pc_advective = false`). Override with `INITMIP_NML=<name>`
+# to point at a sibling nml — used by the pc_advective speed comparison
+# to swap between `-AB-SAM-advective.nml` and `-HEUN-legacy.nml`.
+const NAMELIST_PATH = abspath(joinpath(@__DIR__,
+    get(ENV, "INITMIP_NML", "yelmo_initmip_grl.nml")))
 const DATA_DIR      = abspath(joinpath(@__DIR__, "data", "GRL-16KM"))
 
 const BACKEND = lowercase(get(ENV, "INITMIP_BACKEND", "yelmo"))
 BACKEND in ("yelmo", "mirror") ||
     error("Unsupported INITMIP_BACKEND=$(BACKEND); choose 'yelmo' or 'mirror'.")
 
-# Per-backend output directory so a Yelmo run and a Mirror run can
-# coexist for side-by-side comparison (restart fields, Fortran's
-# `yelmo:: timelog:` lines, etc.). `output/` is the conventional
-# spot for the default Yelmo run; Mirror lands in `output-mirror/`.
-const OUTPUT_DIR    = abspath(joinpath(@__DIR__,
-    BACKEND == "mirror" ? "output-mirror" : "output"))
+# Output dir. Default keeps the legacy per-backend layout
+# (`output/` for yelmo, `output-mirror/` for mirror). Set
+# `INITMIP_OUTPUT_SUBDIR` to land elsewhere (used by the pc_advective
+# speed comparison to keep multiple runs side by side under
+# `output/initmip-grl/`).
+const _OUTPUT_SUBDIR = get(ENV, "INITMIP_OUTPUT_SUBDIR", "")
+const OUTPUT_DIR     = isempty(_OUTPUT_SUBDIR) ?
+    abspath(joinpath(@__DIR__, BACKEND == "mirror" ? "output-mirror" : "output")) :
+    abspath(joinpath(@__DIR__, _OUTPUT_SUBDIR))
 const SNAPSHOTS_NC  = joinpath(OUTPUT_DIR, "snapshots.nc")
 const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
 
@@ -263,7 +271,7 @@ function main()
         isfile(path) && rm(path)
     end
 
-    @info "initmip-grl — backend=$(BACKEND), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
+    @info "initmip-grl — backend=$(BACKEND), nml=$(basename(NAMELIST_PATH)), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
 
     y = _build()
 
@@ -297,6 +305,9 @@ function main()
             "PCsub", "PCrej", "SSAit")
     flush(stdout)
 
+    pc_taken_total  = 0
+    pc_reject_total = 0
+    t_loop_start = time()
     for k in 1:n_steps
         step!(y, DT_OUTER_YR)
 
@@ -311,11 +322,16 @@ function main()
 
         d  = regs === nothing ? _domain_diag_mirror(y) : _domain_diag_yelmo(regs)
         sd = _step_diagnostics(y, ctrs)
+        pc_taken_total  += sd.pc_sub
+        pc_reject_total += sd.pc_rej
         @printf("  %6.0f  %10.4e  %10.4f  %8.1f  %5d  %5d  %5d\n",
                 y.time, d.V_ice, d.V_sle, d.H_ice_max,
                 sd.pc_sub, sd.pc_rej, sd.ssa_it)
         flush(stdout)
     end
+    t_loop_end = time()
+    wall_s = t_loop_end - t_loop_start
+    @info "wall-clock loop time" seconds=wall_s n_outer=n_steps pc_substeps_total=pc_taken_total pc_rejects_total=pc_reject_total
 
     close(snap_out.ds)
 
