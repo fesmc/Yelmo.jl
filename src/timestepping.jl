@@ -268,6 +268,13 @@ mutable struct PCSnapshot
     uy_b::Array{Float64,3}
     ux_bar::Array{Float64,3}
     uy_bar::Array{Float64,3}
+    # Advective-PC fields: dHidt_dyn evolves across substeps (each
+    # predictor saves it as dHidt_dyn_n then overwrites with the β-mix
+    # result), so a rejected attempt has to restore the pre-attempt
+    # value. lsf likewise. Snapshotted unconditionally so the legacy
+    # path also covers them (cheap; ~Nx*Ny floats each).
+    dHidt_dyn::Array{Float64,3}
+    lsf::Array{Float64,3}
     time::Float64
 end
 
@@ -278,6 +285,8 @@ function _alloc_pc_snapshot(y)
         copy(interior(y.dyn.uy_b)),
         copy(interior(y.dyn.ux_bar)),
         copy(interior(y.dyn.uy_bar)),
+        copy(interior(y.tpo.dHidt_dyn)),
+        copy(interior(y.tpo.lsf)),
         y.time,
     )
 end
@@ -288,11 +297,13 @@ end
 Copy the current prognostic state of `y` into `snap`, in place.
 """
 function snapshot!(snap::PCSnapshot, y)
-    copyto!(snap.H_ice,  interior(y.tpo.H_ice))
-    copyto!(snap.ux_b,   interior(y.dyn.ux_b))
-    copyto!(snap.uy_b,   interior(y.dyn.uy_b))
-    copyto!(snap.ux_bar, interior(y.dyn.ux_bar))
-    copyto!(snap.uy_bar, interior(y.dyn.uy_bar))
+    copyto!(snap.H_ice,     interior(y.tpo.H_ice))
+    copyto!(snap.ux_b,      interior(y.dyn.ux_b))
+    copyto!(snap.uy_b,      interior(y.dyn.uy_b))
+    copyto!(snap.ux_bar,    interior(y.dyn.ux_bar))
+    copyto!(snap.uy_bar,    interior(y.dyn.uy_bar))
+    copyto!(snap.dHidt_dyn, interior(y.tpo.dHidt_dyn))
+    copyto!(snap.lsf,       interior(y.tpo.lsf))
     snap.time = y.time
     return snap
 end
@@ -305,11 +316,13 @@ all diagnostics so derived fields (`f_grnd`, `H_grnd`, `z_srf`, …)
 are consistent with the restored `H_ice`.
 """
 function restore!(y, snap::PCSnapshot)
-    copyto!(interior(y.tpo.H_ice),  snap.H_ice)
-    copyto!(interior(y.dyn.ux_b),   snap.ux_b)
-    copyto!(interior(y.dyn.uy_b),   snap.uy_b)
-    copyto!(interior(y.dyn.ux_bar), snap.ux_bar)
-    copyto!(interior(y.dyn.uy_bar), snap.uy_bar)
+    copyto!(interior(y.tpo.H_ice),     snap.H_ice)
+    copyto!(interior(y.dyn.ux_b),      snap.ux_b)
+    copyto!(interior(y.dyn.uy_b),      snap.uy_b)
+    copyto!(interior(y.dyn.ux_bar),    snap.ux_bar)
+    copyto!(interior(y.dyn.uy_bar),    snap.uy_bar)
+    copyto!(interior(y.tpo.dHidt_dyn), snap.dHidt_dyn)
+    copyto!(interior(y.tpo.lsf),       snap.lsf)
     y.time = snap.time
     Yelmo.update_diagnostics!(y)
     return y
@@ -367,6 +380,14 @@ mutable struct PCScratch
     # Per-cell `|tau|` field, populated only when `pc_eta_masked = true`.
     # Used by the isolated-outlier check inside `_compute_pc_eta`.
     pc_tau::Array{Float64,3}
+    # Advective-PC buffers (`pc_advective = true`). Predictor / corrector
+    # stage outputs (Fortran `tpo%now%pred` / `tpo%now%corr`) and the
+    # `H_scratch` buffer used by the snapshot-diff advection-tendency
+    # helper. Lazily allocated; unused under `pc_advective = false`
+    # except for the (small) struct overhead.
+    pred_buf::YelmoModelTopo.PCStageBuf
+    corr_buf::YelmoModelTopo.PCStageBuf
+    H_scratch::Array{Float64,3}
     is_bootstrapped::Bool
     eta_history::Vector{Float64}   # newest at end; capped to history_max
     dt_history::Vector{Float64}    # likewise
@@ -386,6 +407,9 @@ function _alloc_pc_scratch(y)
         zeros(Float64, size(H)),    # f_ice_pred
         zeros(Float64, size(H)),    # H_grnd_pred
         zeros(Float64, size(H)),    # pc_tau
+        YelmoModelTopo._alloc_pc_stage_buf(y),  # pred_buf
+        YelmoModelTopo._alloc_pc_stage_buf(y),  # corr_buf
+        zeros(Float64, size(H)),       # H_scratch (advection snapshot)
         false,
         Float64[],
         Float64[],
@@ -561,8 +585,105 @@ same `y_n` state. Returns the truncation-error proxy `eta` (m/yr).
 The model state on return is the corrector result.
 
 Dispatches on `PCScheme`. Concrete methods: `HEUN`, `FE_SBE`, `AB_SAM`.
+
+Branches internally on `y.p.yelmo.pc_advective`:
+
+  - `true` (default, Fortran-equivalent) — runs Fortran's advective
+    predictor / corrector via `topo_pc_step!`. ONE `dyn_step!` per
+    attempt. β-mixing applies to the advective tendency only; the full
+    MB cascade runs in both the predictor and corrector blocks.
+  - `false` (legacy) — two full `_step_fe!` cascades per attempt,
+    mixing the full-cascade tendency. Preserved for A/B comparison;
+    see memory `pc_refactor_design.md`.
 """
-function pc_step!(::HEUN, y, dt::Float64, scratch::PCScratch)
+function pc_step!(scheme::PCScheme, y, dt::Float64, scratch::PCScratch)
+    if y.p !== nothing && y.p.yelmo.pc_advective
+        return _pc_step_advective!(scheme, y, dt, scratch)
+    end
+    return _pc_step_legacy!(scheme, y, dt, scratch)
+end
+
+
+# ===== Advective PC (Fortran-equivalent, `pc_advective = true`) =====
+
+# β-coefficients for the advective predictor/corrector (Fortran
+# `set_pc_beta_coefficients`, yelmo_timesteps.f90:38-163).
+# Returns a 4-tuple `(β1, β2, β3, β4)`:
+#   predictor: dHidt_dyn = β1·dHidt_now + β2·dHidt_dyn_n
+#   corrector: dHidt_dyn = β3·dHidt_now + β4·dHidt_dyn_n
+_pc_beta(::HEUN,   ::PCScratch, ::Float64) = (1.0, 0.0, 0.5, 0.5)
+_pc_beta(::FE_SBE, ::PCScratch, ::Float64) = (1.0, 0.0, 1.0, 0.0)
+function _pc_beta(::AB_SAM, scratch::PCScratch, dt::Float64)
+    # AB-SAM bootstrap: no previous-step dHidt_dyn_n history → fall back
+    # to HEUN-style predictor (β2 = 0). After the first accepted substep
+    # the dt_history is populated and ζ is well-defined.
+    if !scratch.is_bootstrapped || isempty(scratch.dt_history)
+        return (1.0, 0.0, 0.5, 0.5)
+    end
+    dt_prev = scratch.dt_history[end]
+    ζ = dt / dt_prev
+    return (1.0 + 0.5 * ζ, -0.5 * ζ, 0.5, 0.5)
+end
+
+# Truncation-error multiplier for `tau = factor · |H_corr − H_pred| / dt`
+# (Fortran yelmo_timesteps.f90:329 / 357 / 381).
+_pc_factor(::HEUN,   ::PCScratch, ::Float64) = 1.0 / 6.0
+_pc_factor(::FE_SBE, ::PCScratch, ::Float64) = 1.0 / 2.0
+function _pc_factor(::AB_SAM, scratch::PCScratch, dt::Float64)
+    if !scratch.is_bootstrapped || isempty(scratch.dt_history)
+        return 1.0 / 6.0
+    end
+    dt_prev = scratch.dt_history[end]
+    ζ = dt / dt_prev
+    return ζ / (3.0 * (ζ + 1.0))
+end
+
+# Single advective PC attempt for all three schemes. On exit:
+#   - `y.tpo.H_ice` holds H_corr with diagnostics consistent (the PC
+#     driver subsequently restores to `H_ice_n` for mat/therm and runs
+#     `topo_pc_step!(:advance)` to commit the chosen stage).
+#   - `scratch.pred_buf` / `scratch.corr_buf` populated.
+#   - `scratch.H_pred` / `scratch.H_corr` mirror the buffer thicknesses
+#     so `_compute_pc_eta` can read them.
+function _pc_step_advective!(scheme::PCScheme, y, dt::Float64, scratch::PCScratch)
+    (β1, β2, β3, β4) = _pc_beta(scheme, scratch, dt)
+
+    @timed_section y :pc_predictor begin
+        Yelmo.topo_pc_step!(y, dt;
+                            mode = :predictor,
+                            β1 = β1, β2 = β2,
+                            pred_buf  = scratch.pred_buf,
+                            corr_buf  = scratch.corr_buf,
+                            H_scratch = scratch.H_scratch)
+    end
+    copyto!(scratch.H_pred, scratch.pred_buf.H_ice)
+    # Snapshot predictor-state f_ice / H_grnd for the masked-eta path,
+    # while live `y.tpo` still reflects H_pred.
+    _snapshot_pred_diagnostics!(scratch, y)
+
+    # ONE dyn solve at H_pred → u_pred.
+    @timed_section y :dyn Yelmo.dyn_step!(y, dt)
+
+    @timed_section y :pc_corrector begin
+        Yelmo.topo_pc_step!(y, dt;
+                            mode = :corrector,
+                            β3 = β3, β4 = β4,
+                            pred_buf  = scratch.pred_buf,
+                            corr_buf  = scratch.corr_buf,
+                            H_scratch = scratch.H_scratch)
+    end
+    copyto!(scratch.H_corr, scratch.corr_buf.H_ice)
+
+    # Eta-masking reads corrector-state f_ice / H_grnd live from `y.tpo`
+    # (set by topo_pc_step!(:corrector)'s closing update_diagnostics).
+    factor = _pc_factor(scheme, scratch, dt)
+    return _compute_pc_eta(factor, scratch, y, dt)
+end
+
+
+# ===== Legacy PC (full-cascade twice, `pc_advective = false`) =====
+
+function _pc_step_legacy!(::HEUN, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
 
     # Stage 1: full FE step  y_n  →  y_pred
@@ -644,7 +765,7 @@ post-corrector SSA solution at `H_corr`).
 Truncation-error proxy: `tau = 1/(2·dt) · |H_corr − H_pred|`,
 matching Fortran `yelmo_timesteps.f90:329`.
 """
-function pc_step!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
+function _pc_step_legacy!(::FE_SBE, y, dt::Float64, scratch::PCScratch)
     snap = scratch.snap
 
     # Stage 1 — predictor: full FE cycle from y_n.
@@ -694,10 +815,10 @@ Bootstrap: when `!scratch.is_bootstrapped` (no previous accepted
 outer step yet), fall back to a HEUN step. After the first accept
 the bootstrap flag is flipped by `_adaptive_step!`.
 """
-function pc_step!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
+function _pc_step_legacy!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
     # Bootstrap path: no previous accepted ΔH yet → run HEUN.
     if !scratch.is_bootstrapped || isempty(scratch.dt_history)
-        return pc_step!(HEUN(), y, dt, scratch)
+        return _pc_step_legacy!(HEUN(), y, dt, scratch)
     end
 
     snap = scratch.snap
@@ -919,17 +1040,25 @@ function _adaptive_step!(y, dt_outer::Float64,
         end
 
         scratch.n_steps_taken += 1
-        # Save the accepted-step ΔH for AB-SAM's predictor (and flip
-        # the bootstrap flag). At this point `scratch.snap.H_ice` is
-        # H_n for *this* attempt and `y.tpo.H_ice` is H_corr — exactly
-        # what AB-SAM's next predictor needs as `ΔH_prev`. Cheap copy
-        # whether or not the active scheme uses it.
+        # Save the accepted-step ΔH for legacy AB-SAM's predictor (and
+        # flip the bootstrap flag). At this point `scratch.snap.H_ice`
+        # is H_n for *this* attempt and `y.tpo.H_ice` is H_corr — exactly
+        # what legacy AB-SAM's next predictor needs as `ΔH_prev`. Cheap
+        # copy whether or not the active scheme uses it.
         let H_corr = interior(y.tpo.H_ice)
             @inbounds @simd for i in eachindex(scratch.ΔH_prev)
                 scratch.ΔH_prev[i] = H_corr[i] - scratch.snap.H_ice[i]
             end
         end
         scratch.is_bootstrapped = true
+
+        # Finalise the accepted substep. The legacy path leaves
+        # `y.tpo.H_ice` at H_corr with mat/therm already evaluated
+        # (inside the second `_step_fe!`), so nothing more to do here.
+        # The advective path leaves `y` at H_corr with mat/therm NOT
+        # yet evaluated; finalise per Fortran's outer loop.
+        _finalize_accepted_step!(y, dt_attempt, scratch, p_yelmo)
+
         # Store actual eta (NOT floored to pc_eps) so the controller
         # sees the true history. `_dt_ratio` does its own floor at
         # 1e-8 to keep the divisor finite.
@@ -937,6 +1066,41 @@ function _adaptive_step!(y, dt_outer::Float64,
         _maybe_log_timestep!(y, dt_attempt, eta, accepted_iter, wallclock_s)
     end
 
+    return y
+end
+
+# Finalise an accepted advective substep: restore live `H_ice ← H_ice_n`
+# (Fortran's `update_others_pc = false` evaluates mat/therm at the
+# start-of-substep geometry, yelmo_ice.f90:382-389), run mat + therm,
+# then `topo_pc_step!(:advance)` to commit `pred_buf` (or `corr_buf`).
+# No-op for the legacy path, where `pc_step!` already advanced state to
+# the corrector result and ran mat/therm inside the second `_step_fe!`.
+function _finalize_accepted_step!(y, dt::Float64, scratch::PCScratch, p_yelmo)
+    p_yelmo.pc_advective || return y
+
+    # Restore H_ice ← H_ice_n for the mat/therm steps that follow.
+    # Fortran's outer loop runs `calc_ymat` / `calc_ytherm` with
+    # `H_ice = H_ice_n` when `update_others_pc = false` (the default).
+    copyto!(interior(y.tpo.H_ice), interior(y.tpo.H_ice_n))
+    copyto!(interior(y.tpo.lsf),   interior(y.tpo.lsf_n))
+    Yelmo.update_diagnostics!(y)
+
+    @timed_section y :mat  Yelmo.mat_step!(y, dt)
+    @timed_section y :thrm Yelmo.therm_step!(y, dt)
+
+    # Commit pred or corr stage outputs to live state.
+    @timed_section y :pc_advance begin
+        Yelmo.topo_pc_step!(y, dt;
+                            mode = :advance,
+                            pred_buf  = scratch.pred_buf,
+                            corr_buf  = scratch.corr_buf,
+                            H_scratch = scratch.H_scratch,
+                            use_H_pred = p_yelmo.pc_use_H_pred,
+                            advance_time = false)
+    end
+    # `topo_pc_step!(:advance)` keeps `advance_time = false` here; the
+    # caller (`_adaptive_step!`) owns `y.time`. Bump it now.
+    y.time += dt
     return y
 end
 
@@ -1015,8 +1179,12 @@ function _fixed_step!(y, dt_outer::Float64,
     snapshot!(scratch.snap, y)
     t0 = time()
     eta = pc_step!(scheme, y, dt_outer, scratch)
+    # Advective path leaves mat/therm and the `:advance` commit to the
+    # caller; legacy path runs them inline. Single shared finaliser.
+    _finalize_accepted_step!(y, dt_outer, scratch, p_yelmo)
     wallclock_s = time() - t0
     scratch.n_steps_taken += 1
+    scratch.is_bootstrapped = true
     _push_history!(scratch, eta, dt_outer)
     _maybe_log_timestep!(y, dt_outer, eta, 1, wallclock_s)
     return y
