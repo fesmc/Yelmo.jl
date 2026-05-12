@@ -109,8 +109,9 @@ export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoModelTopo
-export topo_step!, advect_tracer!
+export topo_step!, topo_pc_step!, PCStageBuf, advect_tracer!
 export advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!
+export advection_tendency!
 export AdvectionCache, init_advection_cache,
        update_advection_matrix!, update_advection_operator!,
        solve_advection!

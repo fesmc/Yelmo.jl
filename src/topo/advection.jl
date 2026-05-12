@@ -394,6 +394,47 @@ function _resolve_advection_cache(::Nothing, grid; required::Bool = true)
 end
 
 """
+    advection_tendency!(dHdt, H_ice, ux_bar, uy_bar, dt, H_scratch;
+                        scheme=:upwind_explicit, cache=nothing,
+                        cfl_safety=0.1) -> dHdt
+
+Compute the pure advective tendency `dHdt = (H_advected − H_ice) / dt`
+[m/yr] without permanently modifying `H_ice`. Mirrors Fortran
+`calc_G_advec_simple` (`yelmo/src/physics/mass_conservation.f90`).
+
+Implementation (snapshot-diff): copy `H_ice` into `H_scratch`, run
+`advect_tracer!` mutating `H_ice` in place, write the difference into
+`dHdt`, then restore `H_ice` from `H_scratch`. `H_scratch` must be a
+plain `Array` of the same `interior` size as `H_ice`; the caller owns
+it (typically a PC scratch buffer).
+
+Used by the advective-PC path (`pc_advective = true`) inside
+`topo_pc_step!`. The implicit-LIS solver path is supported because
+both `advect_tracer!` schemes mutate `H_ice` identically.
+"""
+function advection_tendency!(dHdt, H_ice, ux_bar, uy_bar, dt::Real,
+                             H_scratch::AbstractArray;
+                             scheme::Symbol = :upwind_explicit,
+                             cache = nothing,
+                             cfl_safety::Real = 0.1)
+    H_int  = interior(H_ice)
+    dH_int = interior(dHdt)
+    copyto!(H_scratch, H_int)
+
+    advect_tracer!(H_ice, ux_bar, uy_bar, dt;
+                   scheme = scheme,
+                   cache  = cache,
+                   cfl_safety = cfl_safety)
+
+    inv_dt = 1.0 / dt
+    @inbounds @simd for i in eachindex(dH_int)
+        dH_int[i] = (H_int[i] - H_scratch[i]) * inv_dt
+    end
+    copyto!(H_int, H_scratch)
+    return dHdt
+end
+
+"""
     advect_tracer_upwind_explicit!(c, ux, uy, dt;
                                    cache, cfl_safety, fill_velocity_halos) -> c
 
