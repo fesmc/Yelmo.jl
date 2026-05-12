@@ -19,11 +19,12 @@ makedocs(
         Yelmo.YelmoIO,
     ],
     authors  = "Alexander Robinson <alexander.robinson@awi.de> and contributors",
-    repo     = "https://github.com/fesmc/Yelmo.jl",
+    repo     = Documenter.Remotes.GitHub("fesmc", "Yelmo.jl"),
     format   = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical  = "https://fesmc.github.io/Yelmo.jl",
         assets     = String[],
+        edit_link  = "main",
         size_threshold       = 400 * 1024,
         size_threshold_warn  = 200 * 1024,
     ),

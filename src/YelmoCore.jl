@@ -785,6 +785,23 @@ end
 # YelmoModel — pure-Julia state container
 # ---------------------------------------------------------------------------
 
+"""
+    YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
+
+Pure-Julia state container for a Yelmo simulation. Holds the model alias,
+run directory, current time, the parameter tree `p`, physical constants
+`c`, the three Oceananigans grids (`g` aa-centered, `gt` ac-staggered
+in the horizontal, `gr` 3D), the field namespace `v`, and the per-group
+state containers `bnd`, `dta`, `dyn`, `mat`, `thrm`, `tpo`. A
+`YelmoTimer` accumulates per-section wall-clock measurements, and the
+optional `hooks` field carries user-supplied calving-rate callbacks.
+
+Constructed either from a NetCDF restart
+(`YelmoModel(restart_file, time; …)`) or from an in-memory
+`AbstractBenchmark` (`YelmoModel(bench, t; …)`); see
+[`load_state!`](@ref) for the loader and `step!(y, dt)` for the
+stepping interface.
+"""
 mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     alias::String
     rundir::String
