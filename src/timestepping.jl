@@ -107,8 +107,8 @@ For configurations with active LSF calving, finite `H_min_flt` /
 "both stages start from `H_n`" pattern where the topo cascade only
 sees `H_n`'s geometry.
 
-`AB_SAM` (the package default `pc_method`, matching Fortran) is
-identical to HEUN here except its predictor uses an Adams-Bashforth
+`AB_SAM` (Fortran's native default) is identical to `HEUN` here
+except its predictor uses an Adams-Bashforth
 extrapolation that pulls in the previous outer step's ΔH; HEUN is
 the bootstrap form (`β2 = 0` — no history term).
 """
@@ -143,7 +143,7 @@ same `pc_tol`. Two compounding effects: (a) the truncation-factor is
 controller picks ~3× smaller dt for the same `|H_corr − H_pred|`;
 (b) `FE_SBE`'s `|H_corr − H_pred|` is structurally larger because
 it lacks the Heun-style `k1 ≈ k2` cancellation. The package default
-is `AB_SAM`; reach for `FE_SBE` when nonlinear cascade kernels are
+is `HEUN`; reach for `FE_SBE` when nonlinear cascade kernels are
 active and the geometric correctness matters more than wall time.
 
 Velocity carried forward is `u_corr` (the post-corrector SSA
@@ -158,7 +158,9 @@ struct FE_SBE <: PCScheme end
     AB_SAM
 
 Adams-Bashforth predictor + Semi-implicit Adams-Moulton corrector
-(Fortran's `pc_method = "AB-SAM"` default).
+(Fortran's native `pc_method = "AB-SAM"` default; Yelmo.jl's
+package default since 2026-05-12 is `"HEUN"` for margin-heavy
+performance reasons — see `YelmoModelPar.jl` comment).
 
 Yelmo.jl-style implementation: structurally identical to `HEUN` (2×
 `_step_fe!` with corrector identity `H_corr = (H_n + H_**)/2`), but

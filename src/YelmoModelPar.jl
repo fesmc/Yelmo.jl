@@ -67,27 +67,22 @@ Base.@kwdef struct YelmoParams
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    # Matches Fortran Yelmo's default ("AB-SAM") so a benchmark nml
-    # without an explicit `pc_method` line gets the same scheme on both
-    # backends. All three schemes — "HEUN", "FE-SBE", "AB-SAM" — are
-    # implemented; see the per-scheme docstrings in `src/timestepping.jl`.
+    # Default is "HEUN" (flipped from "AB-SAM" on 2026-05-12).
     #
-    # Empirical ranking is benchmark-dependent:
+    # On margin-heavy Greenland (initmip-grl 16-km) AB-SAM takes
+    # ~1.8× more PC substeps than HEUN under the adaptive controller
+    # because its Adams-Bashforth predictor extrapolates last-step
+    # ΔH and amplifies any per-stage disagreement in the
+    # cascade-twice topo path. Fortran's native default is still
+    # "AB-SAM" — set `pc_method = "AB-SAM"` explicitly when matching
+    # Fortran is the goal. All three schemes — "HEUN", "FE-SBE",
+    # "AB-SAM" — are implemented; see the per-scheme docstrings in
+    # `src/timestepping.jl`.
     #
-    #   - MISMIP3D Stnd (smooth flow, no margin / MB activity): AB-SAM
-    #     slightly better than HEUN (≈ 3 % fewer substeps); FE-SBE
-    #     worse (~20 % more substeps). See `test_adaptive_dt.jl`.
-    #   - initmip-grl 16-km (active margin, calving, MB): HEUN currently
-    #     beats AB-SAM (~2× fewer substeps), because Yelmo.jl runs the
-    #     full topo cascade (advect + SMB + BMB + calving + cleanup)
-    #     twice per outer step and AB-SAM's predictor extrapolates last-
-    #     step ΔH, amplifying any per-stage disagreement. This is the
-    #     deferred PC refactor's territory — see memory
-    #     `pc_eta_masking_outcome.md` and `pc_refactor_design.md`.
-    #
-    # Use "FE-SBE" when nonlinear cascade kernels (LSF calving, finite
-    # `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n geometry.
-    pc_method        ::String  = "AB-SAM"
+    # Use "FE-SBE" when nonlinear cascade kernels (LSF calving,
+    # finite `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n
+    # geometry. See memory `pc_advective_port_status.md`.
+    pc_method        ::String  = "HEUN"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true

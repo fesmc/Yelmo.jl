@@ -47,7 +47,7 @@ using Printf
 # ----------------------------------------------------------------------
 
 const T_END_YR       = parse(Float64, get(ENV, "INITMIP_T_END_YR", "20.0"))
-const DT_OUTER_YR    = 1.0      # outer-loop dt [yr]; adaptive PC sub-steps inside
+const DT_OUTER_YR    = parse(Float64, get(ENV, "INITMIP_DT_OUTER_YR", "1.0"))
 const SNAPSHOT_DT_YR = 10.0     # 2D snapshot cadence [yr]
 
 const BMB_SHLF_CONST = -0.5     # [m/yr] constant basal melt under shelves
