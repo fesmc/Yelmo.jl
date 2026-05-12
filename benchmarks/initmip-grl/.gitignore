@@ -5,6 +5,7 @@
 
 # Benchmark configuration is committed (root .gitignore excludes *.nml).
 !yelmo_initmip_grl.nml
+!yelmo_initmip_grl-*.nml
 
 # Runtime outputs (regenerable). The Mirror backend writes to
 # `output-mirror/` so a Yelmo run and a Mirror run can coexist
