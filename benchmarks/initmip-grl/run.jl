@@ -37,6 +37,7 @@ using Yelmo: print_timings
 using Yelmo: YelmoMirror
 using Yelmo.YelmoModelPar: YelmoModelParameters
 using Yelmo.YelmoPar: YelmoParameters
+using Yelmo: SSASolver
 using Oceananigans: interior
 using NCDatasets
 using Statistics
@@ -59,6 +60,12 @@ const BMB_SHLF_CONST = -0.5     # [m/yr] constant basal melt under shelves
 const NAMELIST_PATH = abspath(joinpath(@__DIR__,
     get(ENV, "INITMIP_NML", "yelmo_initmip_grl.nml")))
 const DATA_DIR      = abspath(joinpath(@__DIR__, "data", "GRL-16KM"))
+
+# Override the SSA assembly formulation. Defaults to the namelist /
+# Julia default (:residual). Set to "energy_quadratic" to use the
+# symmetric viscous-energy Hessian assembly (CG inner solve).
+# Yelmo-backend only — ignored under INITMIP_BACKEND=mirror.
+const SSA_METHOD = Symbol(get(ENV, "INITMIP_SSA_METHOD", "residual"))
 
 const BACKEND = lowercase(get(ENV, "INITMIP_BACKEND", "yelmo"))
 BACKEND in ("yelmo", "mirror") ||
@@ -125,9 +132,29 @@ function _apply_forcing!(y, rho_ice::Real, rho_w::Real)
     return y
 end
 
+"""
+    _override_field(s, f::Symbol, v) -> s′
+
+Reconstruct `s` with field `f` replaced by `v`. Dep-free alternative to
+`Setfield.@set`; uses the all-positional default inner constructor that
+every struct has (works for both `Base.@kwdef` and plain structs).
+"""
+function _override_field(s, f::Symbol, v)
+    vals = (n === f ? v : getfield(s, n) for n in fieldnames(typeof(s)))
+    return typeof(s)(vals...)
+end
+
 function _build_yelmo()
     b = InitMIPGRLBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
     p = YelmoModelParameters(NAMELIST_PATH, "initmip_grl")
+
+    if SSA_METHOD !== :residual
+        new_ssa = SSASolver(method = SSA_METHOD)
+        new_ydyn = _override_field(p.ydyn, :ssa_solver, new_ssa)
+        p = _override_field(p, :ydyn, new_ydyn)
+        @info "overriding ssa_solver" method=SSA_METHOD
+    end
+
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
     # Topography from M17 — init_topo_load! reads H_ice/z_bed/z_bed_sd
@@ -271,7 +298,7 @@ function main()
         isfile(path) && rm(path)
     end
 
-    @info "initmip-grl — backend=$(BACKEND), nml=$(basename(NAMELIST_PATH)), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr"
+    @info "initmip-grl — backend=$(BACKEND), nml=$(basename(NAMELIST_PATH)), t_end=$(T_END_YR) yr, dt_outer=$(DT_OUTER_YR) yr, bmb_shlf=$(BMB_SHLF_CONST) m/yr, ssa_method=$(SSA_METHOD)"
 
     y = _build()
 
