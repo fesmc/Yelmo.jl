@@ -25,7 +25,7 @@ export init_state!, step!, load_state!
 export topo_step!, dyn_step!, mat_step!, therm_step!
 export load_grids_from_restart, load_grids_with_regrid, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
-export make_field, matches_patterns, yelmo_define_grids
+export make_field, matches_patterns, yelmo_define_grids, calc_zeta
 export resolve_boundaries, neumann_2d_field, dirichlet_2d_field
 export fill_halo_regions!, fill_corner_halos!
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
@@ -553,6 +553,14 @@ Read coordinate arrays from a NetCDF restart and build the 2D and 3D
 Oceananigans `RectilinearGrid`s. `grid3d_ice` and `grid3d_rock` may be
 `nothing` if the file does not contain the corresponding vertical axes.
 """
+# Yelmo NetCDF files store horizontal coordinates in kilometres while the
+# prognostic fields are in metres. Detect kilometre units robustly: files
+# in the wild use "km", "kilometers", "kilometres" (any case / padding).
+function _units_are_km(units::AbstractString)
+    u = lowercase(strip(units))
+    return u == "km" || startswith(u, "kilomet")
+end
+
 function load_grids_from_restart(filename::AbstractString;
                                  boundaries = :bounded)
     ds = NCDataset(filename)
@@ -565,12 +573,10 @@ function load_grids_from_restart(filename::AbstractString;
     # Convert to metres on load so the grid spacing is consistent with
     # the prognostic fields and CFL/advection arithmetic produces
     # physical results without per-call rescaling.
-    x_units = lowercase(strip(get(ds["xc"].attrib, "units", "")))
-    y_units = lowercase(strip(get(ds["yc"].attrib, "units", "")))
-    if x_units == "km"
+    if _units_are_km(get(ds["xc"].attrib, "units", ""))
         xc .*= 1000.0
     end
-    if y_units == "km"
+    if _units_are_km(get(ds["yc"].attrib, "units", ""))
         yc .*= 1000.0
     end
 
@@ -673,6 +679,102 @@ function _split_boundary_faces_from_centers(zeta_file::AbstractVector)
         zf[k] = 0.5 * (zeta_file[k] + zeta_file[k+1])
     end
     return zf
+end
+
+"""
+    calc_zeta(nz_aa, zeta_scale, zeta_exp) -> (zeta_aa, zeta_ac)
+
+Build a normalised vertical axis on `[0, 1]` from `nz_aa` cell-centre
+(`aa`) nodes, returning both the centres `zeta_aa` (length `nz_aa`,
+with `zeta_aa[1] = 0` and `zeta_aa[end] = 1`) and the cell-edge (`ac`)
+nodes `zeta_ac` (length `nz_aa + 1`, with the base and surface edges at
+`0` and `1`). Julia port of the Fortran `calc_zeta`
+(`yelmo/src/yelmo_grid.f90`).
+
+`zeta_scale` selects the column-resolution profile:
+
+  - `"linear"` — uniform spacing (default fall-through).
+  - `"exp"`    — refine towards the base (`zeta_aa .^ zeta_exp`).
+  - `"exp-inv"`— refine towards the surface.
+  - `"tanh"`   — refine towards both base and surface.
+
+`zeta_exp` controls the strength of the `exp` / `exp-inv` stretching.
+"""
+function calc_zeta(nz_aa::Integer, zeta_scale::AbstractString, zeta_exp::Real)
+    nz_aa >= 2 || error("calc_zeta: need nz_aa ≥ 2, got $nz_aa.")
+    nz_ac = nz_aa + 1
+
+    # Linear base/surface = 0/1.
+    zeta_aa = Float64[(k - 1) / (nz_aa - 1) for k in 1:nz_aa]
+
+    scale = strip(zeta_scale)
+    if scale == "exp"
+        zeta_aa .= zeta_aa .^ zeta_exp
+    elseif scale == "exp-inv"
+        zeta_aa .= 1.0 .- zeta_aa .^ zeta_exp
+        reverse!(zeta_aa)
+    elseif scale == "tanh"
+        zeta_aa .= tanh.(π .* (zeta_aa .- 0.5))
+        zeta_aa .-= minimum(zeta_aa)
+        zeta_aa ./= maximum(zeta_aa)
+    end
+    # "linear" (and any unrecognised value): leave the linear axis as-is,
+    # matching the Fortran `case DEFAULT`.
+
+    zeta_ac = Vector{Float64}(undef, nz_ac)
+    zeta_ac[1]   = 0.0
+    @inbounds for k in 2:nz_ac-1
+        zeta_ac[k] = 0.5 * (zeta_aa[k-1] + zeta_aa[k])
+    end
+    zeta_ac[end] = 1.0
+
+    return zeta_aa, zeta_ac
+end
+
+"""
+    _define_grids_from_axes(xc, yc, zeta_aa_ice, zeta_r_aa; boundaries=:bounded)
+        -> (grid2d, grid3d_ice, grid3d_rock)
+
+Build the three Yelmo `RectilinearGrid`s from in-memory axes, using the
+exact same vertical conventions as `load_grids_from_restart`:
+
+  - horizontal `xc`/`yc` are cell centres **in metres** (no unit
+    conversion here — callers convert from km if needed);
+  - the ice grid uses the split-boundary convention, where
+    `zeta_aa_ice` is `[0; interior_centres…; 1]` (i.e. the `calc_zeta`
+    `zeta_aa` output) and the interior `Nz = length(zeta_aa_ice) - 2`;
+  - the rock grid uses the interior-extended convention, where
+    `zeta_r_aa` are the rock cell centres and the faces are their
+    midpoints with endpoints at the first/last centre.
+"""
+function _define_grids_from_axes(xc::AbstractVector, yc::AbstractVector,
+                                 zeta_aa_ice::AbstractVector,
+                                 zeta_r_aa::AbstractVector;
+                                 boundaries = :bounded)
+    Nx, Ny = length(xc), length(yc)
+    dx, dy = xc[2] - xc[1], yc[2] - yc[1]
+    xlims = (xc[1] - dx/2, xc[end] + dx/2)
+    ylims = (yc[1] - dy/2, yc[end] + dy/2)
+
+    Tx, Ty = resolve_boundaries(boundaries)
+
+    grid2d = RectilinearGrid(size=(Nx, Ny),
+                             x=xlims, y=ylims,
+                             topology=(Tx, Ty, Flat))
+
+    # Ice: split-boundary (matches `_build_3d_grid(...; split_boundary=true)`).
+    z_face_ice = _split_boundary_faces_from_centers(zeta_aa_ice)
+    grid3d_ice = RectilinearGrid(size=(Nx, Ny, length(z_face_ice) - 1),
+                                 x=xlims, y=ylims, z=z_face_ice,
+                                 topology=(Tx, Ty, Bounded))
+
+    # Rock: interior-extended (matches `_build_3d_grid(...; split_boundary=false)`).
+    z_face_rock = _faces_from_centers(zeta_r_aa)
+    grid3d_rock = RectilinearGrid(size=(Nx, Ny, length(z_face_rock) - 1),
+                                  x=xlims, y=ylims, z=z_face_rock,
+                                  topology=(Tx, Ty, Bounded))
+
+    return grid2d, grid3d_ice, grid3d_rock
 end
 
 function load_field_from_dataset_2D(ds::NCDataset, varname::Union{AbstractString,Symbol}, grid2d)
@@ -1137,6 +1239,106 @@ function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString;
         end
     end
     return y
+end
+
+# ---------------------------------------------------------------------------
+# From-scratch constructors — build a YelmoModel on a fresh grid with
+# all state fields at their default (zero) allocation, no restart loaded.
+# ---------------------------------------------------------------------------
+
+"""
+    YelmoModel(xc, yc, p::YelmoModelParameters; kwargs...) -> YelmoModel
+
+Construct a `YelmoModel` from scratch on the horizontal grid defined by
+the cell-centre axes `xc`, `yc` (**in metres**), with all component
+groups allocated to their default (zero) state — no restart file is
+read. The vertical axes are derived from the parameters `p`:
+
+  - the ice axis from `p.yelmo.nz_aa` / `p.yelmo.zeta_scale` /
+    `p.yelmo.zeta_exp` (interior `Nz = nz_aa - 2` under the
+    split-boundary convention), and
+  - the rock axis from `p.ytherm.nzr_aa` / `p.ytherm.zeta_scale_rock` /
+    `p.ytherm.zeta_exp_rock`,
+
+both via [`calc_zeta`](@ref).
+
+Callers are expected to populate boundary/topography fields (`bnd.z_bed`,
+`tpo.H_ice`, …) and then call `init_state!` before stepping.
+
+# Keyword arguments
+  - `time` (default `0.0`): initial model time.
+  - `alias` (default `"ymodel1"`), `rundir` (default `"./"`).
+  - `c::YelmoConstants` (default `YelmoConstants()`).
+  - `boundaries` (default `:bounded`): horizontal topology, see
+    [`resolve_boundaries`](@ref).
+"""
+function YelmoModel(xc::AbstractVector, yc::AbstractVector,
+                    p::YelmoModelParameters;
+                    time::Float64 = 0.0,
+                    alias::String = "ymodel1",
+                    rundir::String = "./",
+                    c::YelmoConstants = YelmoConstants(),
+                    boundaries = :bounded)
+
+    # Ice and rock vertical axes recovered from the parameters.
+    zeta_aa_ice, _ = calc_zeta(p.yelmo.nz_aa, p.yelmo.zeta_scale, p.yelmo.zeta_exp)
+    zeta_r_aa,   _ = calc_zeta(p.ytherm.nzr_aa, p.ytherm.zeta_scale_rock,
+                               p.ytherm.zeta_exp_rock)
+
+    g, gt, gr = _define_grids_from_axes(collect(Float64, xc), collect(Float64, yc),
+                                        zeta_aa_ice, zeta_r_aa;
+                                        boundaries = boundaries)
+
+    v_meta = _load_yelmo_variable_meta()
+    bnd, dta, dyn, mat, thrm, tpo = _alloc_yelmo_groups(g, gt, gr, v_meta)
+
+    timer = YelmoTimer(enabled = _resolve_timing_enabled(p))
+
+    y = YelmoModel(alias, rundir, time, p, c, g, gt, gr, v_meta,
+                   bnd, dta, dyn, mat, thrm, tpo, timer, YelmoHooks())
+
+    # Default all cells to dynamic ice, consistent with the restart path
+    # before any mask inference. Callers may override via bnd.mask_ice.
+    fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
+
+    return y
+end
+
+"""
+    YelmoModel(gridfile::AbstractString, p::YelmoModelParameters; kwargs...) -> YelmoModel
+
+Construct a from-scratch `YelmoModel` whose horizontal grid is read from
+the NetCDF `gridfile` (cell-centre axis variables `xname`/`yname`,
+default `"xc"`/`"yc"`). Coordinates carrying a `units` attribute of
+`"km"` are converted to metres, matching `load_grids_from_restart`.
+Only the grid axes are read here — all state fields start at their
+default (zero) allocation. Vertical axes and all other behaviour follow
+the [`YelmoModel(xc, yc, p; …)`](@ref) axis constructor.
+
+This dispatches separately from the restart constructor
+`YelmoModel(restart_file::String, time::Float64; …)`: here the second
+positional argument is the `YelmoModelParameters`, not a time.
+"""
+function YelmoModel(gridfile::AbstractString, p::YelmoModelParameters;
+                    xname::AbstractString = "xc",
+                    yname::AbstractString = "yc",
+                    time::Float64 = 0.0,
+                    alias::String = "ymodel1",
+                    rundir::String = "./",
+                    c::YelmoConstants = YelmoConstants(),
+                    boundaries = :bounded)
+
+    xc, yc = NCDataset(gridfile) do ds
+        x = Vector{Float64}(ds[xname][:])
+        y = Vector{Float64}(ds[yname][:])
+        _units_are_km(get(ds[xname].attrib, "units", "")) && (x .*= 1000.0)
+        _units_are_km(get(ds[yname].attrib, "units", "")) && (y .*= 1000.0)
+        (x, y)
+    end
+
+    return YelmoModel(xc, yc, p;
+                      time = time, alias = alias, rundir = rundir,
+                      c = c, boundaries = boundaries)
 end
 
 # ---------------------------------------------------------------------------

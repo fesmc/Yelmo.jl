@@ -95,7 +95,7 @@ export AbstractYelmoModel, YelmoModel, YelmoHooks
 export init_state!, step!, load_state!
 export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
-export make_field, matches_patterns, yelmo_define_grids
+export make_field, matches_patterns, yelmo_define_grids, calc_zeta
 export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
