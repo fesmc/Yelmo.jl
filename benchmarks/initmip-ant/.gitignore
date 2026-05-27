@@ -1,0 +1,23 @@
+# The repo's root .gitignore ignores Manifest.toml globally (standard
+# Julia package convention). Benchmark projects are end-user projects,
+# not packages — we *want* the Manifest committed for reproducibility.
+!Manifest.toml
+
+# Benchmark configuration is committed (root .gitignore excludes *.nml).
+!yelmo_initmip_ant.nml
+!yelmo_initmip_ant-*.nml
+
+# Runtime outputs (regenerable). The Mirror backend writes to
+# `output-mirror/` so a Yelmo run and a Mirror run can coexist
+# for side-by-side comparison.
+output/
+output-mirror/
+plots/
+logs/
+yelmo_timesteps.nc
+
+# Mirror backend: symlink to Fortran-yelmo's `input/` dir (auxiliary
+# namelists like `yelmo_phys_const.nml` that Fortran opens from the
+# run-time cwd). Created on first Mirror run; not part of the
+# benchmark source.
+input
