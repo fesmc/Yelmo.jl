@@ -1,29 +1,28 @@
-# InitMIP — Greenland & Antarctica
+# `initmip-grl`
 
-Steady-state ice-sheet simulations under present-day boundary conditions
-on real domains, forced by observational data. These are the primary
-tests of Yelmo.jl under realistic conditions: full model physics
-(thermodynamics, DIVA dynamics, calving) on Greenland (`initmip-grl/`)
-and Antarctica (`initmip-ant/`).
+Steady-state Greenland Ice Sheet simulation under present-day boundary
+conditions, forced by observational data. This exercises the full model
+physics (thermodynamics, DIVA dynamics, calving) on a real domain,
+making it the primary test of Yelmo.jl under realistic conditions.
 
-Both follow the Fortran reference program `yelmo/tests/yelmo_initmip.f90`
-and namelist `yelmo/par/yelmo_initmip.nml` (the `set_grl_pd` and
-`set_ant_pd` cases respectively).
+The setup follows the Fortran reference program
+`yelmo/tests/yelmo_initmip.f90` and namelist
+`yelmo/par/yelmo_initmip.nml` (the `set_grl_pd` case).
 
 ## Design: pure-Julia-first
 
 The configuration is a native `YelmoParameters` value built in
-`build_params()` inside each `run.jl` — there is **no namelist input
+`build_params()` at the top of `run.jl` — there is **no namelist input
 file**. The pure-Julia `YelmoModel` is the primary path and is
-initialised directly from those parameters. Initialisation loads the
-state from topography data (no restart file):
+initialised directly from those parameters. State is loaded from
+topography data (no restart file):
 
 ```
 init_topo_load!  →  init_masks!  →  apply_forcing!  →  init_state!(robin-cold)
 ```
 
-`init_masks!` also paints `bnd.mask_ice` from the region mask, which is
-what confines dynamic ice to the domain of interest.
+`init_masks!` also paints `bnd.mask_ice` from the region mask, confining
+dynamic ice to Greenland.
 
 Selecting `backend = :mirror` runs the Fortran model instead. The same
 canonical `YelmoParameters` is translated to a `YelmoMirrorParameters`
@@ -43,7 +42,7 @@ over — the Mirror keeps its Fortran-native values, while shared controls
 ## How to run
 
 ```bash
-cd benchmarks/initmip-grl                            # or initmip-ant
+cd benchmarks/initmip-grl
 julia --project=. -e 'include("run.jl"); main()'                  # yelmo backend (default), 20 yr
 julia --project=. -e 'include("run.jl"); main(t_end=1.0)'         # quick one-step check
 julia --project=. -e 'include("run.jl"); main(backend=:mirror)'   # YelmoMirror (Fortran C-API)
@@ -60,10 +59,9 @@ variables):
 | `snapshot_dt` | `10.0` | 2D snapshot cadence [yr] |
 | `outdir` | `output/` (`output-mirror/` for mirror) | output directory |
 
-`main` calls `cd(@__DIR__)` so data paths resolve relative to the
-benchmark directory regardless of where Julia is launched. To change the
-physics/forcing configuration, edit `build_params()` at the top of
-`run.jl`.
+`main` calls `cd(@__DIR__)` so data paths resolve relative to this
+directory regardless of where Julia is launched. To change the
+physics/forcing configuration, edit `build_params()`.
 
 ### Backend differences
 
@@ -82,10 +80,41 @@ physics/forcing configuration, edit `build_params()` at the top of
 > construction fails at load time. The pure-Julia backend has no such
 > dependency.
 
-## Common physics settings
+## Domain and grid
 
-Shared by both domains unless noted (set in `build_params()`; everything
-else uses Yelmo.jl defaults):
+| Property | Value |
+|----------|-------|
+| Domain / grid | Greenland, GRL-16KM (106 × 181, 16 km) |
+| Projection | polar stereographic (EPSG:3413) |
+| Shelf basal melt | constant −0.5 m/yr |
+
+## Forcing and data sources
+
+| Field | Source | File |
+|-------|--------|------|
+| Grid / region mask | — | `GRL-16KM_REGIONS.nc` |
+| Initial topography | Morlighem et al. 2017 (M17) | `GRL-16KM_TOPO-M17-v5.nc` |
+| Drainage basins | NASA | `GRL-16KM_BASINS-nasa.nc` |
+| SMB + surface temperature | MARv3.11 / ERA 1961–1990 mean (annual) | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
+| Geothermal heat flux | Shapiro & Ritzwoller 2004 (S04) | `GRL-16KM_GHF-S04.nc` |
+
+Forcing conversions in `apply_forcing!` (mirror Fortran
+`yelmo_data.f90`):
+
+- `T_srf`: stored in °C in MAR, converted to K (`+ 273.15`).
+- `smb`: stored in mm w.e./yr in MAR, converted to m i.e./yr
+  (`× 1e-3 · ρ_w/ρ_ice`, Fortran `conv_mmawe_maie`).
+- Ice-free cells receive an additional **−2 m/yr** SMB penalty to
+  suppress spurious growth outside the present-day margin (Fortran
+  `yelmo_initmip.f90:183`).
+
+`GRL-16KM_VEL-J18.nc` is present in `data/` for future use but not
+loaded. `summary.jl` produces an optional `summary.json` of high-level
+statistics from a completed run.
+
+## Physics settings
+
+Set in `build_params()`; everything else uses Yelmo.jl defaults.
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
@@ -98,68 +127,13 @@ else uses Yelmo.jl defaults):
 | Timestep | adaptive PC (`dt_method = 2`) | HEUN (yelmo) / AB-SAM (mirror) |
 | Initialisation | `robin-cold` | from topography, no restart |
 
----
-
-## Greenland (`initmip-grl/`)
-
-| Property | Value |
-|----------|-------|
-| Domain / grid | Greenland, GRL-16KM (106 × 181, 16 km) |
-| Projection | polar stereographic (EPSG:3413) |
-| Shelf basal melt | constant −0.5 m/yr |
-
-| Field | Source | File |
-|-------|--------|------|
-| Grid / region mask | — | `GRL-16KM_REGIONS.nc` |
-| Initial topography | Morlighem et al. 2017 (M17) | `GRL-16KM_TOPO-M17-v5.nc` |
-| Drainage basins | NASA | `GRL-16KM_BASINS-nasa.nc` |
-| SMB + surface temperature | MARv3.11 / ERA 1961–1990 mean (annual) | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
-| Geothermal heat flux | Shapiro & Ritzwoller 2004 (S04) | `GRL-16KM_GHF-S04.nc` |
-
-Forcing conversions (`apply_forcing!`, mirrors Fortran `yelmo_data.f90`):
-
-- `T_srf`: °C → K (`+ 273.15`).
-- `smb`: mm w.e./yr → m i.e./yr (`× 1e-3 · ρ_w/ρ_ice`, Fortran
-  `conv_mmawe_maie`).
-- Ice-free cells get an extra **−2 m/yr** SMB penalty to suppress
-  spurious growth outside the present-day margin (Fortran
-  `yelmo_initmip.f90:183`).
-
-`GRL-16KM_VEL-J18.nc` is present in `data/` for future use but not
-loaded. `summary.jl` produces an optional `summary.json` of high-level
-statistics from a completed run.
-
----
-
-## Antarctica (`initmip-ant/`)
-
-| Property | Value |
-|----------|-------|
-| Domain / grid | Antarctica, ANT-32KM (191 × 191, 32 km) |
-| Projection | polar stereographic (EPSG:3031) |
-| Shelf basal melt | constant −0.2 m/yr |
-
-| Field | Source | File |
-|-------|--------|------|
-| Grid / region mask | — | `ANT-32KM_REGIONS.nc` |
-| Initial topography | BedMachine | `ANT-32KM_TOPO-BedMachine.nc` |
-| Drainage basins | NASA | `ANT-32KM_BASINS-nasa.nc` |
-| SMB + surface temperature | RACMO2.3 / ERA-Interim hybrid 1981–2010 (monthly) | `ANT-32KM_RACMO23-ERAINT-HYBRID_1981-2010.nc` |
-| Geothermal heat flux | Shapiro & Ritzwoller 2004 (S04) | `ANT-32KM_GHF-S04.nc` |
-
-Forcing conversions (`apply_forcing!`):
-
-- RACMO fields are **monthly** (`nx, ny, 12`) — averaged to an annual
-  mean (Fortran `yelmo_data.f90:317`).
-- `smb`: kg m⁻² d⁻¹ (≡ mm w.e./d) → m i.e./yr (`× 1e-3 · 365 · ρ_w/ρ_ice`,
-  Fortran `conv_mmdwe_maie`), then `|smb| < 1e-3 → 0`.
-- `T_srf`: already in Kelvin (no offset).
-- **No** ice-free SMB penalty (unlike Greenland).
-
-A 20-yr run is stable: V_sle holds at ~58 m (the Antarctic sea-level
-equivalent), max H steady at ~4757 m.
-
----
+The DIVA SSA assembly can optionally use the symmetric viscous-energy
+Hessian (`SSASolver(method = :energy_quadratic)`, CG inner solve)
+instead of the default strong-form residual Jacobian; set it in
+`build_params()` via
+`ydyn = ydyn_params(ssa_solver = SSASolver(method = :energy_quadratic))`.
+Equivalence is unit-tested on the SLAB-S06 fixture in
+[`test/test_yelmo_ssa_energy.jl`](../../test/test_yelmo_ssa_energy.jl).
 
 ## Outputs
 
@@ -186,28 +160,17 @@ and `yelmo.timing = true` triggers a `print_timings` table at the end
 - The Fortran reference runs two brief equilibration passes before its
   main loop; these are not replicated here — the run starts directly
   from the robin-cold state.
-- Shelf basal melt is a conservative constant on both domains (Fortran
-  defaults are −1.0 m/yr for Greenland, −0.2 m/yr for Antarctica).
-- The DIVA SSA assembly can optionally use the symmetric viscous-energy
-  Hessian (`SSASolver(method = :energy_quadratic)`, CG inner solve)
-  instead of the default strong-form residual Jacobian; set it in
-  `build_params()` via `ydyn = ydyn_params(ssa_solver = SSASolver(method = :energy_quadratic))`.
-  Equivalence is unit-tested on the SLAB-S06 fixture in
-  [`test/test_yelmo_ssa_energy.jl`](../../test/test_yelmo_ssa_energy.jl).
+- `bmb_shlf = −0.5 m/yr` (constant). The Fortran default is −1.0 m/yr;
+  the value here is intentionally more conservative for a test run.
 
 ## References
 
-- Morlighem, M. et al. (2017). BedMachine v3 (Greenland). *GRL*, 44(21),
-  11051–11061.
-- Morlighem, M. et al. (2020). Deep glacial troughs and stabilizing
-  ridges unveiled beneath Antarctica (BedMachine Antarctica). *Nature
-  Geoscience*, 13, 132–137.
+- Morlighem, M. et al. (2017). BedMachine v3: Complete bed topography and
+  ocean bathymetry mapping of Greenland. *GRL*, 44(21), 11051–11061.
 - Shapiro, N. M., & Ritzwoller, M. H. (2004). Inferring surface heat flux
   distributions guided by a global seismic model. *EPSL*, 223(1–2),
   213–224.
 - Fettweis, X. et al. (2017). MAR Greenland SMB reconstructions. *The
   Cryosphere*, 11(2), 1015–1033.
-- van Wessem, J. M. et al. (2018). RACMO2.3p2 polar climate. *The
-  Cryosphere*, 12, 1479–1498.
 - Fortran reference: `yelmo/tests/yelmo_initmip.f90`,
   `yelmo/par/yelmo_initmip.nml`.
