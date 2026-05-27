@@ -359,10 +359,16 @@ function define_mask_ice!(y::YelmoModel)
     # Initially mark all points as dynamic (ice is solved).
     fill!(mask_ice, dynamic)
 
+    # Region-code comparisons below cast to Float32 to match Fortran's
+    # `wp = sp` semantics: region codes like 1.3 / 1.11 are not exactly
+    # representable, so a Float64 `== 1.3` would fail against the Float32
+    # value loaded from NetCDF (1.2999999523…). Fortran compares in
+    # single precision, where both sides round to the same bits.
+
     if domain == "North"
         # Allow ice everywhere except the open ocean.
         @inbounds for j in 1:ny, i in 1:nx
-            regions[i, j] == 1.0 && (mask_ice[i, j] = none)
+            Float32(regions[i, j]) == 1.0f0 && (mask_ice[i, j] = none)
         end
         mask_ice[1, :]  .= none
         mask_ice[nx, :] .= none
@@ -372,7 +378,8 @@ function define_mask_ice!(y::YelmoModel)
     elseif domain == "Eurasia"
         # Allow ice only in the Eurasia domain (1.2*).
         @inbounds for j in 1:ny, i in 1:nx
-            (regions[i, j] < 1.2 || regions[i, j] > 1.29) && (mask_ice[i, j] = none)
+            r = Float32(regions[i, j])
+            (r < 1.2f0 || r > 1.29f0) && (mask_ice[i, j] = none)
         end
         mask_ice[1, :]  .= none
         mask_ice[nx, :] .= none
@@ -382,8 +389,8 @@ function define_mask_ice!(y::YelmoModel)
     elseif domain == "Greenland"
         fill!(mask_ice, none)
         @inbounds for j in 1:ny, i in 1:nx
-            r = regions[i, j]
-            if r == 1.3 || r == 1.11 || r == 1.0
+            r = Float32(regions[i, j])
+            if r == 1.3f0 || r == 1.11f0 || r == 1.0f0
                 # Main Greenland (1.3), Ellesmere Island (1.11),
                 # open-ocean connections (1.0).
                 mask_ice[i, j] = dynamic
@@ -392,7 +399,7 @@ function define_mask_ice!(y::YelmoModel)
 
     elseif domain == "Antarctica"
         @inbounds for j in 1:ny, i in 1:nx
-            regions[i, j] == 2.0 && (mask_ice[i, j] = none)
+            Float32(regions[i, j]) == 2.0f0 && (mask_ice[i, j] = none)
         end
         mask_ice[1, :]  .= none
         mask_ice[nx, :] .= none
