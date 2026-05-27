@@ -22,6 +22,7 @@ when you need to refresh after a physics change.
 | [Slab advection stability](slab-advection.md) | Advection kernel only | Unconditional stability of implicit scheme | `test_slab_advection.jl` |
 | [Adaptive predictor-corrector](adaptive-dt.md) | Adaptive timestepping (HEUN, FE-SBE, AB-SAM) | Snapshot/restore round-trip + MISMIP3D comparison | `test_adaptive_dt.jl` |
 | [initMIP Greenland](initmip-grl.md) | Full chain (DIVA + temp + calving) on real GRL-16KM forcing | Side-by-side `YelmoModel` vs `YelmoMirror` (no CI fixture) | `benchmarks/initmip-grl/run.jl` |
+| [initMIP Antarctica](initmip-ant.md) | Full chain on real ANT-32KM forcing (BedMachine + RACMO) | Side-by-side `YelmoModel` vs `YelmoMirror` (no CI fixture) | `benchmarks/initmip-ant/run.jl` |
 
 ## How to run
 
@@ -43,15 +44,17 @@ julia --project=test test/benchmarks/test_slab_advection.jl
 julia --project=test test/benchmarks/test_adaptive_dt.jl
 ```
 
-The initMIP Greenland real-domain benchmark uses its own project
-under `benchmarks/initmip-grl/` (separate from the `test/` CI tree)
-and supports both backends:
+The initMIP real-domain benchmarks (Greenland, Antarctica) each use
+their own project under `benchmarks/initmip-grl/` and
+`benchmarks/initmip-ant/` (separate from the `test/` CI tree). The
+configuration is a native `YelmoParameters` built in `run.jl`
+(`build_params`); both backends are driven from the same parameters via
+the keyword `main` entry point:
 
 ```bash
-cd benchmarks/initmip-grl
-julia --project=. run.jl                            # YelmoModel
-INITMIP_BACKEND=mirror julia --project=. run.jl     # YelmoMirror
-julia --project=. summary.jl                        # post-processing
+cd benchmarks/initmip-grl                                          # or initmip-ant
+julia --project=. -e 'include("run.jl"); main()'                   # YelmoModel
+julia --project=. -e 'include("run.jl"); main(backend=:mirror)'    # YelmoMirror
 ```
 
 The EISMINT-1 lockstep test, trough, and CalvingMIP regression tests require

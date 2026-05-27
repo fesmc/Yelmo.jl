@@ -60,6 +60,7 @@ makedocs(
             "Slab advection stability"        => "benchmarks/slab-advection.md",
             "Adaptive predictor-corrector"    => "benchmarks/adaptive-dt.md",
             "initMIP Greenland"               => "benchmarks/initmip-grl.md",
+            "initMIP Antarctica"              => "benchmarks/initmip-ant.md",
         ],
         "API reference" => [
             "Core model"      => "api/core.md",
