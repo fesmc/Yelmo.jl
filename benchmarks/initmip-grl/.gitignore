@@ -3,9 +3,9 @@
 # not packages — we *want* the Manifest committed for reproducibility.
 !Manifest.toml
 
-# Benchmark configuration is committed (root .gitignore excludes *.nml).
-!yelmo_initmip_grl.nml
-!yelmo_initmip_grl-*.nml
+# Configuration is now a native YelmoParameters in run.jl (build_params);
+# the root .gitignore excludes *.nml, so the namelist generated for the
+# Mirror backend (written under output*/) is ignored automatically.
 
 # Runtime outputs (regenerable). The Mirror backend writes to
 # `output-mirror/` so a Yelmo run and a Mirror run can coexist
@@ -14,6 +14,7 @@ output/
 output-mirror/
 plots/
 logs/
+yelmo_timesteps.nc
 
 # Mirror backend: symlink to Fortran-yelmo's `input/` dir (auxiliary
 # namelists like `yelmo_phys_const.nml` that Fortran opens from the
