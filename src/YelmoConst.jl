@@ -39,7 +39,7 @@ export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
 # ---------------------------------------------------------------------------
 
 const MASK_ICE_NONE    = 0  # H_ice forced to 0
-const MASK_ICE_FIXED   = 1  # H_ice held at its current value
+const MASK_ICE_FIXED   = 1  # H_ice prescribed (held at bnd.H_ice_ref)
 const MASK_ICE_DYNAMIC = 2  # H_ice evolves freely
 
 # ---------------------------------------------------------------------------

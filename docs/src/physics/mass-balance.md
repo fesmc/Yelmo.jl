@@ -200,9 +200,10 @@ prescribed timescale. Described on the
 
 Phase 17. The final pass before diagnostics: removes ice in cells
 where the dynamic + source updates produced an unphysical
-configuration. Four sub-passes:
+configuration, and enforces the per-cell `bnd.mask_ice` boundary
+mask. Sub-passes:
 
-1. **Disallowed cells**: `H = 0` where `bnd.ice_allowed == 0`.
+1. **Forced-zero cells**: `H = 0` where `bnd.mask_ice == MASK_ICE_NONE`.
 2. **Margin too thin**: at margins, zero cells with effective
    thickness below `ytopo.H_min_flt` (floating) or
    `ytopo.H_min_grnd` (grounded). Sub-tolerance ice
@@ -212,14 +213,18 @@ configuration. Four sub-passes:
 4. **Margin cap**: margin cells thicker than the max of their
    ice-covered neighbours are clamped down to that max. Prevents
    margin runaway under explicit upwind.
+5. **Prescribed cells**: `H = bnd.H_ice_ref` where
+   `bnd.mask_ice == MASK_ICE_FIXED`, imposing the reference thickness.
 
 The realised cleanup is converted to a tendency
 
 ```math
-\mathit{mb}_\mathrm{resid} = 1.1 \cdot \frac{H_\mathrm{new} - H_\mathrm{old}}{\Delta t}
+\mathit{mb}_\mathrm{resid} = c \cdot \frac{H_\mathrm{new} - H_\mathrm{old}}{\Delta t}
 ```
 
-with the `1.1` factor providing a small overshoot so that
+where `c = 1` for `MASK_ICE_FIXED` cells (so `apply_tendency!` lands
+exactly on `H_ice_ref` with no drift) and `c = 1.1` everywhere else.
+The `1.1` factor provides a small overshoot so that
 [`apply_tendency!`](@ref)'s non-negativity clamp lands on exactly
 `H_new`. (The downstream `apply_tendency!` clamps the realised delta
 back to `H_new`, so the tendency overshoot is purely arithmetic

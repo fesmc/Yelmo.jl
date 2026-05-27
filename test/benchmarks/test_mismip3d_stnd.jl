@@ -68,8 +68,8 @@ import Pkg; Pkg.activate("..")
 #   - IC (analytical, from MISMIP3DBenchmark(:Stnd)):
 #       z_bed = -100 - x_km, H_ice = 10 m where z_bed >= -500 m.
 #       smb_ref = 0.5 m/yr, T_srf = 273.15 K, Q_geo = 42 mW/m^2.
-#       ice_allowed[Nx, :] = 0 (kill column at calving boundary, an
-#       approximation of Fortran calv_mask kill-pos).
+#       mask_ice[Nx, :] = MASK_ICE_NONE (kill column at calving boundary,
+#       an approximation of Fortran calv_mask kill-pos).
 #   - Time loop: forward Euler dt=1.0 yr, n_steps=500.
 #   - Solver: SSA, beta_method=4 (Regularized Coulomb q-exponent),
 #     beta_q=1/3, beta_u0=1.0, beta_gl_stag=3, ssa_lat_bc="floating",
@@ -176,7 +176,7 @@ end
     @test size(interior(y.dyn.ux_bar))  == (Nx + 1, Ny, 1)   # XFaceField, Bounded-x
     @test size(interior(y.dyn.uy_bar))  == (Nx, Ny, 1)       # YFaceField, Periodic-y
     @test interior(y.bnd.smb_ref)[1, 1, 1] ≈ 0.5
-    @test interior(y.bnd.ice_allowed)[Nx, 1, 1] ≈ 0.0
+    @test interior(y.bnd.mask_ice)[Nx, 1, 1] ≈ Float64(MASK_ICE_NONE)
 
     # Pre-fill ATT (constant rate factor for rf_method=0) and cb_ref
     # (constant friction coefficient under till_method=-1).

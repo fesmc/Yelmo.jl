@@ -21,8 +21,8 @@
 #   - T_srf   = 273.15 K
 #   - Q_geo   = 42 mW/m²
 #   - calv_mask(nx, :) = .TRUE. (only the eastern column allows calving).
-#     Yelmo.jl approximation: `bnd.ice_allowed[Nx, :] = 0` so the residual
-#     cleanup keeps ice from accumulating in the calving column.
+#     Yelmo.jl approximation: `bnd.mask_ice[Nx, :] = MASK_ICE_NONE` so the
+#     residual cleanup keeps ice from accumulating in the calving column.
 #
 # Validation strategy:
 #
@@ -173,14 +173,14 @@ Analytical (`t = 0`) returned NamedTuple keys:
   - `z_bed`        — `-100 - x_km` (m, y-invariant).
   - `z_sl`         — 0 m (sea level).
   - `smb_ref`      — 0.5 m/yr (constant; eastern column kept ice-free via
-                     `ice_allowed`).
+                     `mask_ice`).
   - `T_srf`        — 273.15 K (constant).
   - `Q_geo`        — 42 mW/m² (constant).
   - `bmb_shlf`     — 0 m/yr.
   - `T_shlf`       — 273.15 K.
   - `H_sed`        — 0 m.
-  - `ice_allowed`  — 1 everywhere except `[Nx, :] = 0` (kill column at
-                     calving boundary).
+  - `mask_ice`     — MASK_ICE_DYNAMIC everywhere except `[Nx, :] =
+                     MASK_ICE_NONE` (kill column at calving boundary).
 
 Fixture-loaded (`t > 0`) returned keys: `xc`, `yc`, plus whichever
 schema-Center fields the fixture carries (`H_ice`, `z_bed`, `f_grnd`,
@@ -227,9 +227,10 @@ function _mismip3d_analytical_state(b::MISMIP3DBenchmark)
     # H_ice = H0 where z_bed ≥ z_bed_floor, else 0.
     H_ice = [z_bed[i, j] >= b.z_bed_floor ? b.H0 : 0.0 for i in 1:Nx, j in 1:Ny]
 
-    # ice_allowed: 1 everywhere except the eastern (calving) column.
-    ice_allowed = ones(Float64, Nx, Ny)
-    ice_allowed[Nx, :] .= 0.0
+    # mask_ice: dynamic everywhere except the eastern (calving) column,
+    # which is forced to zero ice (MASK_ICE_NONE).
+    mask_ice = fill(Float64(MASK_ICE_DYNAMIC), Nx, Ny)
+    mask_ice[Nx, :] .= Float64(MASK_ICE_NONE)
 
     smb_ref  = fill(b.smb_const,   Nx, Ny)
     T_srf    = fill(b.T_srf_const, Nx, Ny)
@@ -243,7 +244,7 @@ function _mismip3d_analytical_state(b::MISMIP3DBenchmark)
             H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb_ref, T_srf = T_srf, Q_geo = Q_geo,
             bmb_shlf = bmb_shlf, T_shlf = T_shlf, H_sed = H_sed,
-            ice_allowed = ice_allowed)
+            mask_ice = mask_ice)
 end
 
 # Spec name used by `regenerate.jl` and the fixture filename.
@@ -391,11 +392,12 @@ function write_fixture!(b::MISMIP3DBenchmark, path::AbstractString;
         Hsv.attrib["units"]     = "m"
         Hsv.attrib["long_name"] = "Sediment thickness (zero)"
 
-        iav = defVar(ds, "ice_allowed", Float64, ("xc", "yc"))
-        iav[:, :] = s.ice_allowed
+        iav = defVar(ds, "mask_ice", Float64, ("xc", "yc"))
+        iav[:, :] = s.mask_ice
         iav.attrib["units"]     = "1"
-        iav.attrib["long_name"] = "Ice-allowed mask (eastern col = 0, " *
-                                  "approximating Fortran calv_mask kill-pos)"
+        iav.attrib["long_name"] = "Ice mask (0=none, 1=fixed, 2=dynamic); " *
+                                  "eastern col = none, approximating " *
+                                  "Fortran calv_mask kill-pos"
 
         ds.attrib["benchmark"]      = "MISMIP3D-$(string(b.variant))"
         ds.attrib["solution_type"]  = "analytical-IC"

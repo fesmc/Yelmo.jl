@@ -150,8 +150,9 @@ end
     # stages didn't exist; the test was written against that.)
     fill!(interior(y.bnd.smb_ref), 0.0)
 
-    H_ice    = interior(y.tpo.H_ice)
-    mask_ice = interior(y.bnd.mask_ice)
+    H_ice     = interior(y.tpo.H_ice)
+    mask_ice  = interior(y.bnd.mask_ice)
+    H_ice_ref = interior(y.bnd.H_ice_ref)
     Nx, Ny   = size(H_ice, 1), size(H_ice, 2)
 
     # Set up a known checkerboard region with all three mask values
@@ -161,9 +162,10 @@ end
     # cleanup don't perturb the test cells. We:
     #   - set the surrounding 5x5 patch to a thick uniform 100 m of
     #     ice so the inner 3x3 test cells are not at a margin;
-    #   - flip `ice_allowed = 1` over the patch so `resid_tendency!`
-    #     does not zero the patch via the boundary-mask rule
-    #     (the chosen patch sits over open ocean in the restart);
+    #   - set `mask_ice = MASK_ICE_DYNAMIC` over the patch so
+    #     `resid_tendency!` does not zero it via the boundary-mask rule
+    #     (the chosen patch sits over open ocean in the restart, where
+    #     the restart may carry a non-dynamic mask);
     #   - lift `z_bed` above sea level over the patch so the cells
     #     are unambiguously grounded (`f_grnd = 1`); the default
     #     `H_min_grnd = 0` margin-thinning rule is a no-op anyway.
@@ -171,7 +173,7 @@ end
     patch_j = 9:13
     for j in patch_j, i in patch_i
         H_ice[i, j, 1] = 100.0
-        interior(y.bnd.ice_allowed)[i, j, 1] = 1.0
+        mask_ice[i, j, 1] = Float64(MASK_ICE_DYNAMIC)
         interior(y.bnd.z_bed)[i, j, 1] = 100.0
         interior(y.bnd.z_sl)[i, j, 1]  = 0.0
     end
@@ -182,8 +184,11 @@ end
     pre_value = 100.0
     for (idx, (i, j)) in enumerate(test_cells)
         mask_val = (idx - 1) % 3  # cycle through 0, 1, 2
-        H_ice[i, j, 1]    = pre_value
-        mask_ice[i, j, 1] = Float64(mask_val)
+        H_ice[i, j, 1]     = pre_value
+        mask_ice[i, j, 1]  = Float64(mask_val)
+        # MASK_ICE_FIXED cells are imposed at H_ice_ref; set it to
+        # pre_value so the fixed cells hold their thickness.
+        H_ice_ref[i, j, 1] = pre_value
         expected_H = mask_val == MASK_ICE_NONE  ? 0.0       :
                      mask_val == MASK_ICE_FIXED ? pre_value :
                                                   pre_value  # dynamic — H stays roughly,
@@ -195,10 +200,10 @@ end
     step!(y, 1.0)
 
     # Cells with MASK_ICE_NONE must be exactly zero.
-    # Cells with MASK_ICE_FIXED must equal pre_value (mask pass restores
-    #   H_prev, SMB=0 means `apply_tendency!` is a no-op for SMB; the
-    #   cell is interior to the ice sheet so `resid_tendency!` does not
-    #   trim it).
+    # Cells with MASK_ICE_FIXED must equal pre_value (mask pass + the
+    #   resid step impose H_ice_ref, which we set to pre_value; SMB=0
+    #   means `apply_tendency!` is a no-op for SMB; the cell is interior
+    #   to the ice sheet so `resid_tendency!` does not trim it).
     # Cells with MASK_ICE_DYNAMIC must be ≥ 0 and finite.
     for ((i, j), (mask_val, expected_H)) in expected
         if mask_val == MASK_ICE_NONE
@@ -431,7 +436,6 @@ end
 
     # Ensure all cells are dynamic and ice is allowed everywhere.
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
-    fill!(interior(y.bnd.ice_allowed), 1.0)
 
     # Lift the bed well above sea level so f_grnd = 1 everywhere
     # (avoids any grounded/floating ambiguity for `mbal_tendency!`).
@@ -520,7 +524,6 @@ end
     fill!(interior(y.dyn.uy_bar), 0.0)
 
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
-    fill!(interior(y.bnd.ice_allowed), 1.0)
 
     # Bed well above sea level → grounded everywhere so the `pmp`
     # default reduces to `bmb = bmb_grnd` (f_grnd = 1).
@@ -919,7 +922,6 @@ end
     fill!(interior(y.dyn.ux_bar), 0.0)
     fill!(interior(y.dyn.uy_bar), 0.0)
     fill!(interior(y.bnd.mask_ice),   Float64(MASK_ICE_DYNAMIC))
-    fill!(interior(y.bnd.ice_allowed), 1.0)
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
     fill!(interior(y.bnd.smb_ref),   0.0)

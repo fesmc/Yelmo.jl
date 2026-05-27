@@ -184,7 +184,7 @@ export define_temp_bedrock_column!, define_temp_bedrock_3D!
 export define_temp_bedrock_active_3D!, calc_Q_bedrock_column
 
 # YelmoModelData
-export init_topo_load!, init_masks!, data_load!, data_compare!
+export init_topo_load!, init_masks!, define_mask_ice!, data_load!, data_compare!
 
 # YelmoIO
 export init_output

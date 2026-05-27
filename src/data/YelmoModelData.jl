@@ -49,11 +49,12 @@ using Oceananigans.Fields: Field, CenterField, interior
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel, RMSEStats,
                    MASK_BED_OCEAN, MASK_BED_LAND,
-                   MASK_BED_FLOAT, MASK_BED_FROZEN
+                   MASK_BED_FLOAT, MASK_BED_FROZEN,
+                   MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 using ..YelmoUtils: remove_englacial_lakes!, adjust_topography_gradients!,
                     smooth_gauss_2D!
 
-export init_topo_load!, init_masks!, data_load!, data_compare!
+export init_topo_load!, init_masks!, define_mask_ice!, data_load!, data_compare!
 # Note: `RMSEStats` is defined and exported in `YelmoCore` so the type
 # is in scope inside `_alloc_yelmo_groups` without forward references.
 # We re-import it here for `data_compare!`.
@@ -319,6 +320,105 @@ function init_masks!(y::YelmoModel)
     @info "init_masks!: range(basins)  = " minimum(basins)  maximum(basins)
     @info "init_masks!: range(regions) = " minimum(regions) maximum(regions)
 
+    # Paint the per-cell ice domain mask from the domain definition +
+    # regions, now that `regions` is populated. Restart / benchmark ICs
+    # may override `bnd.mask_ice` afterward.
+    define_mask_ice!(y)
+
+    return y
+end
+
+"""
+    define_mask_ice!(y::YelmoModel) -> y
+
+Set `y.bnd.mask_ice` according to the domain definition, marking each
+cell as dynamic (`MASK_ICE_DYNAMIC`), prescribed (`MASK_ICE_FIXED`), or
+forced to zero (`MASK_ICE_NONE`). Faithful port of
+`ybound_define_mask_ice` in `yelmo/src/yelmo_boundaries.f90:195`.
+
+Defaults to all-dynamic, then applies domain-specific patterns keyed
+off `bnd.regions` and the grid edges. Regional domains (e.g. Greenland,
+Eurasia) use this to force zero ice outside the region of interest and
+to fix the domain borders, which is what enables them to run without
+spurious ice growth at the edges. Unknown domains fall through to the
+DEFAULT case: dynamic interior, prescribed (`MASK_ICE_FIXED`) borders.
+
+Note: unlike the Fortran routine this does not touch `bnd.calv_mask`
+(initialised separately in Yelmo.jl).
+"""
+function define_mask_ice!(y::YelmoModel)
+    domain   = strip(y.p.yelmo.domain)
+    mask_ice = @view interior(y.bnd.mask_ice)[:, :, 1]
+    regions  = @view interior(y.bnd.regions)[:, :, 1]
+    nx, ny   = size(mask_ice)
+
+    none    = Float64(MASK_ICE_NONE)
+    fixed   = Float64(MASK_ICE_FIXED)
+    dynamic = Float64(MASK_ICE_DYNAMIC)
+
+    # Initially mark all points as dynamic (ice is solved).
+    fill!(mask_ice, dynamic)
+
+    if domain == "North"
+        # Allow ice everywhere except the open ocean.
+        @inbounds for j in 1:ny, i in 1:nx
+            regions[i, j] == 1.0 && (mask_ice[i, j] = none)
+        end
+        mask_ice[1, :]  .= none
+        mask_ice[nx, :] .= none
+        mask_ice[:, 1]  .= none
+        mask_ice[:, ny] .= none
+
+    elseif domain == "Eurasia"
+        # Allow ice only in the Eurasia domain (1.2*).
+        @inbounds for j in 1:ny, i in 1:nx
+            (regions[i, j] < 1.2 || regions[i, j] > 1.29) && (mask_ice[i, j] = none)
+        end
+        mask_ice[1, :]  .= none
+        mask_ice[nx, :] .= none
+        mask_ice[:, 1]  .= none
+        mask_ice[:, ny] .= none
+
+    elseif domain == "Greenland"
+        fill!(mask_ice, none)
+        @inbounds for j in 1:ny, i in 1:nx
+            r = regions[i, j]
+            if r == 1.3 || r == 1.11 || r == 1.0
+                # Main Greenland (1.3), Ellesmere Island (1.11),
+                # open-ocean connections (1.0).
+                mask_ice[i, j] = dynamic
+            end
+        end
+
+    elseif domain == "Antarctica"
+        @inbounds for j in 1:ny, i in 1:nx
+            regions[i, j] == 2.0 && (mask_ice[i, j] = none)
+        end
+        mask_ice[1, :]  .= none
+        mask_ice[nx, :] .= none
+        mask_ice[:, 1]  .= none
+        mask_ice[:, ny] .= none
+
+    elseif domain == "EISMINT"
+        # Ice can grow everywhere, except borders.
+        mask_ice[1, :]  .= none
+        mask_ice[nx, :] .= none
+        mask_ice[:, 1]  .= none
+        mask_ice[:, ny] .= none
+
+    elseif domain in ("MISMIP", "MISMIP+", "TROUGH", "TROUGH-F17")
+        # Ice can grow everywhere, except the farthest x-border.
+        mask_ice[nx, :] .= none
+
+    else
+        # Unknown domain: dynamic interior, prescribed borders
+        # (mask_ice can always be modified later).
+        mask_ice[1, :]  .= fixed
+        mask_ice[nx, :] .= fixed
+        mask_ice[:, 1]  .= fixed
+        mask_ice[:, ny] .= fixed
+    end
+
     return y
 end
 
@@ -351,7 +451,7 @@ Per-section behaviour:
       * `remove_englacial_lakes!` against `z_sl = 0`,
       * clamp `H_ice < 1.0 m` → 0,
       * `adjust_topography_gradients!`,
-      * delete ice from `~bnd.ice_allowed` cells (set
+      * delete ice from `bnd.mask_ice == MASK_ICE_NONE` cells (set
         `z_srf = max(z_bed, 0)` there),
       * recompute `pd_H_grnd = H_ice − (ρ_sw/ρ_ice) max(0 − z_bed, 0)`,
       * derive `pd_mask_bed`.
@@ -448,10 +548,11 @@ function data_load!(y::YelmoModel;
 
         adjust_topography_gradients!(z_bed, H_ice, grad_lim_zb, dx, boundaries)
 
-        # Mask out ice in disallowed cells: read bnd.ice_allowed.
-        ice_allowed = @view interior(y.bnd.ice_allowed)[:, :, 1]
+        # Delete ice from cells where the boundary mask forbids it
+        # (MASK_ICE_NONE). Mirrors Fortran yelmo_data.f90:262.
+        mask_ice = @view interior(y.bnd.mask_ice)[:, :, 1]
         @inbounds for j in 1:ny, i in 1:nx
-            if ice_allowed[i, j] == 0.0
+            if mask_ice[i, j] == Float64(MASK_ICE_NONE)
                 H_ice[i, j] = 0.0
                 z_srf[i, j] = max(z_bed[i, j], 0.0)
             end

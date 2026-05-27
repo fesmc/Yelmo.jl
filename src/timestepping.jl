@@ -714,10 +714,9 @@ function _pc_step_legacy!(::HEUN, y, dt::Float64, scratch::PCScratch)
     # H_corr = (H_n + H_**)/2 can violate mask invariants: if a
     # MASK_ICE_NONE cell had H_n > 0 before the step, the average gives
     # H_corr > 0 even though H_** = 0 (both FE stages apply the mask).
-    # Using snap.H_ice (= H_n) as the MASK_ICE_FIXED reference restores
-    # the start-of-step thickness for fixed cells, matching Fortran's
-    # mask-pass-at-end-of-PC-corrector convention.
-    apply_mask_ice_pass!(y, snap.H_ice)
+    # MASK_ICE_FIXED cells are restored to bnd.H_ice_ref, matching
+    # Fortran's mask-pass-at-end-of-PC-corrector convention.
+    apply_mask_ice_pass!(y)
 
     y.time = snap.time + dt
     Yelmo.update_diagnostics!(y)
@@ -860,7 +859,7 @@ function _pc_step_legacy!(::AB_SAM, y, dt::Float64, scratch::PCScratch)
         scratch.H_corr[i] = 0.5 * (snap.H_ice[i] + H_now[i])
     end
     copyto!(H_now, scratch.H_corr)
-    apply_mask_ice_pass!(y, snap.H_ice)
+    apply_mask_ice_pass!(y)
     y.time = snap.time + dt
     Yelmo.update_diagnostics!(y)
 

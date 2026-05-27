@@ -17,7 +17,6 @@
 | 13 | basin_mask        | xc, yc      | -           | Mask for basins                                        |
 | 14 | regions           | xc, yc      | -           | Region identification numbers                          |
 | 15 | region_mask       | xc, yc      | -           | Mask for regions                                       |
-| 16 | ice_allowed       | xc, yc      | -           | Locations where ice thickness can be greater than zero |
 | 17 | calv_mask         | xc, yc      | -           | Locations where calving is not allowed                 |
 | 18 | H_ice_ref         | xc, yc      | m           | Reference ice thickness for relaxation routines        |
 | 19 | z_bed_ref         | xc, yc      | m           | Reference bedrock elevation for relaxation routines    |
