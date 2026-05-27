@@ -57,6 +57,12 @@ using .YelmoModelData
 using .YelmoRegions
 using .YelmoIO
 
+# Re-export Oceananigans' `interior` so downstream scripts can slice
+# Yelmo `Field`s (e.g. `interior(y.bnd.smb_ref)[:, :, 1]`) with only
+# `using Yelmo` — no direct Oceananigans dependency needed.
+using Oceananigans: interior
+export interior
+
 # Re-export the public API at the package level
 
 # YelmoMeta
@@ -70,6 +76,7 @@ export YelmoConstants, yelmo_constants, earth_constants,
 # YelmoMirrorPar (mirror-specific params; constructors/read_nml stay namespaced
 # under `YelmoMirrorPar.*`, generics are shared with YelmoPar below)
 export YelmoMirrorParameters
+export to_mirror, MIRROR_DIVERGENT_YELMO
 
 # YelmoUtils
 export solve_tridiag!

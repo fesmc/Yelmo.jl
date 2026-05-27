@@ -26,8 +26,10 @@ using Printf
 # write_nml/compare are owned by the primary `YelmoPar` module; extend them here
 # with methods for `YelmoMirrorParameters`.
 import ..YelmoPar: write_nml, compare
+import ..YelmoPar
 
 export YelmoMirrorParameters
+export to_mirror, MIRROR_DIVERGENT_YELMO
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -399,6 +401,96 @@ function YelmoMirrorParameters(filename, name)
     return YelmoMirrorParameters(
         name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
         p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
+    )
+end
+
+# ---------------------------------------------------------------------------
+# Translation from the pure-Julia YelmoParameters
+# ---------------------------------------------------------------------------
+
+"""
+    MIRROR_DIVERGENT_YELMO
+
+`&yelmo` parameters whose meaning or valid options differ between the
+pure-Julia `YelmoModel` timestepping and the Fortran (Mirror)
+timestepping. `to_mirror` never copies these from a `YelmoParameters`
+into the generated Mirror configuration — the Mirror keeps its own
+Fortran-native values (e.g. `pc_method = "AB-SAM"`, since Julia's
+"HEUN" ≠ Fortran's "HEUN" despite the shared name). The shared adaptive
+controls (`dt_method`, `dt_min`, `cfl_max`, `cfl_diff_max`) are NOT in
+this set — they have identical meaning on both backends and are copied.
+
+Setting any parameter listed here to a non-default value on the Julia
+side and then requesting a Mirror translation is an error: the intent
+cannot be honored on the Mirror backend, so it must be configured
+explicitly on the Mirror side instead.
+"""
+const MIRROR_DIVERGENT_YELMO = (
+    :pc_method, :pc_controller, :pc_use_H_pred, :pc_filter_vel,
+    :pc_corr_vel, :pc_n_redo, :pc_tol, :pc_eps,
+)
+
+# Build a Mirror parameter-group struct (type `typeof(mirror_default)`)
+# by copying each field that also exists on the Julia `julia_group` and
+# is not flagged divergent. Fields absent on the Julia side (e.g.
+# Julia-only `pc_advective`, `pc_eta_masked`, `timing`) or flagged
+# divergent keep the Mirror default.
+function _translate_group(mirror_default, julia_group, divergent::Tuple)
+    kw = Dict{Symbol,Any}()
+    for f in fieldnames(typeof(mirror_default))
+        f in divergent && continue
+        if hasfield(typeof(julia_group), f)
+            kw[f] = getfield(julia_group, f)
+        end
+    end
+    return typeof(mirror_default)(; kw...)
+end
+
+"""
+    to_mirror(p::YelmoParameters) -> YelmoMirrorParameters
+
+Translate a pure-Julia `YelmoParameters` (the canonical configuration
+for a `YelmoModel`) into a `YelmoMirrorParameters` for the Fortran
+backend. Shared parameters are copied group-by-group; backend-divergent
+timestepping options (`MIRROR_DIVERGENT_YELMO`) are left at the Mirror's
+Fortran-native values, and the `&phys` group is derived from
+`phys_const` (`"Earth"` → `earth_params()`).
+
+Errors if any divergent parameter was changed away from its
+`YelmoParameters` default, since that intent cannot be carried to the
+Mirror backend — configure it on the Mirror side explicitly instead.
+"""
+function to_mirror(p::YelmoPar.YelmoParameters)
+    jdef = YelmoPar.YelmoParameters("")   # all-default reference
+    violations = Symbol[]
+    for f in MIRROR_DIVERGENT_YELMO
+        if getfield(p.yelmo, f) != getfield(jdef.yelmo, f)
+            push!(violations, f)
+        end
+    end
+    isempty(violations) || error(
+        "to_mirror: these &yelmo parameters are backend-divergent " *
+        "(pure-Julia vs Fortran timestepping) and cannot be translated " *
+        "to the Mirror backend: $(join(violations, ", ")). Leave them at " *
+        "their YelmoParameters defaults — the Mirror uses its own " *
+        "Fortran-native values. See `MIRROR_DIVERGENT_YELMO`.")
+
+    phys = strip(p.yelmo.phys_const) == "Earth" ? earth_params() : phys_params()
+
+    return YelmoMirrorParameters(
+        p.name,
+        _translate_group(yelmo_params(),           p.yelmo,           MIRROR_DIVERGENT_YELMO),
+        _translate_group(ytopo_params(),           p.ytopo,           ()),
+        _translate_group(ycalv_params(),           p.ycalv,           ()),
+        _translate_group(ydyn_params(),            p.ydyn,            ()),
+        _translate_group(ytill_params(),           p.ytill,           ()),
+        _translate_group(yneff_params(),           p.yneff,           ()),
+        _translate_group(ymat_params(),            p.ymat,            ()),
+        _translate_group(ytherm_params(),          p.ytherm,          ()),
+        _translate_group(yelmo_masks_params(),     p.yelmo_masks,     ()),
+        _translate_group(yelmo_init_topo_params(), p.yelmo_init_topo, ()),
+        _translate_group(yelmo_data_params(),      p.yelmo_data,      ()),
+        phys,
     )
 end
 
