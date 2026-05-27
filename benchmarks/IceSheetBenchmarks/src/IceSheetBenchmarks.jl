@@ -33,11 +33,11 @@ export calvmip_exp1!, calvmip_exp2!
 include("eismint_moving.jl")
 include("mismip3d.jl")
 include("calvingmip.jl")
-include("initmip_grl.jl")
+include("initmip.jl")
 
 export EISMINT1MovingBenchmark, eismint_moving_smb
 export MISMIP3DBenchmark
 export CalvingMIPBenchmark, calvmip_bed_circular, calvmip_bed_thule
-export InitMIPGRLBenchmark
+export InitMIPBenchmark
 
 end # module

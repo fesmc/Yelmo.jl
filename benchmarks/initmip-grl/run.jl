@@ -145,7 +145,7 @@ function _override_field(s, f::Symbol, v)
 end
 
 function _build_yelmo()
-    b = InitMIPGRLBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
+    b = InitMIPBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
     p = YelmoParameters(NAMELIST_PATH, "initmip_grl")
 
     if SSA_METHOD !== :residual
