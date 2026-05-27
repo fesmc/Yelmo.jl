@@ -1,221 +1,213 @@
-# `initmip-grl`
+# InitMIP — Greenland & Antarctica
 
-Steady-state Greenland Ice Sheet simulation under present-day boundary
-conditions. The run exercises the full model physics (thermodynamics,
-DIVA dynamics, calving) on a real domain forced by observational data,
-making it the primary test of Yelmo.jl under realistic conditions.
+Steady-state ice-sheet simulations under present-day boundary conditions
+on real domains, forced by observational data. These are the primary
+tests of Yelmo.jl under realistic conditions: full model physics
+(thermodynamics, DIVA dynamics, calving) on Greenland (`initmip-grl/`)
+and Antarctica (`initmip-ant/`).
 
-The setup follows the Fortran reference program
-`yelmo/tests/yelmo_initmip.f90` and namelist
-`yelmo/par/yelmo_initmip.nml`.
+Both follow the Fortran reference program `yelmo/tests/yelmo_initmip.f90`
+and namelist `yelmo/par/yelmo_initmip.nml` (the `set_grl_pd` and
+`set_ant_pd` cases respectively).
 
-## Domain and grid
+## Design: pure-Julia-first
 
-| Property | Value |
-|----------|-------|
-| Domain | Greenland (GRL-16KM) |
-| Grid | 106 × 181 cells, 16 km resolution |
-| Projection | Polar stereographic (EPSG:3413) |
+The configuration is a native `YelmoParameters` value built in
+`build_params()` inside each `run.jl` — there is **no namelist input
+file**. The pure-Julia `YelmoModel` is the primary path and is
+initialised directly from those parameters. Initialisation loads the
+state from topography data (no restart file):
 
-## Forcing and data sources
+```
+init_topo_load!  →  init_masks!  →  apply_forcing!  →  init_state!(robin-cold)
+```
 
-| Field | Source | File |
-|-------|--------|------|
-| Grid (xc, yc) | — | `GRL-16KM_REGIONS.nc` |
-| Initial topography (H_ice, z_bed) | Morlighem et al. 2017 (M17) | `GRL-16KM_TOPO-M17-v5.nc` |
-| Drainage basins (bnd.basins / basin_mask) | NASA / NEGIS | `GRL-16KM_BASINS-nasa.nc` |
-| Region mask (bnd.regions) | — | `GRL-16KM_REGIONS.nc` |
-| Surface mass balance (smb_ref) | MARv3.11 / ERA 1961–1990 mean | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
-| Surface temperature (T_srf) | MARv3.11 / ERA 1961–1990 mean | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
-| Geothermal heat flux (Q_geo) | Shapiro & Ritzwoller 2004 (S04) | `GRL-16KM_GHF-S04.nc` |
-| Basal melt (bmb_shlf) | Constant −0.5 m/yr | — |
+`init_masks!` also paints `bnd.mask_ice` from the region mask, which is
+what confines dynamic ice to the domain of interest.
 
-Basins and regions are loaded by `init_masks!` (Yelmo backend) or by
-the Fortran-side `ybound_load_masks` (Mirror backend).
-The reference surface velocity file `GRL-16KM_VEL-J18.nc` is present
-in `data/` for future use but is not currently loaded.
+Selecting `backend = :mirror` runs the Fortran model instead. The same
+canonical `YelmoParameters` is translated to a `YelmoMirrorParameters`
+via `to_mirror`, the namelist is written under `output-mirror/`, and the
+Fortran model is initialised from it. Backend-divergent timestepping
+options (`MIRROR_DIVERGENT_YELMO`, e.g. `pc_method`) are **not** carried
+over — the Mirror keeps its Fortran-native values, while shared controls
+(`dt_method`, `dt_min`, `cfl_*`) are copied through.
 
-Unit conversions applied at load time (mirrors Fortran `yelmo_data.f90`):
-
-- `T_srf`: stored in °C in MAR, converted to K (`+ 273.15`).
-- `smb`: stored in mm w.e./yr in MAR, converted to m i.e./yr
-  (`× 1e-3 · ρ_w / ρ_ice`).
-- `Q_geo`: stored in mW/m² in S04 — Yelmo's bedrock solver also expects
-  mW/m², so no conversion is applied.
-
-Ice-free cells receive an additional −2 m/yr SMB penalty to suppress
-spurious ice growth outside the present-day margin (mirrors Fortran
-`yelmo_initmip.f90:183`).
-
-## Physics settings
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Dynamics solver | DIVA | `ydyn.solver = "diva"` |
-| Thermodynamics | `method = "temp"` | Full temperature solver |
-| Flow law | Glen, `rf_method = 1` | Standard temperature-dependent rate factor |
-| Topography solver | `impl-lis` | Implicit advection via LIS |
-| Calving | `vm-l19` | Eigencalving (von Mises) |
-| Effective pressure | Till pressure (`yneff.method = 3`) | |
-| Vertical layers | 10 ice + 5 bedrock | `nz_aa = 10`, `nzr_aa = 5` |
-| Timestep method | Adaptive PC (`dt_method = 2`) | `pc_method = "AB-SAM"` |
-| Initialisation | `robin-cold` | Cold-based Robin solution |
-
-## References
-
-- Morlighem, M. et al. (2017). BedMachine v3: Complete bed topography
-  and ocean bathymetry mapping of Greenland from multi-beam echo
-  sounding combined with mass conservation. *Geophysical Research
-  Letters*, 44(21), 11051–11061.
-- Shapiro, N. M., & Ritzwoller, M. H. (2004). Inferring surface heat
-  flux distributions guided by a global seismic model. *Earth and
-  Planetary Science Letters*, 223(1–2), 213–224.
-- Fettweis, X. et al. (2017). Reconstructions of the 1900–2015 Greenland
-  ice sheet surface mass balance using the regional climate MAR model.
-  *The Cryosphere*, 11(2), 1015–1033.
-- Fortran reference: `yelmo/tests/yelmo_initmip.f90`,
-  `yelmo/par/yelmo_initmip.nml`
+> `pc_method` differs by backend on purpose: the Julia default is
+> `"HEUN"` (fewer adaptive sub-steps on margin-heavy domains), while the
+> Mirror uses Fortran's native `"AB-SAM"`. Yelmo.jl's `"HEUN"` is not the
+> same scheme as Fortran's `"HEUN"`, so the two are configured
+> independently. Setting a divergent parameter on the Julia side and
+> requesting `to_mirror` is an error.
 
 ## How to run
 
 ```bash
-cd benchmarks/initmip-grl
-julia --project=. run.jl                            # yelmo backend (default)
-INITMIP_BACKEND=mirror julia --project=. run.jl     # YelmoMirror (Fortran-yelmo C-API)
-julia --project=. summary.jl                        # produces summary.json
+cd benchmarks/initmip-grl                            # or initmip-ant
+julia --project=. -e 'include("run.jl"); main()'                  # yelmo backend (default), 20 yr
+julia --project=. -e 'include("run.jl"); main(t_end=1.0)'         # quick one-step check
+julia --project=. -e 'include("run.jl"); main(backend=:mirror)'   # YelmoMirror (Fortran C-API)
 ```
 
-The script must be run from this directory because namelist data paths
-are relative to it (`data/GRL-16KM/`). The `cd(@__DIR__)` at the top
-of `run.jl` handles this automatically when Julia is invoked from the
-repo root via `julia --project=benchmarks/initmip-grl benchmarks/initmip-grl/run.jl`.
+Configuration is via keyword arguments to `main` (no environment
+variables):
 
-### Backend selection
+| kwarg | default | meaning |
+|-------|---------|---------|
+| `t_end` | `20.0` | end time [yr] |
+| `dt_outer` | `1.0` | outer-loop timestep [yr] |
+| `backend` | `:yelmo` | `:yelmo` (pure Julia) or `:mirror` (Fortran) |
+| `snapshot_dt` | `10.0` | 2D snapshot cadence [yr] |
+| `outdir` | `output/` (`output-mirror/` for mirror) | output directory |
 
-The same `run.jl`, `yelmo_initmip_grl.nml`, and forcing data drive
-both backends — only the build path differs:
+`main` calls `cd(@__DIR__)` so data paths resolve relative to the
+benchmark directory regardless of where Julia is launched. To change the
+physics/forcing configuration, edit `build_params()` at the top of
+`run.jl`.
 
-| | yelmo (default) | mirror |
+### Backend differences
+
+| | `:yelmo` (default) | `:mirror` |
 |---|---|---|
-| Construction | `YelmoModel(b, t; p)` | `YelmoMirror(p, t; rundir, overwrite)` |
-| Topography load | `init_topo_load!` (Yelmo.jl) | Fortran `yelmo_init` reads it from the nml |
-| Mask load | `init_masks!` (Yelmo.jl) | Fortran `ybound_load_masks` reads it from the nml |
-| Forcing fields | direct field write to `y.bnd.*` | direct field write to `y.bnd.*`, pushed to Fortran on `init_state!` / `step!` via `yelmo_sync!` |
-| Time stepping | Yelmo.jl adaptive PC (`dt_method = 2`) | Fortran's own time-stepping |
-| Regions API | yes (`region_domain.nc`) | no — currently `YelmoModel`-only |
-| Per-section timer | yes (`y.timer`, prints at end) | no |
-| Snapshots / restart | yes (Nz_file = Nz + 2) | yes (Nz_file = Nz; `init_output` / `write_output!` branch on `uses_split_boundary_storage(y)`) |
-| `PCsub` / `PCrej` / `SSAit` columns | accurate | always 0 — Fortran's per-step counters aren't surfaced through the C-API. The `yelmo:: timelog:` lines in `run.log` carry per-outer-step `min_dt` / `max_dt` / `n_dtmin` instead |
-| `V_sle` | regions API (`V_ice_above_flotation × 1e-3 / 394.7`) | computed inline via `H_af = max(0, H_ice + min(0, z_bed − z_sl)·ρ_sw/ρ_ice)` |
-| Per-step `PCsub/PCrej/SSAit` | yes | shown as 0 (counters not surfaced) |
+| Construction | `YelmoModel(b, t; p)` | `YelmoMirror(to_mirror(p), t; rundir, overwrite)` |
+| Topography / mask load | `init_topo_load!` / `init_masks!` (Yelmo.jl) | Fortran `yelmo_init` / `ybound_load_masks` from the generated nml |
+| Forcing fields | direct write to `y.bnd.*` | direct write to `y.bnd.*`, synced to Fortran on `init_state!`/`step!` |
+| Time stepping | Yelmo.jl adaptive PC (`dt_method = 2`, HEUN) | Fortran's own (AB-SAM) |
+| Regions API (`region_domain.nc`) | yes | no — `YelmoModel`-only; `V_sle` computed inline |
+| Per-section timer (`y.timer`) | yes | no |
+| Namelist | none (native params) | generated to `output-mirror/` at runtime |
+
+> The Mirror backend requires the Fortran-yelmo C-API shared library
+> (`libyelmo_c_api.so`) to be built; without it `YelmoMirror`
+> construction fails at load time. The pure-Julia backend has no such
+> dependency.
+
+## Common physics settings
+
+Shared by both domains unless noted (set in `build_params()`; everything
+else uses Yelmo.jl defaults):
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Dynamics solver | DIVA | `ydyn.solver = "diva"` |
+| Thermodynamics | `method = "temp"` | full temperature solver |
+| Flow law | Glen, `rf_method = 1` | temperature-dependent rate factor |
+| Calving | `vm-l19` | eigencalving (von Mises) |
+| Effective pressure | till pressure (`yneff.method = 3`) | |
+| Vertical layers | 10 ice + 5 bedrock | `nz_aa = 10`, `nzr_aa = 5` |
+| Timestep | adaptive PC (`dt_method = 2`) | HEUN (yelmo) / AB-SAM (mirror) |
+| Initialisation | `robin-cold` | from topography, no restart |
+
+---
+
+## Greenland (`initmip-grl/`)
+
+| Property | Value |
+|----------|-------|
+| Domain / grid | Greenland, GRL-16KM (106 × 181, 16 km) |
+| Projection | polar stereographic (EPSG:3413) |
+| Shelf basal melt | constant −0.5 m/yr |
+
+| Field | Source | File |
+|-------|--------|------|
+| Grid / region mask | — | `GRL-16KM_REGIONS.nc` |
+| Initial topography | Morlighem et al. 2017 (M17) | `GRL-16KM_TOPO-M17-v5.nc` |
+| Drainage basins | NASA | `GRL-16KM_BASINS-nasa.nc` |
+| SMB + surface temperature | MARv3.11 / ERA 1961–1990 mean (annual) | `GRL-16KM_MARv3.11-ERA_annmean_1961-1990.nc` |
+| Geothermal heat flux | Shapiro & Ritzwoller 2004 (S04) | `GRL-16KM_GHF-S04.nc` |
+
+Forcing conversions (`apply_forcing!`, mirrors Fortran `yelmo_data.f90`):
+
+- `T_srf`: °C → K (`+ 273.15`).
+- `smb`: mm w.e./yr → m i.e./yr (`× 1e-3 · ρ_w/ρ_ice`, Fortran
+  `conv_mmawe_maie`).
+- Ice-free cells get an extra **−2 m/yr** SMB penalty to suppress
+  spurious growth outside the present-day margin (Fortran
+  `yelmo_initmip.f90:183`).
+
+`GRL-16KM_VEL-J18.nc` is present in `data/` for future use but not
+loaded. `summary.jl` produces an optional `summary.json` of high-level
+statistics from a completed run.
+
+---
+
+## Antarctica (`initmip-ant/`)
+
+| Property | Value |
+|----------|-------|
+| Domain / grid | Antarctica, ANT-32KM (191 × 191, 32 km) |
+| Projection | polar stereographic (EPSG:3031) |
+| Shelf basal melt | constant −0.2 m/yr |
+
+| Field | Source | File |
+|-------|--------|------|
+| Grid / region mask | — | `ANT-32KM_REGIONS.nc` |
+| Initial topography | BedMachine | `ANT-32KM_TOPO-BedMachine.nc` |
+| Drainage basins | NASA | `ANT-32KM_BASINS-nasa.nc` |
+| SMB + surface temperature | RACMO2.3 / ERA-Interim hybrid 1981–2010 (monthly) | `ANT-32KM_RACMO23-ERAINT-HYBRID_1981-2010.nc` |
+| Geothermal heat flux | Shapiro & Ritzwoller 2004 (S04) | `ANT-32KM_GHF-S04.nc` |
+
+Forcing conversions (`apply_forcing!`):
+
+- RACMO fields are **monthly** (`nx, ny, 12`) — averaged to an annual
+  mean (Fortran `yelmo_data.f90:317`).
+- `smb`: kg m⁻² d⁻¹ (≡ mm w.e./d) → m i.e./yr (`× 1e-3 · 365 · ρ_w/ρ_ice`,
+  Fortran `conv_mmdwe_maie`), then `|smb| < 1e-3 → 0`.
+- `T_srf`: already in Kelvin (no offset).
+- **No** ice-free SMB penalty (unlike Greenland).
+
+A 20-yr run is stable: V_sle holds at ~58 m (the Antarctic sea-level
+equivalent), max H steady at ~4757 m.
+
+---
 
 ## Outputs
 
-- `output/region_domain.nc` — whole-domain time-series (volume, area,
-  SLE, velocities, SMB, BMB, …) via the regions API. Written every
-  `DT_OUTER_YR` (1 yr).
-- `output/snapshots.nc` — 2D snapshots of all tpo/dyn/mat/thrm/bnd/dta
-  fields every `SNAPSHOT_DT_YR` (10 yr).
-- `output/restart_final.nc` — full model state at `T_END_YR`; can be
-  loaded with `YelmoModel("restart_final.nc", T_END_YR)`.
-- `plots/` — figures generated by `summary.jl` (gitignored).
-- `summary.json` — committed high-level statistics + metadata.
+Written under `output/` (or `output-mirror/`), all gitignored:
 
-Per-outer-step diagnostics are also printed to stdout (`PCsub` accepted
-adaptive sub-steps, `PCrej` rejected, `SSAit` last Picard count), and
-`yelmo.timing = True` triggers a `print_timings` table at the end with
-per-section wall-clock totals.
+- `region_domain.nc` — whole-domain time series (volume, area, SLE,
+  velocities, …) via the regions API. **`:yelmo` backend only.**
+- `snapshots.nc` — 2D snapshots of all tpo/dyn/mat/thrm/bnd/dta fields
+  every `snapshot_dt`.
+- `restart_final.nc` — full model state at `t_end`; reload with
+  `YelmoModel("restart_final.nc", t_end)`.
+- `yelmo_timesteps.nc` — adaptive-PC timestep log (`log_timestep`).
 
-## SSA solver: residual vs energy_quadratic
-
-The DIVA matrix assembly can use either the strong-form residual
-Jacobian (`SSASolver(method = :residual)`, the Fortran-faithful default;
-BiCGStab + Jacobi inner solve) or the symmetric Hessian of the discrete
-viscous-energy functional (`SSASolver(method = :energy_quadratic)`;
-CG + Jacobi). The energy formulation is SPD by construction, so the
-inner Krylov drops from BiCGStab to CG. See [`src/dyn/solvers.jl`](../../src/dyn/solvers.jl)
-for the `SSASolver` API and [`src/dyn/velocity_ssa_energy.jl`](../../src/dyn/velocity_ssa_energy.jl)
-for the assembly.
-
-Run the energy formulation via the `INITMIP_SSA_METHOD` env var:
-
-```bash
-# residual (default)
-INITMIP_NML=yelmo_initmip_grl-fixed-HEUN-legacy.nml \
-  julia --project=. run.jl
-
-# energy_quadratic
-INITMIP_NML=yelmo_initmip_grl-fixed-HEUN-legacy.nml \
-INITMIP_SSA_METHOD=energy_quadratic \
-INITMIP_OUTPUT_SUBDIR=output/fixed-HEUN-legacy-energy \
-  julia --project=. run.jl
-```
-
-Apples-to-apples comparison on this benchmark (HEUN-legacy nml,
-`dt_method = 0`, `dt_outer = 1 yr`, 20 yr, same machine):
-
-| Metric | `:residual` (BiCGStab) | `:energy_quadratic` (CG) | Δ |
-|---|---:|---:|---:|
-| Wall-clock | 37.06 s | 35.87 s | **−3.2%** |
-| PC substeps | 20 | 20 | 0 (fixed dt) |
-| PC rejects | 0 | 0 | 0 |
-| SSA Picard iters / outer step | 3.9 mean (2–6 range) | **2 (constant)** | **−49%** |
-| Total Picard iters | 78 | 40 | −49% |
-| `dyn` section total | 8.84 s (221 ms / call) | 6.70 s (167 ms / call) | −24% |
-| `mat` / `topo` / `thrm` | 2.82 / 4.96 / 0.21 s | 2.94 / 5.15 / 0.22 s | +2–4% (noise) |
-| V_ice at t = 20 yr | 3.2463 × 10⁶ km³ | 3.2469 × 10⁶ km³ | +0.02% |
-| V_sle at t = 20 yr | 7.9646 m | 7.9670 m | +0.03% |
-| max H at t = 20 yr | 3319.8 m | 3320.1 m | +0.01% |
-
-Findings:
-
-- **Picard convergence is twice as fast and dead-steady under
-  `:energy_quadratic`** — 2 iters per outer step at every step,
-  versus residual's 2–6 with frequent excursions to 5–6.
-- **Wall-clock saving is modest (~3%)** because `dyn` is only ~24–50%
-  of the per-substep cost on this benchmark; the cascade
-  (`topo` + `mat` + `thrm` + output writer) dominates and is
-  unaffected by the SSA inner-loop change. The 49% Picard reduction
-  translates to a 24% `dyn` reduction but only a 3% total reduction.
-- **Trajectories agree to ≤0.05%** at t = 20 yr — the documented
-  calving-front discretization difference of the energy formulation
-  doesn't show up at scale on initmip-grl (which uses `vm-l19` calving
-  without an LSF level set).
-
-Equivalence is also unit-tested on the SLAB-S06 fixture for both the
-pure-SSA and DIVA paths in [`test/test_yelmo_ssa_energy.jl`](../../test/test_yelmo_ssa_energy.jl).
+Per-outer-step `V_ice`, `V_sle`, and `max_H` are also printed to stdout,
+and `yelmo.timing = true` triggers a `print_timings` table at the end
+(`:yelmo` backend).
 
 ## Notes
 
-- The default run is 10 yr (`T_END_YR = 10.0`, `DT_OUTER_YR = 1.0`) as
-  a quick functional smoke test — exercises the full GRL forcing path,
-  DIVA + temp solver, calving, and adaptive PC, finishing in a few
-  minutes on a single core. For a proper equilibrium spin-up, increase
-  to 5000–20 000 yr and consider using the `equil_method = "opt"`
-  friction optimisation from the Fortran reference (not yet ported to
-  Yelmo.jl).
-- With the GRL-16KM topography and present-day forcing, the adaptive
-  PC controller (`pc_method = "AB-SAM"`, default `pc_eps`) typically
-  takes ~9 sub-steps per 1 yr outer step (effective dt ≈ 0.11 yr).
-  Walltime scales linearly: ≈ 1.3 min per 10 yr after first-call
-  Julia compilation.
-- **Scheme-choice cost.** With the default `pc_method = "AB-SAM"`,
-  Yelmo.jl currently takes ~2× more sub-steps than it would with
-  `pc_method = "HEUN"` on this benchmark (92 vs 47 sub-steps over
-  10 yr). The cause is the full-cascade-twice PC structure shared by
-  all Yelmo.jl PC schemes (see `pc_eta_masking_outcome.md` memory):
-  the AB-SAM predictor's history extrapolation amplifies per-stage
-  disagreement at margin/calving-active cells. The default is kept
-  at `AB-SAM` for consistency with YelmoMirror, which uses the same
-  Fortran default; closing the cost gap is the deferred PC refactor
-  (`pc_refactor_design.md`). To temporarily run with HEUN, add
-  `pc_method = "HEUN"` to the `&yelmo` block of
-  `yelmo_initmip_grl.nml` — but note this also flips Mirror to HEUN
-  (its nml is regenerated from the parsed parameters), still apples-
-  to-apples.
-- The Fortran reference runs two brief equilibration passes before the
-  main loop (`yelmo_update_equil` with `topo_fixed=false` and
-  `topo_fixed=true`). These are not replicated here; the run starts
-  directly from the robin-cold state.
-- `bmb_shlf = −0.5 m/yr` (constant). The Fortran default is −1.0 m/yr;
-  the value here is intentionally more conservative for a test run.
+- The default run is 20 yr — a functional check, not an equilibrium
+  spin-up. For equilibrium, increase to several thousand years (the
+  Fortran reference's `equil_method = "opt"` friction optimisation is
+  not yet ported to Yelmo.jl).
+- The Fortran reference runs two brief equilibration passes before its
+  main loop; these are not replicated here — the run starts directly
+  from the robin-cold state.
+- Shelf basal melt is a conservative constant on both domains (Fortran
+  defaults are −1.0 m/yr for Greenland, −0.2 m/yr for Antarctica).
+- The DIVA SSA assembly can optionally use the symmetric viscous-energy
+  Hessian (`SSASolver(method = :energy_quadratic)`, CG inner solve)
+  instead of the default strong-form residual Jacobian; set it in
+  `build_params()` via `ydyn = ydyn_params(ssa_solver = SSASolver(method = :energy_quadratic))`.
+  Equivalence is unit-tested on the SLAB-S06 fixture in
+  [`test/test_yelmo_ssa_energy.jl`](../../test/test_yelmo_ssa_energy.jl).
+
+## References
+
+- Morlighem, M. et al. (2017). BedMachine v3 (Greenland). *GRL*, 44(21),
+  11051–11061.
+- Morlighem, M. et al. (2020). Deep glacial troughs and stabilizing
+  ridges unveiled beneath Antarctica (BedMachine Antarctica). *Nature
+  Geoscience*, 13, 132–137.
+- Shapiro, N. M., & Ritzwoller, M. H. (2004). Inferring surface heat flux
+  distributions guided by a global seismic model. *EPSL*, 223(1–2),
+  213–224.
+- Fettweis, X. et al. (2017). MAR Greenland SMB reconstructions. *The
+  Cryosphere*, 11(2), 1015–1033.
+- van Wessem, J. M. et al. (2018). RACMO2.3p2 polar climate. *The
+  Cryosphere*, 12, 1479–1498.
+- Fortran reference: `yelmo/tests/yelmo_initmip.f90`,
+  `yelmo/par/yelmo_initmip.nml`.
