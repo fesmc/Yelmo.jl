@@ -55,7 +55,7 @@ function init_thrm!(y::YelmoModel; thrm_method::AbstractString = "robin")
 
     y.p === nothing && error(
         "init_thrm!: y.p must be non-nothing. Construct YelmoModel with a " *
-        "YelmoModelParameters value.")
+        "YelmoParameters value.")
 
     par     = y.p.ytherm
     c       = y.c

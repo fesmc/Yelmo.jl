@@ -16,7 +16,7 @@ import Pkg; Pkg.activate(".")
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: ydyn_params, ymat_params
+using Yelmo.YelmoPar: ydyn_params, ymat_params
 using Oceananigans
 using Oceananigans: interior
 using NCDatasets
@@ -407,7 +407,7 @@ function _run_slab_sia(; Nx::Int, Ny::Int, dx::Float64,
     _write_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                          H_const=H, slope_x=slope_x, Nz=Nz)
 
-    p = Yelmo.YelmoModelPar.YelmoModelParameters("slab-sia";
+    p = Yelmo.YelmoPar.YelmoParameters("slab-sia";
             ydyn = ydyn_params(solver = "sia"),
             ymat = ymat_params(n_glen = n_glen),
         )

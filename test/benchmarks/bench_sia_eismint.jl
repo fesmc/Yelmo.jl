@@ -33,7 +33,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -47,7 +47,7 @@ const MIRROR_TS_LOG = joinpath(@__DIR__, "fixtures", "eismint_moving_timesteps.n
 const PLOT_PATH    = joinpath(RUNDIR_ROOT, "bench_sia_eismint.png")
 
 function build_params(dt_method::Int; log_timestep::Bool = false)
-    return YelmoModelParameters("eismint_moving_$(dt_method)";
+    return YelmoParameters("eismint_moving_$(dt_method)";
         yelmo = yelmo_params(
             dt_method     = dt_method,
             pc_method     = "HEUN",

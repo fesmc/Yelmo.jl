@@ -13,7 +13,7 @@
 
 using IceSheetBenchmarks
 using Yelmo                       # loading both activates the YelmoBenchmarks extension
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            ytherm_params, yneff_params, ytill_params,
                            ytopo_params, yelmo_params
 using Oceananigans: interior
@@ -42,7 +42,7 @@ const RESTART_FINAL  = joinpath(OUTPUT_DIR, "restart_final.nc")
 # ----------------------------------------------------------------------
 
 function _eismint_moving_params()
-    return YelmoModelParameters("eismint1_moving";
+    return YelmoParameters("eismint1_moving";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",

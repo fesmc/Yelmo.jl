@@ -8,7 +8,7 @@ using Yelmo
 
 # Northern hemisphere #
 begin
-    p_nh = YelmoParameters("North")
+    p_nh = YelmoMirrorParameters("North")
 
     ylmo_nh = YelmoMirror(p_nh, 0.0; alias="ylmo1");
 
@@ -20,7 +20,7 @@ end;
 
 # Southern hemisphere #
 begin
-    p_sh = YelmoParameters("South")
+    p_sh = YelmoMirrorParameters("South")
 
     ylmo_sh = YelmoMirror(p_sh, 0.0; alias="ylmo2");
 

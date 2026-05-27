@@ -16,13 +16,13 @@ instructions.
 YelmoMirror(filename::String, time::Float64;
             alias="ylmo1", rundir="./", overwrite=false)
 
-YelmoMirror(p::YelmoParameters, time::Float64;
+YelmoMirror(p::YelmoMirrorParameters, time::Float64;
             grid=nothing,
             alias="ylmo1", rundir="./", overwrite=false)
 ```
 
 The first form reads a Fortran namelist file into a
-[`YelmoParameters`](@ref) and hands off to the second.
+[`YelmoMirrorParameters`](@ref) and hands off to the second.
 
 `alias` is the C-side identifier of this Yelmo instance (multiple
 mirrors can coexist if their aliases differ). `rundir` is where the
@@ -48,7 +48,7 @@ The `grid` keyword controls how Fortran obtains the model grid:
 ```julia
 using Yelmo
 
-p = read_nml("yelmo_BUELER.nml")    # YelmoParameters
+p = YelmoMirrorPar.read_nml("yelmo_BUELER.nml")    # YelmoMirrorParameters
 
 xc = collect(-500e3:5e3:500e3)      # cell centres in metres
 yc = collect(-500e3:5e3:500e3)
@@ -81,7 +81,7 @@ ymf = YelmoMirror("yelmo_GRL.nml", 0.0; alias="grl", rundir="./output")
 init_state!(ymf, 0.0)
 ```
 
-The same field set (`Yelmo.YelmoPar.YelmoInitTopoParams`, see
+The same field set (`Yelmo.YelmoMirrorPar.YelmoInitTopoParams`, see
 [Parameters API](parameters.md)) is exposed as Julia keywords on
 `yelmo_init_topo_params(...)` if you build the parameters
 programmatically.
@@ -177,7 +177,7 @@ using Yelmo
 
 # Parameters from a Fortran namelist (synthetic-grid run, so the
 # namelist sets init_topo_load = false).
-p = read_nml("yelmo_BUELER.nml")
+p = YelmoMirrorPar.read_nml("yelmo_BUELER.nml")
 
 # Synthetic 5 km grid.
 xc = collect(-500e3:5e3:500e3)
@@ -220,8 +220,8 @@ yelmo_write_restart!(ymf, "./output/run_t1000.nc")
 - Variable layout comes from `src/variables/mirror/`, which mirrors
   the Fortran NetCDF schema (e.g. `cmb_flt_x` / `cmb_flt_y` rather
   than the staggered-grid suffixes `cmb_flt_acx` / `cmb_flt_acy`).
-- Parameters are [`YelmoParameters`](@ref) (from `Yelmo.YelmoPar`)
-  rather than [`YelmoModelParameters`](@ref).
+- Parameters are [`YelmoMirrorParameters`](@ref) (from `Yelmo.YelmoMirrorPar`)
+  rather than [`YelmoParameters`](@ref).
 - Physics is delegated to Fortran — no `<comp>_step!` Julia helpers
   are involved.
 

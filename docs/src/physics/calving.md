@@ -217,7 +217,7 @@ transient external thinning.
 
 ## Configuration
 
-Per [`YelmoModelPar.YcalvParams`](https://github.com/fesmc/Yelmo.jl/blob/main/src/YelmoModelPar.jl):
+Per [`YelmoPar.YcalvParams`](https://github.com/fesmc/Yelmo.jl/blob/main/src/YelmoPar.jl):
 
 | Field | Default | Meaning |
 |---|---|---|

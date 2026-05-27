@@ -32,7 +32,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 using Yelmo.YelmoSolvers: SSASolver
@@ -57,7 +57,7 @@ const TROUGH = TroughBenchmark(:F17; dx_km = 8.0)
 function build_params(dt_method::Int; log_timestep::Bool = false)
     # Mirrors `test_trough_diva.jl::_trough_diva_params` plus
     # log_timestep + the adaptive PC machinery.
-    return YelmoModelParameters("trough_f17_$(dt_method)";
+    return YelmoParameters("trough_f17_$(dt_method)";
         yelmo = yelmo_params(
             dt_method     = dt_method,
             pc_method     = "HEUN",

@@ -1,35 +1,33 @@
 """
-    YelmoModelPar
+    YelmoMirrorPar
+Parameter module for the Fortran-backed `YelmoMirror`. Constructs and serializes
+the Yelmo namelist parameter files that the Fortran model consumes. Each namelist
+group is represented by a dedicated struct with constructor defaults matching the
+reference namelist.
 
-Parameter module for the pure-Julia `YelmoModel`. Structurally identical to
-`YelmoPar` in v0; will evolve independently as `YelmoModel` grows new
-parameters that the Fortran-backed Mirror does not need.
-
-`write_nml`, `read_nml`, and `compare` are imported from `YelmoPar` and
-extended with methods for `YelmoModelParameters`, so users see a single
-generic function across both backends.
+The generic `write_nml`/`compare` functions are owned by `YelmoPar` (the primary
+pure-Julia parameter module) and extended here with methods for
+`YelmoMirrorParameters`. `read_nml` stays module-local (same signature as
+`YelmoPar.read_nml` but returns `YelmoMirrorParameters`) — call as
+`YelmoMirrorPar.read_nml(...)`. The `*_params` constructors are likewise
+module-local; call as `YelmoMirrorPar.ydyn_params(...)`.
 
 Usage:
-    using .YelmoModelPar
-    p = YelmoModelParameters("experiment1";
-        ydyn = YelmoModelPar.ydyn_params(solver="ssa"),
+    using .YelmoMirrorPar
+    p = YelmoMirrorParameters("experiment1";
+        ydyn = YelmoMirrorPar.ydyn_params(solver="ssa"),
     )
-    write_nml("run.nml", p)
+    YelmoMirrorPar.write_nml("run.nml", p)
 """
-module YelmoModelPar
+module YelmoMirrorPar
 
 using Printf
 
+# write_nml/compare are owned by the primary `YelmoPar` module; extend them here
+# with methods for `YelmoMirrorParameters`.
 import ..YelmoPar: write_nml, compare
-using ..YelmoSolvers: Solver, SSASolver
 
-# Note on read_nml: YelmoPar.read_nml and YelmoModelPar.read_nml share the
-# same signature `read_nml(::AbstractString)` but return different types,
-# so they cannot be a single generic function. They live as separate
-# functions in their respective module namespaces — call as
-# `YelmoModelPar.read_nml(...)` to get a `YelmoModelParameters`.
-
-export YelmoModelParameters
+export YelmoMirrorParameters
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -59,61 +57,24 @@ Base.@kwdef struct YelmoParams
     zeta_scale       ::String  = "exp"
     zeta_exp         ::Float64 = 2.0
     nz_aa            ::Int     = 10
-    # Fortran default is `dt_method = 2` (adaptive PC). Yelmo.jl
-    # defaults to `0` (fixed forward Euler) so existing tests
-    # written before adaptive landed keep their original semantics.
-    # Set `dt_method = 2` explicitly to opt into adaptive PC.
-    dt_method        ::Int     = 0
+    dt_method        ::Int     = 2
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
     cfl_diff_max     ::Float64 = 0.12
-    # Default is "HEUN" (flipped from "AB-SAM" on 2026-05-12).
-    #
-    # On margin-heavy Greenland (initmip-grl 16-km) AB-SAM takes
-    # ~1.8× more PC substeps than HEUN under the adaptive controller
-    # because its Adams-Bashforth predictor extrapolates last-step
-    # ΔH and amplifies any per-stage disagreement in the
-    # cascade-twice topo path. Fortran's native default is still
-    # "AB-SAM" — set `pc_method = "AB-SAM"` explicitly when matching
-    # Fortran is the goal. All three schemes — "HEUN", "FE-SBE",
-    # "AB-SAM" — are implemented; see the per-scheme docstrings in
-    # `src/timestepping.jl`.
-    #
-    # Use "FE-SBE" when nonlinear cascade kernels (LSF calving,
-    # finite `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n
-    # geometry. See memory `pc_advective_port_status.md`.
-    pc_method        ::String  = "HEUN"
+    # `YelmoMirrorParameters` describes the Mirror backend (Fortran via the
+    # C-API); its defaults intentionally match Fortran's native defaults,
+    # not Yelmo.jl's. Fortran ships with `pc_method = "AB-SAM"` —
+    # `YelmoParameters` (Julia native) defaults to `"HEUN"` for
+    # margin-heavy performance reasons; the two backends are configured
+    # independently. See memory `pc_advective_port_status.md`.
+    pc_method        ::String  = "AB-SAM"
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
     pc_corr_vel      ::Bool    = false
-    # When `true`, the adaptive PC schemes run Fortran's advective-only
-    # predictor-corrector: ONE `dyn_step!` per substep, with the
-    # β-mixing applied to the advective tendency `dHidt_dyn` only (full
-    # MB cascade runs in both predictor and corrector blocks). When
-    # `false` (default for now), uses the legacy Yelmo.jl path that
-    # runs two full `_step_fe!` cascades per substep (predictor and
-    # lookahead corrector) and mixes the *full*-cascade tendency.
-    # See `src/timestepping.jl` and memory `pc_refactor_design.md`.
-    # Default will flip to `true` once the reject-path symmetry
-    # regression at large `dt_outer` is understood.
-    pc_advective     ::Bool    = false
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
-    # Whether to mask out ice-margin / grounding-line / floating /
-    # thin-ice / isolated-outlier cells from the PC truncation-error
-    # `eta` (matches Fortran `set_pc_mask` + `calc_pc_eta`). With
-    # masking off, `eta` is the global `max(|H_corr − H_pred|) · factor / dt`
-    # over every cell — Yelmo.jl's pre-2026-05-10 behaviour. Keep on
-    # by default so the PI42 controller responds to interior smooth-ice
-    # truncation only, mirroring Fortran.
-    pc_eta_masked    ::Bool    = true
-    # Per-section wall-clock timing scaffold (`y.timer`). Off by
-    # default; turning it on populates `y.timer` via `@timed_section`
-    # call sites at a small per-call overhead. See `src/timing.jl`
-    # and `docs/src/usage/timing.md`.
-    timing           ::Bool    = false
 end
 yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
 # ---------------------------------------------------------------------------
@@ -125,8 +86,6 @@ Base.@kwdef struct YtopoParams
     grad_lim            ::Float64 = 0.5
     grad_lim_zb         ::Float64 = 0.5
     dHdt_dyn_lim        ::Float64 = 100.0
-    H_min_grnd          ::Float64 = 0.0
-    H_min_flt           ::Float64 = 0.0
     margin2nd           ::Bool    = false
     margin_flt_subgrid  ::Bool    = false
     use_bmb             ::Bool    = true
@@ -148,63 +107,18 @@ Base.@kwdef struct YtopoParams
     dmb_m_r             ::Float64 = 1.0
     fmb_method          ::Int     = 0
     fmb_scale           ::Float64 = 1.0
-    # Periodic-wrap offsets for surface-gradient kernels. Used only for
-    # benchmarks with a known additively non-periodic axis (uniform-slope
-    # surface across a periodic axis), where finite-differencing across
-    # the wrap face would otherwise read the raw periodic image and
-    # produce a spurious gradient. Set to the *signed surface change*
-    # `Δz_srf` going one full periodic image distance in +x or +y, e.g.
-    # for HOM-C (`z_srf = -x · tan α`),
-    # `dzsdx_periodic_offset = -tan(α) · Lx_m`. Default 0.0 — production
-    # ice-sheet configs use Bounded lateral axes and the offset is a
-    # no-op there. Threaded through `_update_diagnostics!` to the
-    # `dzsdx`/`dzsdy`/`dzbdx`/`dzbdy` gradient calls (the `z_base`
-    # gradient sees the same offset since `z_base = z_srf - H_ice` and
-    # `H_ice` is periodic by construction in these benchmarks).
-    #
-    # IMPORTANT — *config-time constant*: this is set ONCE at
-    # `YelmoModelParameters` construction and is NOT recomputed during
-    # the simulation. The mechanism is correct for benchmarks where the
-    # uniform-slope component of the surface is static — typically those
-    # using `topo_fixed = true` (HOM-C, MISMIP3D Stnd, ISMIP-HOM family).
-    # For prognostic runs that simultaneously have (a) a periodic axis,
-    # (b) a uniform-slope surface component, AND (c) topographic evolution
-    # that changes that slope (e.g. a slab thinning under load), this
-    # mechanism would silently desynchronise from the true surface slope.
-    # Such configurations are rare in practice (real ice sheets are
-    # Bounded, and benchmarks with periodic geometry are typically
-    # diagnostic / fixed-geometry). If a future use case requires a
-    # dynamically-evolving slope under periodic BC, the offset should be
-    # promoted to a per-step recomputed quantity (e.g. derived from a
-    # least-squares fit of the slope component of `z_srf` each step).
-    dzsdx_periodic_offset ::Float64 = 0.0
-    dzsdy_periodic_offset ::Float64 = 0.0
 end
 ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ycalv
 # ---------------------------------------------------------------------------
-"""
-Calving methods that are supported by Yelmo.jl's `_dispatch_calving!`
-(see `src/topo/calving.jl`). Used by `ycalv_params` to fail fast at
-parameter construction when `use_lsf = true` and the requested
-method is not implemented in the Julia port.
-"""
-const SUPPORTED_CALV_METHODS = ("none", "zero", "equil", "threshold", "vm-m16", "custom")
-
-"""
-Calving methods that exist in Fortran Yelmo (`yelmo/src/yelmo_topography.f90`)
-but are not yet ported to Yelmo.jl. Listed separately so the validator
-can produce a "known but unported" error message — distinct from the
-"unrecognised method" error, which signals a typo or namelist drift.
-"""
-const KNOWN_UNPORTED_CALV_METHODS = ("vm-l19", "simple", "flux", "kill", "kill-pos")
-
 Base.@kwdef struct YcalvParams
     use_lsf         ::Bool    = false
     dt_lsf          ::Float64 = -1.0
     calv_flt_method ::String  = "vm-l19"
     calv_grnd_method::String  = "zero"
+    H_min_grnd      ::Float64 = 5.0
+    H_min_flt       ::Float64 = 75.0
     sd_min          ::Float64 = 100.0
     sd_max          ::Float64 = 500.0
     calv_grnd_max   ::Float64 = 0.0
@@ -223,44 +137,7 @@ Base.@kwdef struct YcalvParams
     zb_deep_1       ::Float64 = -1500.0
     zb_sigma        ::Float64 = 0.0
 end
-"""
-    _validate_calv_method(method, label)
-
-Throw a descriptive error if `method` is not in
-`SUPPORTED_CALV_METHODS`. The two failure modes are reported
-separately:
-
-  - `method ∈ KNOWN_UNPORTED_CALV_METHODS` — a real Fortran-Yelmo
-    method that has not yet been ported to Yelmo.jl. The error
-    points at the unported list.
-  - Otherwise — likely a typo or namelist drift; the error lists
-    the supported set.
-"""
-function _validate_calv_method(method::AbstractString, label::AbstractString)
-    method in SUPPORTED_CALV_METHODS && return nothing
-    if method in KNOWN_UNPORTED_CALV_METHODS
-        error("ycalv_params: $label = \"$method\" is a Fortran-Yelmo " *
-              "calving method that has not been ported to Yelmo.jl. " *
-              "Supported here: $(SUPPORTED_CALV_METHODS).")
-    else
-        error("ycalv_params: $label = \"$method\" is not recognised. " *
-              "Supported: $(SUPPORTED_CALV_METHODS); " *
-              "known-but-unported (Fortran-only): $(KNOWN_UNPORTED_CALV_METHODS).")
-    end
-end
-
-# Factory function: validates calving method names before returning the
-# struct. Validation only fires when `use_lsf = true` — otherwise the
-# calving methods are dormant (the default `vm-l19` is the Fortran
-# default and is harmless when `use_lsf = false`).
-function ycalv_params(; kwargs...)
-    p = YcalvParams(; kwargs...)
-    if p.use_lsf
-        _validate_calv_method(p.calv_flt_method,  "calv_flt_method")
-        _validate_calv_method(p.calv_grnd_method, "calv_grnd_method")
-    end
-    return p
-end
+ycalv_params(; kwargs...) = YcalvParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ydyn
 # ---------------------------------------------------------------------------
@@ -282,7 +159,7 @@ Base.@kwdef struct YdynParams
     eps_0           ::Float64 = 1e-6
     scale_T         ::Int     = 1
     T_frz           ::Float64 = -3.0
-    ssa_solver      ::SSASolver = SSASolver()
+    ssa_lis_opt     ::String  = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
     ssa_lat_bc      ::String  = "floating"
     ssa_beta_max    ::Float64 = 1e20
     ssa_vel_max     ::Float64 = 5000.0
@@ -291,13 +168,6 @@ Base.@kwdef struct YdynParams
     ssa_iter_conv   ::Float64 = 1e-2
     taud_lim        ::Float64 = 2e5
     cb_sia          ::Float64 = 0.0
-    # DIVA no-slip flag: when `true`, DIVA's `calc_beta_eff` uses the
-    # no-slip formula `beta_eff = 1 / F2` (Goldberg 2011 Eq. 42) and
-    # forces basal velocity to zero in `calc_vel_basal_diva!`. When
-    # `false` (default), the standard sliding formulation
-    # `beta_eff = beta / (1 + beta·F2)` is used (Goldberg 2011 Eq. 41).
-    # Mirrors Fortran's `par%no_slip` in `&ydyn`.
-    no_slip         ::Bool    = false
 end
 ydyn_params(; kwargs...) = YdynParams(; kwargs...)
 # ---------------------------------------------------------------------------
@@ -339,12 +209,8 @@ yneff_params(; kwargs...) = YneffParams(; kwargs...)
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YmatParams
     flow_law            ::String  = "glen"
-    # `rf_method = -1` ("external") is the Yelmo.jl default while therm
-    # is unported: `mat_step!` leaves `mat.ATT` at its loaded /
-    # externally-filled value. Switch to `0` (constant `rf_const`) or
-    # `1` (Arrhenius — needs therm) explicitly per simulation. Common
-    # Fortran namelist values are 0 (EISMINT-moving) and 1 (production
-    # runs).
+    # `rf_method = -1` ("external") matches `YelmoPar.YmatParams`
+    # default — see that file for the rationale (therm not yet ported).
     rf_method           ::Int     = -1
     rf_const            ::Float64 = 1e-18
     rf_use_eismint2     ::Bool    = false
@@ -439,21 +305,47 @@ Base.@kwdef struct YelmoDataParams
     pd_age_names    ::Vector{String} = ["age_iso", "depth_iso"]
 end
 yelmo_data_params(; kwargs...) = YelmoDataParams(; kwargs...)
-# Note: physical constants (rho_ice, rho_sw, g, ...) used to live here as
-# `PhysParams` / `phys_params(...)`. They've moved to the `YelmoConst` module
-# (`YelmoConstants`), which lives separately so a single instance can be
-# shared across multi-domain runs without going through model parameters.
-# Read them from `y.c` on a constructed `YelmoModel`.
+# ---------------------------------------------------------------------------
+# &phys  (physical constants)
+# ---------------------------------------------------------------------------
+Base.@kwdef struct PhysParams
+    sec_year    ::Float64 = 31536000.0   # [s/a]      365*24*3600
+    g           ::Float64 = 9.81         # [m/s^2]    Gravitational accel.
+    T0          ::Float64 = 273.15       # [K]        Reference freezing temperature
+    rho_ice     ::Float64 = 910.0        # [kg/m^3]   Density ice
+    rho_w       ::Float64 = 1000.0       # [kg/m^3]   Density water
+    rho_sw      ::Float64 = 1028.0       # [kg/m^3]   Density seawater
+    rho_a       ::Float64 = 3300.0       # [kg/m^3]   Density asthenosphere
+    rho_rock    ::Float64 = 2000.0       # [kg/m^3]   Density bedrock (mantle/lithosphere)
+    L_ice       ::Float64 = 333500.0     # [J/kg]     Latent heat of fusion for ice/water
+    T_pmp_beta  ::Float64 = 9.8e-8       # [K/Pa]     Greve and Blatter (2009)
+end
+phys_params(; kwargs...) = PhysParams(; kwargs...)
+
+const _EARTH_DEFAULTS = (
+    sec_year   = 31536000.0,
+    g          = 9.81,
+    T0         = 273.15,
+    rho_ice    = 910.0,
+    rho_w      = 1000.0,
+    rho_sw     = 1028.0,
+    rho_a      = 3300.0,
+    rho_rock   = 2000.0,
+    L_ice      = 333500.0,
+    T_pmp_beta = 9.8e-8,
+)
+
+earth_params(; kwargs...) = PhysParams(; _EARTH_DEFAULTS..., kwargs...)
 
 # ---------------------------------------------------------------------------
 # Top-level container
 # ---------------------------------------------------------------------------
 """
-    YelmoModelParameters
+    YelmoMirrorParameters
 Top-level container holding one struct per namelist group. Construct via
-`YelmoModelParameters(name; kwargs...)` to override individual groups.
+`YelmoMirrorParameters(name; kwargs...)` to override individual groups.
 """
-struct YelmoModelParameters
+struct YelmoMirrorParameters
     name            ::String
     yelmo           ::YelmoParams
     ytopo           ::YtopoParams
@@ -466,21 +358,23 @@ struct YelmoModelParameters
     yelmo_masks     ::YelmoMasksParams
     yelmo_init_topo ::YelmoInitTopoParams
     yelmo_data      ::YelmoDataParams
+    phys           ::PhysParams
 end
 """
-    YelmoModelParameters(name; yelmo, ytopo, ...) -> YelmoModelParameters
-Construct a `YelmoModelParameters` object. Any group can be supplied as a keyword
+    YelmoMirrorParameters(name; yelmo, ytopo, ...) -> YelmoMirrorParameters
+Construct a `YelmoMirrorParameters` object. Any group can be supplied as a keyword
 argument; omitted groups are filled with defaults. `name` is a label for the
 parameter set and the stem of the output filename.
 # Example
 ```julia
-p = YelmoModelParameters("experiment1";
-    ydyn = ydyn_params(solver="ssa"),
+p = YelmoMirrorParameters("experiment1";
+    ydyn  = ydyn_params(solver="ssa"),
+    phys = phys_params(rho_ice=917.0),
 )
 write_nml("run.nml", p)
 ```
 """
-function YelmoModelParameters(name;
+function YelmoMirrorParameters(name;
     yelmo           = yelmo_params(),
     ytopo           = ytopo_params(),
     ycalv           = ycalv_params(),
@@ -492,18 +386,19 @@ function YelmoModelParameters(name;
     yelmo_masks     = yelmo_masks_params(),
     yelmo_init_topo = yelmo_init_topo_params(),
     yelmo_data      = yelmo_data_params(),
+    phys            = phys_params(),
 )
-    return YelmoModelParameters(
+    return YelmoMirrorParameters(
         name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, ymat, ytherm,
-        yelmo_masks, yelmo_init_topo, yelmo_data,
+        yelmo_masks, yelmo_init_topo, yelmo_data, phys,
     )
 end
 
-function YelmoModelParameters(filename, name)
+function YelmoMirrorParameters(filename, name)
     p = read_nml(filename)
-    return YelmoModelParameters(
+    return YelmoMirrorParameters(
         name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
-        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data,
+        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
     )
 end
 
@@ -548,40 +443,26 @@ end
     write_group(io, group_name, s)
 Write one namelist group to `io` from struct `s`.
 The field named `const_` is written as `const` (Julia keyword workaround).
-Fields whose type is not a Fortran-namelist primitive (e.g. nested
-struct configs like `SSASolver`) are skipped — those are Julia-native
-configuration objects that have no namelist representation.
 """
 function write_group(io::IO, group_name::AbstractString, s)
     println(io, "&$(group_name)")
     for fname in fieldnames(typeof(s))
         nml_name = fname == :const_ ? "const" : string(fname)
         val = getfield(s, fname)
-        # Skip nested-struct fields (no Fortran namelist analogue).
-        _is_nml_primitive(val) || continue
         println(io, "    $(rpad(nml_name, 20)) = $(format_value(val))")
     end
     println(io, "/\n")
 end
-
-# Predicate: is `v` a Fortran namelist primitive (or vector of primitives)?
-# Used by `write_group` to skip nested-struct fields like `SSASolver`.
-_is_nml_primitive(v::Bool)              = true
-_is_nml_primitive(v::AbstractString)    = true
-_is_nml_primitive(v::Integer)           = true
-_is_nml_primitive(v::AbstractFloat)     = true
-_is_nml_primitive(v::AbstractVector{<:AbstractString}) = true
-_is_nml_primitive(v::AbstractVector{<:Real})           = true
-_is_nml_primitive(v)                    = false
 """
-    write_nml(filename, p::YelmoModelParameters)
+    write_nml(filename, p::YelmoMirrorParameters)
 Write a complete Yelmo namelist file from `p`.
 """
-function write_nml(filename::AbstractString, p::YelmoModelParameters; overwrite::Bool=false)
+function write_nml(filename::AbstractString, p::YelmoMirrorParameters; overwrite::Bool=false)
     if isfile(filename) && !overwrite
         error("File already exists: $(filename). Use overwrite=true to overwrite.")
     end
     open(filename, "w") do io
+        write_group(io, "phys",            p.phys)
         write_group(io, "yelmo",           p.yelmo)
         write_group(io, "ytopo",           p.ytopo)
         write_group(io, "ycalv",           p.ycalv)
@@ -597,7 +478,7 @@ function write_nml(filename::AbstractString, p::YelmoModelParameters; overwrite:
     @info "Namelist written to $(filename)"
     return nothing
 end
-function write_nml(p::YelmoModelParameters; rundir::String="", overwrite::Bool=false)
+function write_nml(p::YelmoMirrorParameters; rundir::String="", overwrite::Bool=false)
     filename = joinpath(rundir, p.name * ".nml")
     write_nml(filename, p; overwrite)
     return nothing
@@ -743,13 +624,10 @@ function struct_from_dict(::Type{S}, d::Dict{String,String}) where {S}
     defaults = S()   # zero-arg @kwdef constructor gives us all defaults
     for fname in fieldnames(S)
         nml_name = fname == :const_ ? "const" : string(fname)
-        FT = fieldtype(S, fname)
-        if haskey(d, nml_name) && _is_nml_primitive(getfield(defaults, fname))
+        if haskey(d, nml_name)
+            FT = fieldtype(S, fname)
             kwargs[fname] = parse_nml_value(FT, d[nml_name])
         else
-            # Either field absent from namelist, or field type is a
-            # nested Julia-native config struct (no namelist analogue).
-            # Fall back to the default value either way.
             kwargs[fname] = getfield(defaults, fname)
         end
     end
@@ -761,9 +639,9 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    read_nml(filename) -> YelmoModelParameters
+    read_nml(filename) -> YelmoMirrorParameters
 
-Read a Yelmo namelist file and return a fully populated `YelmoModelParameters`.
+Read a Yelmo namelist file and return a fully populated `YelmoMirrorParameters`.
 Groups or fields absent from the file fall back to the struct defaults.
 
 # Example
@@ -776,7 +654,7 @@ function read_nml(filename::AbstractString)
     raw = parse_nml_file(filename)
     get_group(name) = get(raw, name, Dict{String,String}())
 
-    return YelmoModelParameters(
+    return YelmoMirrorParameters(
         splitext(basename(filename))[1];   # name = stem of filename
         yelmo           = struct_from_dict(YelmoParams,          get_group("yelmo")),
         ytopo           = struct_from_dict(YtopoParams,          get_group("ytopo")),
@@ -789,6 +667,7 @@ function read_nml(filename::AbstractString)
         yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
         yelmo_init_topo = struct_from_dict(YelmoInitTopoParams,  get_group("yelmo_init_topo")),
         yelmo_data      = struct_from_dict(YelmoDataParams,      get_group("yelmo_data")),
+        phys            = struct_from_dict(PhysParams,           get_group("phys")),
     )
 end
 
@@ -799,8 +678,8 @@ end
 # Equality
 # ---------------------------------------------------------------------------
 
-function Base.:(==)(a::YelmoModelParameters, b::YelmoModelParameters)
-    for fname in fieldnames(YelmoModelParameters)
+function Base.:(==)(a::YelmoMirrorParameters, b::YelmoMirrorParameters)
+    for fname in fieldnames(YelmoMirrorParameters)
         fname == :name && continue
         getfield(a, fname) == getfield(b, fname) || return false
     end
@@ -809,7 +688,7 @@ end
 
 for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
           YneffParams, YmatParams, YthermParams, YelmoMasksParams,
-          YelmoInitTopoParams, YelmoDataParams)
+          YelmoInitTopoParams, YelmoDataParams, PhysParams)
     @eval function Base.:(==)(a::$S, b::$S)
         for fname in fieldnames($S)
             getfield(a, fname) == getfield(b, fname) || return false
@@ -832,9 +711,9 @@ end
 Print all fields that differ between `p1` and `p2`, grouped by namelist group.
 Identical groups are skipped entirely.
 """
-function compare(io::IO, p1::YelmoModelParameters, p2::YelmoModelParameters; include_name=false)
+function compare(io::IO, p1::YelmoMirrorParameters, p2::YelmoMirrorParameters; include_name=false)
     any_diff = false
-    for fname in fieldnames(YelmoModelParameters)
+    for fname in fieldnames(YelmoMirrorParameters)
         fname == :name && !include_name && continue
         g1, g2 = getfield(p1, fname), getfield(p2, fname)
         g1 == g2 && continue
@@ -850,13 +729,7 @@ function compare(io::IO, p1::YelmoModelParameters, p2::YelmoModelParameters; inc
                 v1, v2 = getfield(g1, sfield), getfield(g2, sfield)
                 v1 == v2 && continue
                 label = sfield == :const_ ? "const" : string(sfield)
-                if _is_nml_primitive(v1) && _is_nml_primitive(v2)
-                    println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
-                else
-                    # Nested-struct field (e.g. SSASolver) — fall back to
-                    # repr() since format_value isn't defined for them.
-                    println(io, "  $(rpad(label, 24))  $(repr(v1))  =>  $(repr(v2))")
-                end
+                println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
             end
         end
         println(io, "/\n")
@@ -865,7 +738,7 @@ function compare(io::IO, p1::YelmoModelParameters, p2::YelmoModelParameters; inc
     return nothing
 end
 
-compare(p1::YelmoModelParameters, p2::YelmoModelParameters; kw...) = compare(stdout, p1, p2; kw...)
+compare(p1::YelmoMirrorParameters, p2::YelmoMirrorParameters; kw...) = compare(stdout, p1, p2; kw...)
 
-end # module YelmoPar
+end # module YelmoMirrorPar
 

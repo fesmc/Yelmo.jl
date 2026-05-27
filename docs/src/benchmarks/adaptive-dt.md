@@ -103,9 +103,9 @@ both the fixed-FE reference and the adaptive-PC runs within the same script.
 
 ```julia
 using Yelmo
-using Yelmo.YelmoModelPar: yelmo_params, YelmoModelParameters
+using Yelmo.YelmoPar: yelmo_params, YelmoParameters
 
-p = YelmoModelParameters("my_run";
+p = YelmoParameters("my_run";
     yelmo = yelmo_params(
         dt_method     = 2,          # adaptive PC
         pc_method     = "FE-SBE",   # or "HEUN" / "AB-SAM"

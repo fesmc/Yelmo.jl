@@ -3,7 +3,7 @@ module YelmoMirrorCore
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
-using ..YelmoPar: YelmoParameters, write_nml
+using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml
 using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
                    XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 import ..YelmoCore: init_state!, step!, uses_split_boundary_storage
@@ -23,7 +23,7 @@ mutable struct YelmoMirror{B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     calias::Vector{UInt8}
     rundir::String
     time::Float64
-    p::YelmoParameters
+    p::YelmoMirrorParameters
     g::RectilinearGrid   # 2D Grid
     gt::RectilinearGrid  # 3D Ice Grid
     gr::RectilinearGrid  # 3D Rock Grid
@@ -48,14 +48,14 @@ uses_split_boundary_storage(::YelmoMirror) = false
 
 function YelmoMirror(filename::String, time::Float64; 
     alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
-    p = YelmoParameters(filename)
+    p = YelmoMirrorParameters(filename)
     return YelmoMirror(p, time; alias, rundir, overwrite)
 end
 
 """
     YelmoMirror(p, time; grid=nothing, alias, rundir, overwrite)
 
-Construct a `YelmoMirror` from a `YelmoParameters` set. The optional
+Construct a `YelmoMirror` from a `YelmoMirrorParameters` set. The optional
 `grid` keyword switches grid-construction strategy:
 
   - `grid === nothing` (default): the underlying Fortran `yelmo_init`
@@ -80,7 +80,7 @@ flat Cartesian grid; lon/lat aren't physically meaningful for
 benchmarks), area defaults to `dx · dy` (uniform spacing inferred
 from xc/yc).
 """
-function YelmoMirror(p::YelmoParameters, time::Float64;
+function YelmoMirror(p::YelmoMirrorParameters, time::Float64;
     grid::Union{Nothing,NamedTuple}=nothing,
     alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
 

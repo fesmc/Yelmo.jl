@@ -8,7 +8,7 @@ module YelmoBenchmarks
 using IceSheetBenchmarks: IceSheetBenchmarks, AbstractBenchmark, state
 using Yelmo
 using Yelmo: YelmoConstants, MASK_ICE_DYNAMIC, resolve_boundaries
-using Yelmo.YelmoModelPar: YelmoModelParameters
+using Yelmo.YelmoPar: YelmoParameters
 using Oceananigans
 using Oceananigans: interior
 using Oceananigans.Grids: RectilinearGrid, Bounded, Flat
@@ -101,7 +101,7 @@ function Yelmo.YelmoModel(b::AbstractBenchmark, t::Real;
                           boundaries = :bounded)
 
     if p === nothing
-        p = YelmoModelParameters(alias)
+        p = YelmoParameters(alias)
     end
 
     s = state(b, Float64(t))

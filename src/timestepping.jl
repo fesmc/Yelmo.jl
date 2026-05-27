@@ -160,7 +160,7 @@ struct FE_SBE <: PCScheme end
 Adams-Bashforth predictor + Semi-implicit Adams-Moulton corrector
 (Fortran's native `pc_method = "AB-SAM"` default; Yelmo.jl's
 package default since 2026-05-12 is `"HEUN"` for margin-heavy
-performance reasons — see `YelmoModelPar.jl` comment).
+performance reasons — see `YelmoPar.jl` comment).
 
 Yelmo.jl-style implementation: structurally identical to `HEUN` (2×
 `_step_fe!` with corrector identity `H_corr = (H_n + H_**)/2`), but
@@ -1254,7 +1254,7 @@ the `_fixed_step!` definition for what failed and where to revisit.
 
 `y.p === nothing` (parameter-less benchmark constructions) falls
 through to a plain forward-Euler step `_step_fe!` so simple
-in-memory test setups keep working without a `YelmoModelParameters`.
+in-memory test setups keep working without a `YelmoParameters`.
 """
 function _select_step!(y, dt::Float64)
     if y.p === nothing

@@ -46,7 +46,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -56,7 +56,7 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, yther
 # to `pc_method = "HEUN"` here for reproducibility of the committed
 # reference values (the package default is `"AB-SAM"`).
 function _eismint_moving_params()
-    return YelmoModelParameters("eismint_moving";
+    return YelmoParameters("eismint_moving";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",
@@ -100,7 +100,7 @@ end
 # Build a Yelmo.jl model from an EISMINT1MovingBenchmark IC and set the
 # pre-filled material fields (ATT, cb_ref) so `dyn_step!` doesn't pull
 # them from a stale default.
-function _build_eismint_moving(b::EISMINT1MovingBenchmark, p::YelmoModelParameters)
+function _build_eismint_moving(b::EISMINT1MovingBenchmark, p::YelmoParameters)
     Nx, Ny = length(b.xc), length(b.yc)
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
     fill!(interior(y.mat.ATT), p.ymat.rf_const)

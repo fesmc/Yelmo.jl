@@ -16,7 +16,7 @@ import Pkg; Pkg.activate(".")
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: ydyn_params, ytherm_params
+using Yelmo.YelmoPar: ydyn_params, ytherm_params
 using Oceananigans: interior
 using NCDatasets
 
@@ -37,7 +37,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # 3c–3f. This test exercises the scaffolding round-trip, not the
     # physics — leaving the solver at its default `"diva"` would error
     # in `dyn_step!`.
-    p = YelmoModelParameters("ymodel-v0";
+    p = YelmoParameters("ymodel-v0";
                              ydyn   = ydyn_params(solver="fixed"),
                              ytherm = ytherm_params(method="fixed"))
 
@@ -53,7 +53,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     @test y isa AbstractYelmoModel
     @test y.alias == "ymodel-v0"
     @test y.time  == 0.0
-    @test y.p isa YelmoModelParameters
+    @test y.p isa YelmoParameters
     @test y.p.name == "ymodel-v0"
     @test y.p.ydyn.solver == "fixed"
 
@@ -122,7 +122,7 @@ end
     rundir   = mktempdir(; prefix="yelmo_model_scratch_")
     out_path = joinpath(rundir, "yelmo_scratch.nc")
 
-    p = YelmoModelParameters("ymodel-scratch";
+    p = YelmoParameters("ymodel-scratch";
                              ydyn   = ydyn_params(solver="fixed"),
                              ytherm = ytherm_params(method="fixed"))
 

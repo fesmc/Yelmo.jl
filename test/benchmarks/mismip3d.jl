@@ -586,7 +586,7 @@ function _write_mismip3d_mirror_fixture_att!(b::MISMIP3DBenchmark,
     mkpath(fixtures_dir)
     isfile(path) && rm(path)
 
-    p = Yelmo.YelmoPar.read_nml(spec.namelist_path)
+    p = Yelmo.YelmoMirrorPar.read_nml(spec.namelist_path)
     rundir = mktempdir(; prefix = "bench_$(spec.name)_")
     yelmo_input = abspath(joinpath(dirname(Yelmo.YelmoMirrorCore.yelmolib),
                                    "..", "..", "input"))

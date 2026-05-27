@@ -16,7 +16,7 @@
 using IceSheetBenchmarks
 using Yelmo
 using Yelmo: step!, init_state!
-using Yelmo.YelmoModelPar: YelmoModelParameters
+using Yelmo.YelmoPar: YelmoParameters
 using Oceananigans: interior
 using NCDatasets
 using Statistics
@@ -43,7 +43,7 @@ const RESTART_FINAL  = joinpath(OUTPUT_DIR, "restart_final.nc")
 
 function _build()
     b = CalvingMIPBenchmark(:exp3; dx_km = DX_KM)
-    p = YelmoModelParameters(NAMELIST_PATH, "calvingmip_exp3")
+    p = YelmoParameters(NAMELIST_PATH, "calvingmip_exp3")
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
     # Attach the exp1/3 calving-rate hook (captures b's xc/yc).

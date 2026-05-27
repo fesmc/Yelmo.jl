@@ -47,13 +47,13 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 
 function _params_with_solver(solver_str::String, alias::String)
-    return YelmoModelParameters(alias;
+    return YelmoParameters(alias;
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,

@@ -9,14 +9,14 @@ import Pkg; Pkg.activate(".")
 #   - `SSASolver()` constructs with documented default values.
 #   - kwargs can override individual fields.
 #   - `Solver` is the abstract supertype.
-#   - `YdynParams()` (and `YelmoModelParameters("…").ydyn`) include a
+#   - `YdynParams()` (and `YelmoParameters("…").ydyn`) include a
 #     default `SSASolver` instance.
 #   - The deprecated `ssa_lis_opt` field has been removed from
 #     `YdynParams`.
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: YdynParams, ydyn_params, YelmoModelParameters
+using Yelmo.YelmoPar: YdynParams, ydyn_params, YelmoParameters
 
 @testset "SSASolver: default field values" begin
     s = SSASolver()
@@ -97,8 +97,8 @@ end
     @test :ssa_solver in fieldnames(YdynParams)
 end
 
-@testset "YelmoModelParameters: ydyn includes default SSASolver" begin
-    p = YelmoModelParameters("test")
+@testset "YelmoParameters: ydyn includes default SSASolver" begin
+    p = YelmoParameters("test")
     @test p.ydyn.ssa_solver isa SSASolver
     @test p.ydyn.ssa_solver == SSASolver()
 end

@@ -314,7 +314,7 @@ end
 # viscosity, linear β).
 
 using Yelmo: YelmoConstants
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                             yneff_params, ytill_params
 
 # Write a minimal SSA-friendly restart fixture: uniform slab,
@@ -386,7 +386,7 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
     _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
-    p = YelmoModelParameters("slab-ssa";
+    p = YelmoParameters("slab-ssa";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,                # constant viscosity
@@ -509,7 +509,7 @@ function _run_uniform_slab(solver_name::String;
     _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
-    p = YelmoModelParameters("slab-$(solver_name)";
+    p = YelmoParameters("slab-$(solver_name)";
         ydyn = ydyn_params(
             solver         = solver_name,
             visc_method    = 0,
@@ -744,7 +744,7 @@ end
     _write_floating_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                                   H_const=H, Nz=Nz)
 
-    p = YelmoModelParameters("slab-floating-ssa";
+    p = YelmoParameters("slab-floating-ssa";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,

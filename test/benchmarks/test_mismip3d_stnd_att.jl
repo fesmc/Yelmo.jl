@@ -61,7 +61,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC_ATT = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
@@ -70,7 +70,7 @@ const _SPEC_ATT = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 # — using a different baseline would invalidate the qualitative comparison
 # against the established Stnd state at t=500.
 function _mismip3d_att_params()
-    return YelmoModelParameters("mismip3d_stnd_att";
+    return YelmoParameters("mismip3d_stnd_att";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,

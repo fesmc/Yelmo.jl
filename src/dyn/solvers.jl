@@ -44,7 +44,7 @@
 #     `YdynParams.ssa_iter_rel` default.
 #
 # This file is included directly by `Yelmo.jl` at the top level so that
-# both `YelmoModelPar` (which carries an `SSASolver` field on
+# both `YelmoPar` (which carries an `SSASolver` field on
 # `YdynParams`) and `YelmoModelDyn` (which uses the field to drive the
 # Picard loop) can share one common type definition.
 # ----------------------------------------------------------------------

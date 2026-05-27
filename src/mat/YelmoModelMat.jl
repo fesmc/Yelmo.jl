@@ -107,7 +107,7 @@ Scope ("mat 1" PR):
 function mat_step!(y::YelmoModel, dt::Float64)
     y.p === nothing && error(
         "mat_step!: y.p must be non-nothing once the physics body is wired. " *
-        "Construct YelmoModel with a YelmoModelParameters value, or skip " *
+        "Construct YelmoModel with a YelmoParameters value, or skip " *
         "the orchestrator's per-component chain.")
 
     par     = y.p.ymat

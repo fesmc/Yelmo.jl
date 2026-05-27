@@ -35,8 +35,8 @@ using Yelmo: init_regions, update_regions!, write_regions!
 using Yelmo: init_output, write_output!, OutputSelection
 using Yelmo: print_timings
 using Yelmo: YelmoMirror
-using Yelmo.YelmoModelPar: YelmoModelParameters
 using Yelmo.YelmoPar: YelmoParameters
+using Yelmo.YelmoMirrorPar: YelmoMirrorParameters
 using Yelmo: SSASolver
 using Oceananigans: interior
 using NCDatasets
@@ -146,7 +146,7 @@ end
 
 function _build_yelmo()
     b = InitMIPGRLBenchmark(joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"))
-    p = YelmoModelParameters(NAMELIST_PATH, "initmip_grl")
+    p = YelmoParameters(NAMELIST_PATH, "initmip_grl")
 
     if SSA_METHOD !== :residual
         new_ssa = SSASolver(method = SSA_METHOD)
@@ -181,7 +181,7 @@ function _build_mirror()
     # block) on its own. We then overwrite the climate / forcing
     # fields on the Julia mirror — `init_state!` syncs them to
     # Fortran before the analytic state init.
-    p = YelmoParameters(NAMELIST_PATH, "initmip_grl")
+    p = YelmoMirrorParameters(NAMELIST_PATH, "initmip_grl")
     y = YelmoMirror(p, 0.0; rundir = OUTPUT_DIR, overwrite = true)
 
     # YelmoMirror keeps physical constants on the Fortran side rather

@@ -12,7 +12,7 @@ matching variable names in the file.
 y = YelmoModel(restart_file::String, time::Float64;
                alias  = "ymodel1",
                rundir = "./",
-               p      = nothing,           # YelmoModelParameters or nothing
+               p      = nothing,           # YelmoParameters or nothing
                c      = YelmoConstants(),  # physical constants
                groups = (:bnd, :dta, :dyn, :mat, :thrm, :tpo),
                strict = true)
@@ -20,7 +20,7 @@ y = YelmoModel(restart_file::String, time::Float64;
 
 What it does, in order:
 
-1. If `p === nothing`, build a default [`YelmoModelParameters`](@ref)
+1. If `p === nothing`, build a default [`YelmoParameters`](@ref)
    keyed off `alias` and emit a warning (so you don't silently run
    with defaults).
 2. Read coordinate arrays (`xc`, `yc`, `zeta_ac`, `zeta_rock_ac`)
@@ -53,42 +53,42 @@ default-allocated value (zeros).
 
 ## Building parameters
 
-Three ways to construct [`YelmoModelParameters`](@ref):
+Three ways to construct [`YelmoParameters`](@ref):
 
 ```julia
 # 1. All defaults — what the constructor warning suggests.
-p = YelmoModelParameters("demo")
+p = YelmoParameters("demo")
 
 # 2. Override individual groups via keyword arguments.
-p = YelmoModelParameters("demo";
+p = YelmoParameters("demo";
     yelmo = yelmo_params(grid_path = "data/GRL/16km.nc"),
     ydyn  = ydyn_params(solver = "ssa"),
     ytopo = ytopo_params(use_bmb = false, topo_rel = 0),
 )
 
 # 3. Read from a Yelmo Fortran namelist file.
-p = YelmoModelPar.read_nml("Yelmo_GRL.nml")
-# (Note the explicit module qualifier: YelmoPar.read_nml returns
-#  YelmoParameters for the Mirror; the Model variant has the same
+p = YelmoPar.read_nml("Yelmo_GRL.nml")
+# (Note the explicit module qualifier: YelmoMirrorPar.read_nml returns
+#  YelmoMirrorParameters for the Mirror; the Model variant has the same
 #  signature but a different return type, so they cannot share a
 #  single generic.)
 ```
 
-A `YelmoModelParameters` is an immutable nested struct: the top level
+A `YelmoParameters` is an immutable nested struct: the top level
 holds one struct per namelist group (`yelmo`, `ytopo`, `ycalv`,
 `ydyn`, `ytill`, `yneff`, `ymat`, `ytherm`, `yelmo_masks`,
 `yelmo_init_topo`, `yelmo_data`). To "edit" a single field of an
 already-built parameter set, build a fresh group with overrides:
 
 ```julia
-p = YelmoModelParameters("demo";
+p = YelmoParameters("demo";
     ydyn = ydyn_params(; solver = "ssa", visc_method = 1),
 )
 # Equivalent to typing the whole defaults table with these two changes.
 ```
 
 Round-trip to a Fortran namelist with [`write_nml`](@ref) /
-`Yelmo.YelmoModelPar.read_nml`.
+`Yelmo.YelmoPar.read_nml`.
 
 ## Building constants
 
@@ -111,7 +111,7 @@ full table.
 ## YelmoMirror constructor
 
 ```julia
-ymf = YelmoMirror(p::YelmoParameters, time::Float64;
+ymf = YelmoMirror(p::YelmoMirrorParameters, time::Float64;
                   alias    = "ylmo1",
                   rundir   = "./",
                   overwrite = false)
@@ -126,9 +126,9 @@ Different in three ways from `YelmoModel`:
 2. The variable layout comes from `src/variables/mirror/`, which
    matches the Fortran NetCDF schema (e.g. `cmb_flt_x`/`cmb_flt_y`
    instead of the model's `cmb_flt_acx`/`cmb_flt_acy`).
-3. Only [`YelmoParameters`](@ref) (the Mirror parameter type) is
+3. Only [`YelmoMirrorParameters`](@ref) (the Mirror parameter type) is
    accepted — these read from / write to `read_nml` /
-   `write_nml` in the `YelmoPar` module rather than `YelmoModelPar`.
+   `write_nml` in the `YelmoMirrorPar` module rather than `YelmoPar`.
 
 The constructor accepts a filename shortcut that wraps
 `read_nml`:

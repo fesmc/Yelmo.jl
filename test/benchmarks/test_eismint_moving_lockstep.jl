@@ -53,7 +53,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -62,7 +62,7 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 # Same params as `test_eismint_moving.jl::_eismint_moving_params`. Keep
 # in sync with that file (or factor out if drift becomes a problem).
 function _eismint_moving_lockstep_params()
-    return YelmoModelParameters("eismint_moving_lockstep";
+    return YelmoParameters("eismint_moving_lockstep";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",
@@ -110,7 +110,7 @@ function _eismint_moving_lockstep_params()
     )
 end
 
-function _build_yelmo_lockstep(b::EISMINT1MovingBenchmark, p::YelmoModelParameters)
+function _build_yelmo_lockstep(b::EISMINT1MovingBenchmark, p::YelmoParameters)
     Nx, Ny = length(b.xc), length(b.yc)
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
     fill!(interior(y.mat.ATT), p.ymat.rf_const)

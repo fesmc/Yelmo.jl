@@ -13,15 +13,15 @@ state*, the *staggered grid*, and the *parameter / constants* split.
   accessed via `ccall` to `libyelmo`. Each `step!` is one Fortran
   predictor / corrector step; the Julia side maintains a mirror copy
   of every field for inspection, output, and lockstep validation.
-  Configured by a Fortran namelist file ([`YelmoParameters`](@ref)).
+  Configured by a Fortran namelist file ([`YelmoMirrorParameters`](@ref)).
 - [`YelmoModel`](@ref) — a **pure Julia** ice-sheet solver under
   active development. Each `step!` runs the in-Julia per-component
   phase pipeline, with no Fortran dependency. The topography and
   dynamics components (the latter via the SIA solver) are ported;
   material and thermodynamics components remain as forward stubs.
   Configured by a Julia parameter struct
-  ([`YelmoModelParameters`](@ref)) — a structural twin of
-  `YelmoParameters` that will diverge as the Julia port grows
+  ([`YelmoParameters`](@ref)) — a structural twin of
+  `YelmoMirrorParameters` that will diverge as the Julia port grows
   parameters the mirror does not need.
 
 Why both: the mirror is the production solver today; the pure-Julia
@@ -98,7 +98,7 @@ standard halo machinery rather than via per-cell branches.
 
 Two distinct concepts, two distinct types:
 
-- [`YelmoModelParameters`](@ref) — **per-run configuration**: solver
+- [`YelmoParameters`](@ref) — **per-run configuration**: solver
   choices (`solver = "diva"`), thresholds (`H_min_grnd`,
   `H_min_flt`), parameterisation switches (`bmb_gl_method = "pmp"`,
   `topo_rel = 0`). These are read from a namelist or built from

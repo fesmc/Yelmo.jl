@@ -99,7 +99,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
@@ -111,7 +111,7 @@ const _SMOKE_ONLY = get(ENV, "MISMIP3D_SMOKE_ONLY", "0") == "1"
 # Stnd SSA + topo parameters. solver = "ssa" + the Fortran namelist
 # overrides for beta / Picard / advection.
 function _mismip3d_yelmo_params()
-    return YelmoModelParameters("mismip3d_stnd";
+    return YelmoParameters("mismip3d_stnd";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,                    # Glen-flow Gauss-quadrature

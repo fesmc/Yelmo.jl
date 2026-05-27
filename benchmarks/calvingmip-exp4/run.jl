@@ -28,7 +28,7 @@
 using IceSheetBenchmarks
 using Yelmo
 using Yelmo: step!, init_state!
-using Yelmo.YelmoModelPar: YelmoModelParameters
+using Yelmo.YelmoPar: YelmoParameters
 using Oceananigans: interior
 using NCDatasets
 using Statistics: mean
@@ -134,7 +134,7 @@ function _build_from_exp3_restart()
         "first.")
 
     b = CalvingMIPBenchmark(:exp4; dx_km = DX_KM)
-    p = YelmoModelParameters(NAMELIST_PATH, "calvingmip_exp4")
+    p = YelmoParameters(NAMELIST_PATH, "calvingmip_exp4")
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
     NCDataset(EXP3_RESTART, "r") do ds

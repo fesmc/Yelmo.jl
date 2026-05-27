@@ -54,8 +54,8 @@ using Yelmo
 restart = "yelmo_restart.nc"
 
 # Default parameters. Override individual groups via keyword arguments
-# to YelmoModelParameters or by reading a Fortran namelist.
-p = YelmoModelParameters("demo")
+# to YelmoParameters or by reading a Fortran namelist.
+p = YelmoParameters("demo")
 
 # Build the model. `:dta` is omitted because Fortran restarts do not
 # carry a `data` group; `strict=false` allows individual variables in
@@ -95,7 +95,7 @@ namelist file describing the run:
 ```julia
 using Yelmo
 
-p   = read_nml("Yelmo_GRL.nml")          # YelmoParameters from a Fortran nml
+p   = YelmoMirrorPar.read_nml("Yelmo_GRL.nml")   # YelmoMirrorParameters from a Fortran nml
 ymf = YelmoMirror(p, 0.0; alias="demo", rundir="./output", overwrite=true)
 init_state!(ymf, 0.0)
 

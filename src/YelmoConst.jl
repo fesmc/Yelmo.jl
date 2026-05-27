@@ -2,7 +2,7 @@
     YelmoConst
 
 Physical and non-physical constants for `YelmoModel`. Mirrors the
-parameter-side split: `YelmoPar`/`YelmoParameters` ↔
+parameter-side split: `YelmoMirrorPar`/`YelmoMirrorParameters` ↔
 `YelmoConst`/`YelmoConstants`.
 
 Two flavours of constants live here:
@@ -105,7 +105,7 @@ end
     yelmo_constants(; kwargs...) -> YelmoConstants
 
 Convenience constructor mirroring the `*_params(...)` factories in
-`YelmoModelPar`. Equivalent to `YelmoConstants(; kwargs...)`.
+`YelmoPar`. Equivalent to `YelmoConstants(; kwargs...)`.
 """
 yelmo_constants(; kwargs...) = YelmoConstants(; kwargs...)
 

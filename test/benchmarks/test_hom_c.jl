@@ -84,7 +84,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params
 
 const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
@@ -96,7 +96,7 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 # under external β, isothermal ATT.
 function _hom_c_yelmo_params()
     Lx_m = _SPEC.L_km * 1e3
-    return YelmoModelParameters("hom_c";
+    return YelmoParameters("hom_c";
         # Periodic-slope offset for surface gradients on the periodic-x
         # axis (HOM-C `z_srf = -x · tan α`). Without this the wrap-face
         # FD reads the raw periodic image and produces a giant spurious

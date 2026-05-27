@@ -157,7 +157,7 @@ Steps 1–5, 7, 8 always run, even for `method = "fixed"` and at
 function therm_step!(y::YelmoModel, dt::Float64)
     y.p === nothing && error(
         "therm_step!: y.p must be non-nothing once the physics body is wired. " *
-        "Construct YelmoModel with a YelmoModelParameters value, or skip " *
+        "Construct YelmoModel with a YelmoParameters value, or skip " *
         "the orchestrator's per-component chain.")
 
     par     = y.p.ytherm

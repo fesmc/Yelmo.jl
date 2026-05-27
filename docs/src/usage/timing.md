@@ -12,9 +12,9 @@ Enable timing on the parameter object:
 
 ```julia
 using Yelmo
-using Yelmo.YelmoModelPar: YelmoModelParameters, yelmo_params
+using Yelmo.YelmoPar: YelmoParameters, yelmo_params
 
-p = YelmoModelParameters("my_run";
+p = YelmoParameters("my_run";
     yelmo = yelmo_params(timing = true, dt_method = 2, pc_method = "HEUN", ...),
     # ...other groups...
 )
