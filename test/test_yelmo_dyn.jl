@@ -24,7 +24,7 @@ import Pkg; Pkg.activate(".")
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: ydyn_params
+using Yelmo.YelmoPar: ydyn_params
 using Oceananigans
 using Oceananigans: interior
 using Oceananigans.BoundaryConditions: fill_halo_regions!
@@ -430,14 +430,14 @@ end
     # at their restart-loaded values; `dyn_step!` only refreshes the
     # diagnostic outputs (driving stress, lateral stress, ice flux,
     # magnitudes, surface / basal slices, `f_vbvs`).
-    p_nml = Yelmo.YelmoModelPar.read_nml(NML_PATH)
+    p_nml = Yelmo.YelmoPar.read_nml(NML_PATH)
     # `ydyn.scale_T` is forced to 0 here even though the namelist says
     # 1: the restart's saved `c_bed` was generated with no thermal
     # scaling (verified by `c_bed / N_eff = tan(cb_ref°)` exactly
     # across all grounded cells). This namelist-vs-restart drift will
     # be eliminated once the YelmoMirror benchmark fixtures land in
     # milestone 3c (regenerated from current namelist + source).
-    p = Yelmo.YelmoModelPar.YelmoModelParameters("dyn-consistency";
+    p = Yelmo.YelmoPar.YelmoParameters("dyn-consistency";
             yelmo           = p_nml.yelmo,
             ytopo           = p_nml.ytopo,
             ycalv           = p_nml.ycalv,

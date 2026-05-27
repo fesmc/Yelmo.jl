@@ -42,7 +42,7 @@ using Oceananigans.Grids: znodes
 include("../test/benchmarks/helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -70,7 +70,7 @@ const RERUN = "--rerun" in ARGS
 # Yelmo.jl 25-kyr trajectory: run + cache (or load cached)
 # ----------------------------------------------------------------------
 function _eismint_moving_params()
-    return YelmoModelParameters("eismint_moving_compare";
+    return YelmoParameters("eismint_moving_compare";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",

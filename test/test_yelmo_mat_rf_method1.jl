@@ -33,7 +33,7 @@ using Test
 using Statistics
 using NCDatasets
 using Yelmo
-using Yelmo.YelmoModelPar: YelmoModelParameters, ymat_params, ydyn_params,
+using Yelmo.YelmoPar: YelmoParameters, ymat_params, ydyn_params,
                            ytill_params, yneff_params, ytopo_params,
                            ytherm_params
 using Oceananigans.Fields: interior
@@ -74,14 +74,14 @@ function _expected_att_eismint(T_ice::Float64, T_pmp::Float64,
     end
 end
 
-# Build a YelmoModelParameters with `rf_method = 1` and the requested
+# Build a YelmoParameters with `rf_method = 1` and the requested
 # Arrhenius / water-scale toggles. `enh_method = "simple"` plus a
 # uniform `enh_*` makes the post-`mat_step!` `enh` field uniformly
 # `enh_uniform`, so the expected ATT depends only on T and the
 # Arrhenius constants.
 function _rf1_params(; use_eismint2::Bool, with_water::Bool,
                      enh_uniform::Float64 = 1.0)
-    return YelmoModelParameters("mat_rf_method1";
+    return YelmoParameters("mat_rf_method1";
         ydyn  = ydyn_params(solver = "sia",
                             uz_method = 3,
                             visc_method = 1,

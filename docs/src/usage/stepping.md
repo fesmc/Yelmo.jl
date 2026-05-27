@@ -64,7 +64,7 @@ using Yelmo
 
 y = YelmoModel("yelmo_restart.nc", 0.0;
     alias  = "demo",
-    p      = YelmoModelParameters("demo"),
+    p      = YelmoParameters("demo"),
     groups = (:bnd, :dyn, :mat, :thrm, :tpo),
     strict = false,
 )

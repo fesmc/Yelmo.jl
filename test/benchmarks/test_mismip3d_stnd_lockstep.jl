@@ -47,7 +47,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -58,7 +58,7 @@ const _SPEC_LOCK = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 # `test_mismip3d_stnd.jl::_mismip3d_yelmo_params` exactly so both tests
 # exercise the same Yelmo.jl-side solver setup.
 function _mismip3d_lockstep_params()
-    return YelmoModelParameters("mismip3d_stnd_lockstep";
+    return YelmoParameters("mismip3d_stnd_lockstep";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,

@@ -29,7 +29,7 @@ using Oceananigans: interior
 using Oceananigans.Grids: Bounded
 using NCDatasets
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                             yneff_params, ytill_params
 
 # SLAB-S06 fixture writer — duplicated from test_yelmo_ssa_slab.jl
@@ -78,7 +78,7 @@ function _build_slab_model(path; method::Symbol, linear_method::Symbol,
                                   precond::Symbol = :jacobi,
                                   boundaries::Symbol = :bounded,
                                   solver::String = "ssa")
-    p = YelmoModelParameters("ssa_slab_energy";
+    p = YelmoParameters("ssa_slab_energy";
         ydyn = ydyn_params(
             solver         = solver,
             visc_method    = 0,

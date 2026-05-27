@@ -15,7 +15,7 @@ using ..YelmoConst: YelmoConstants,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
-using ..YelmoModelPar: YelmoModelParameters
+using ..YelmoPar: YelmoParameters
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 using ..YelmoHooks: YelmoHooks
@@ -1138,7 +1138,7 @@ end
 Construct a `YelmoModel` whose grids and field values are read from a NetCDF
 restart file. Variable layout is taken from `src/variables/model/` markdown
 tables. The model parameters `p` are passed through verbatim and may be
-`nothing`, a `YelmoModelParameters`, or any user object.
+`nothing`, a `YelmoParameters`, or any user object.
 
 The physical constants `c` default to `YelmoConstants()` (Yelmo Fortran
 defaults). The struct is immutable, so the same `c` instance can be safely
@@ -1149,7 +1149,7 @@ all six). `strict=true` (default) errors if a variable in a loaded group
 is missing from the restart; `strict=false` silently skips missing
 variables, leaving the corresponding field at its default-allocated value.
 """
-# Read the `yelmo.timing` flag from a YelmoModelParameters, defaulting
+# Read the `yelmo.timing` flag from a YelmoParameters, defaulting
 # to `false` when no parameter object is available. Used by both
 # `YelmoModel` constructors to initialise the per-model `YelmoTimer`.
 _resolve_timing_enabled(p) = p === nothing ? false : p.yelmo.timing
@@ -1167,8 +1167,8 @@ function YelmoModel(restart_file::String, time::Float64;
                     regrid_method::AbstractString = "con")
 
     if p === nothing
-        @warn "No parameters supplied to YelmoModel; constructing YelmoModelParameters(\"$(alias)\") with defaults."
-        p = YelmoModelParameters(alias)
+        @warn "No parameters supplied to YelmoModel; constructing YelmoParameters(\"$(alias)\") with defaults."
+        p = YelmoParameters(alias)
     end
 
     # Build grids: if a target_grid_file is provided, the model lives
@@ -1247,7 +1247,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    YelmoModel(xc, yc, p::YelmoModelParameters; kwargs...) -> YelmoModel
+    YelmoModel(xc, yc, p::YelmoParameters; kwargs...) -> YelmoModel
 
 Construct a `YelmoModel` from scratch on the horizontal grid defined by
 the cell-centre axes `xc`, `yc` (**in metres**), with all component
@@ -1273,7 +1273,7 @@ Callers are expected to populate boundary/topography fields (`bnd.z_bed`,
     [`resolve_boundaries`](@ref).
 """
 function YelmoModel(xc::AbstractVector, yc::AbstractVector,
-                    p::YelmoModelParameters;
+                    p::YelmoParameters;
                     time::Float64 = 0.0,
                     alias::String = "ymodel1",
                     rundir::String = "./",
@@ -1305,7 +1305,7 @@ function YelmoModel(xc::AbstractVector, yc::AbstractVector,
 end
 
 """
-    YelmoModel(gridfile::AbstractString, p::YelmoModelParameters; kwargs...) -> YelmoModel
+    YelmoModel(gridfile::AbstractString, p::YelmoParameters; kwargs...) -> YelmoModel
 
 Construct a from-scratch `YelmoModel` whose horizontal grid is read from
 the NetCDF `gridfile` (cell-centre axis variables `xname`/`yname`,
@@ -1317,9 +1317,9 @@ the [`YelmoModel(xc, yc, p; …)`](@ref) axis constructor.
 
 This dispatches separately from the restart constructor
 `YelmoModel(restart_file::String, time::Float64; …)`: here the second
-positional argument is the `YelmoModelParameters`, not a time.
+positional argument is the `YelmoParameters`, not a time.
 """
-function YelmoModel(gridfile::AbstractString, p::YelmoModelParameters;
+function YelmoModel(gridfile::AbstractString, p::YelmoParameters;
                     xname::AbstractString = "xc",
                     yname::AbstractString = "yc",
                     time::Float64 = 0.0,

@@ -8,11 +8,14 @@ include("YelmoConst.jl")
 # struct can carry a `timer::YelmoTimer` field, and BEFORE the per-phase
 # modules so they can use `@timed_section` at their call sites.
 include("timing.jl")
-include("YelmoPar.jl")
 include("utils/YelmoUtils.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
-include("YelmoModelPar.jl")
+# `YelmoPar` (primary, pure-Julia params) owns the generic `write_nml`,
+# `read_nml`, `compare` and the `*_params` constructors. Must load BEFORE
+# `YelmoMirrorPar`, which imports/extends those generics.
+include("YelmoPar.jl")
+include("YelmoMirrorPar.jl")
 include("YelmoHooks.jl")
 include("YelmoCore.jl")
 #include("YelmoMirrorCoreMatrices.jl")
@@ -39,11 +42,11 @@ include("YelmoIO.jl")
 using .YelmoMeta
 using .YelmoConst
 using .YelmoTiming
-using .YelmoPar
+using .YelmoMirrorPar
 using .YelmoUtils
 using .YelmoSolvers
 using .YelmoIntegration
-using .YelmoModelPar
+using .YelmoPar
 using .YelmoCore
 using .YelmoMirrorCore
 using .YelmoModelTopo
@@ -64,15 +67,9 @@ export YelmoConstants, yelmo_constants, earth_constants,
        eismint_constants, mismip3d_constants, trough_constants
 # (MASK_ICE_* are also exported from YelmoCore for back-compat — see below.)
 
-# YelmoPar
-export YelmoParameters
-export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
-       ytill_params, yneff_params, ymat_params, ytherm_params,
-       yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params,
-       phys_params, earth_params
-export write_nml
-export read_nml
-export compare
+# YelmoMirrorPar (mirror-specific params; constructors/read_nml stay namespaced
+# under `YelmoMirrorPar.*`, generics are shared with YelmoPar below)
+export YelmoMirrorParameters
 
 # YelmoUtils
 export solve_tridiag!
@@ -87,8 +84,14 @@ export Solver, SSASolver, resolve_linear_method
 # YelmoIntegration
 export vert_int_trapz_boundary!
 
-# YelmoModelPar
-export YelmoModelParameters
+# YelmoPar (primary parameter API)
+export YelmoParameters
+export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
+       ytill_params, yneff_params, ymat_params, ytherm_params,
+       yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
+export write_nml
+export read_nml
+export compare
 
 # YelmoCore
 export AbstractYelmoModel, YelmoModel, YelmoHooks

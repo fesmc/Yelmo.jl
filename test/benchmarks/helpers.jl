@@ -164,7 +164,7 @@ function run_mirror_benchmark!(spec::BenchmarkSpec;
     end
 
     # 1. Build YelmoMirror with synthetic grid.
-    p = Yelmo.YelmoPar.read_nml(spec.namelist_path)
+    p = Yelmo.YelmoMirrorPar.read_nml(spec.namelist_path)
     rundir = mktempdir(; prefix="bench_$(spec.name)_")
     # Yelmo Fortran reads `input/yelmo_phys_const.nml` (and other
     # input files) as a CWD-relative path. Symlink the yelmo source

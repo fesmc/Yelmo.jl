@@ -28,7 +28,7 @@ const FIX_TS_LOG   = joinpath(FIXTURES_DIR, "eismint_moving_timesteps.nc")
 const T_END = 25_000.0
 
 # Patch log_timestep=True on the spec namelist (text substitution to
-# avoid round-tripping through YelmoParameters).
+# avoid round-tripping through YelmoMirrorParameters).
 function patch_namelist(src::AbstractString)
     txt = read(src, String)
     txt = replace(txt, r"log_timestep(\s*)=(\s*)False" => s"log_timestep\1=\2True")

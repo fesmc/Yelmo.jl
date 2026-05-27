@@ -139,9 +139,9 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
-                   p      = YelmoModelParameters("tpo-mask-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
+                   p      = YelmoParameters("tpo-mask-test";
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -231,7 +231,7 @@ const NML_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/yelmo_Greenlan
     @assert isfile(RESTART_PATH)
     @assert isfile(NML_PATH)
 
-    p = Yelmo.YelmoModelPar.read_nml(NML_PATH)
+    p = Yelmo.YelmoPar.read_nml(NML_PATH)
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_diag_"),
                    alias  = "tpo-diag-consistency",
@@ -336,9 +336,9 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
-                   p      = YelmoModelParameters("tpo-smoke";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
+                   p      = YelmoParameters("tpo-smoke";
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -410,9 +410,9 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smb_test_"),
                    alias  = "tpo-smb-test",
-                   p      = YelmoModelParameters("tpo-smb-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
+                   p      = YelmoParameters("tpo-smb-test";
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -507,9 +507,9 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_bmb_test_"),
                    alias  = "tpo-bmb-test",
-                   p      = YelmoModelParameters("tpo-bmb-test";
-                                ydyn = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed")),
+                   p      = YelmoParameters("tpo-bmb-test";
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -890,10 +890,10 @@ end
 @testset "tpo: relaxation conservation (slab + H_ref)" begin
     @assert isfile(RESTART_PATH)
 
-    # Use YelmoModelPar.ytopo_params explicitly — Yelmo re-exports the
+    # Use YelmoPar.ytopo_params explicitly — Yelmo re-exports the
     # mirror module's `ytopo_params` at top level (not the model's), so
     # build the model-flavoured params struct via its own helper.
-    p_ytopo = Yelmo.YelmoModelPar.ytopo_params(
+    p_ytopo = Yelmo.YelmoPar.ytopo_params(
         topo_rel       = 3,         # relax all cells
         topo_rel_tau   = 5.0,       # 5-yr timescale
         topo_rel_field = "H_ref",
@@ -901,10 +901,10 @@ end
     # `ydyn.solver = "fixed"`: relaxation kernel only, no velocity solve.
     # `ytherm.method = "fixed"`: thrm decoupled — `therm_step!` runs as
     # a no-op alongside the other phases.
-    p = YelmoModelParameters("tpo-relax-test";
+    p = YelmoParameters("tpo-relax-test";
                              ytopo  = p_ytopo,
-                             ydyn   = Yelmo.YelmoModelPar.ydyn_params(solver="fixed"),
-                             ytherm = Yelmo.YelmoModelPar.ytherm_params(method="fixed"))
+                             ydyn   = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
+                             ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"))
 
     y = YelmoModel(RESTART_PATH, 0.0;
                    p      = p,
@@ -1338,7 +1338,7 @@ end
 # Calving (phase 7) — kernel-level + end-to-end smoke tests.
 # ------------------------------------------------------------------
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ytopo_params, ycalv_params, ydyn_params,
+using Yelmo.YelmoPar: YelmoParameters, ytopo_params, ycalv_params, ydyn_params,
                             ytherm_params
 
 # Helper: tiny Bounded grid for kernel-level calving tests.
@@ -1579,7 +1579,7 @@ end
     z_sl  = CenterField(g);  fill!(interior(z_sl),     0.0)
     smb_ref = CenterField(g); fill!(interior(smb_ref), 0.0)
 
-    p = YelmoModelParameters("calv-kill";
+    p = YelmoParameters("calv-kill";
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
@@ -1638,7 +1638,7 @@ end
     # `topo_step!` called directly (so mat_step doesn't refresh
     # tau_eig_1 between zeroing and the calving phase), vm-m16 must
     # produce zero calving rate — the no-stress no-op path.
-    p_vm = YelmoModelParameters("calv-vm";
+    p_vm = YelmoParameters("calv-vm";
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16"),

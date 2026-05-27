@@ -12,7 +12,7 @@
 
 using IceSheetBenchmarks
 using Yelmo
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            ytherm_params, yneff_params, ytill_params,
                            ytopo_params
 using Oceananigans: interior
@@ -40,7 +40,7 @@ const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
 # ----------------------------------------------------------------------
 
 function _mismip3d_params(b)
-    return YelmoModelParameters("mismip3d_stnd";
+    return YelmoParameters("mismip3d_stnd";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,

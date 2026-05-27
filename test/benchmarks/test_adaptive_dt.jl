@@ -37,7 +37,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, ytherm_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params
 
@@ -45,7 +45,7 @@ using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params, yther
 # but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC),
 # `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
 function _adaptive_params(; pc_method::String = "FE-SBE")
-    return YelmoModelParameters("mismip3d_stnd_adaptive";
+    return YelmoParameters("mismip3d_stnd_adaptive";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = pc_method,
@@ -96,7 +96,7 @@ end
 function _fixed_params()
     p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
-    return YelmoModelParameters(p.name;
+    return YelmoParameters(p.name;
         yelmo  = yelmo_params(dt_method = 0),
         ydyn   = p.ydyn, yneff = p.yneff, ytill = p.ytill,
         ymat   = p.ymat, ytopo = p.ytopo,

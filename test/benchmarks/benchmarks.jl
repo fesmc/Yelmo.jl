@@ -167,7 +167,7 @@ function Yelmo.YelmoModel(b::AbstractBenchmark, t::Real;
                           boundaries = :bounded)
 
     if p === nothing
-        p = YelmoModelParameters(alias)
+        p = YelmoParameters(alias)
     end
 
     s = state(b, Float64(t))

@@ -18,14 +18,14 @@ using Oceananigans: interior
 include("benchmarks/helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params,
                            yelmo_params, ytherm_params
 
 # Same EISMINT-1 moving setup as test/benchmarks/test_eismint_moving.jl,
 # parameterised on the timing flag.
 function _eismint_moving_params(; timing::Bool)
-    return YelmoModelParameters("eismint_moving";
+    return YelmoParameters("eismint_moving";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",

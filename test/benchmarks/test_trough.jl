@@ -37,7 +37,7 @@ using NCDatasets
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -58,7 +58,7 @@ const _SPEC  = TroughBenchmark(:F17; dx_km=8.0)
 # through, producing c_bed ~53× too large. Fixing the ytill block
 # (and auditing yneff / ymat / ydyn while we're at it) closes it.
 function _trough_yelmo_params()
-    return YelmoModelParameters("trough_f17_load";
+    return YelmoParameters("trough_f17_load";
         # &ydyn — overrides namelist values for an SSA-only lockstep
         # check. solver = "ssa" diverges from the namelist's "diva"
         # by design (test exercises the SSA kernel against the

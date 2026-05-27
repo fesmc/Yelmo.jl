@@ -53,7 +53,7 @@ using Test
 using Statistics
 using NCDatasets
 using Yelmo
-using Yelmo.YelmoModelPar: YelmoModelParameters, ymat_params, ydyn_params,
+using Yelmo.YelmoPar: YelmoParameters, ymat_params, ydyn_params,
                            ytill_params, yneff_params, ytopo_params
 using Oceananigans.Fields: interior
 
@@ -71,7 +71,7 @@ const FIXTURE_PATH = joinpath(FIXTURES_DIR, "eismint_moving_t25000.nc")
 # `mat_step!` honours these to build ATT, enh, visc, visc_bar,
 # visc_int, and strs2D_* from the loaded Mirror state.
 function _mat_regression_params()
-    return YelmoModelParameters("mat_eismint_regression";
+    return YelmoParameters("mat_eismint_regression";
         ydyn = ydyn_params(solver = "sia",
                            uz_method = 3,
                            visc_method = 1,

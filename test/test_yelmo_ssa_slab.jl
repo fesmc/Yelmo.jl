@@ -55,7 +55,7 @@ using NCDatasets
 using Statistics: mean
 using SparseArrays: SparseMatrixCSC, sparse, nnz as sparse_nnz
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                             yneff_params, ytill_params
 
 # ----------------------------------------------------------------------
@@ -148,7 +148,7 @@ end
     _write_slab_s06_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H_const, alpha=alpha, Nz=Nz)
 
-    p = YelmoModelParameters("ssa_slab_diag";
+    p = YelmoParameters("ssa_slab_diag";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,                # constant viscosity = visc_const

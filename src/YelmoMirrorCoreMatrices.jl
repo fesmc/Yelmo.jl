@@ -3,7 +3,7 @@ module YelmoMirrorCore
 using Oceananigans: Grids, Fields
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
-using ..YelmoPar: YelmoParameters, write_nml
+using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml
 
 export YelmoMirror, init_state!, time_step!, sync!
 export yelmo_get_var2D, yelmo_get_var2D!
@@ -22,7 +22,7 @@ mutable struct YelmoMirror
     alias::String
     rundir::String
     time::Float64
-    p::YelmoParameters
+    p::YelmoMirrorParameters
     g::NamedTuple
     v::NamedTuple
     bnd::NamedTuple
@@ -40,12 +40,12 @@ function YelmoMirror(filename::String, time::Float64;
     )
 
     # Load parameters from source parameter file
-    p = YelmoParameters(filename)
+    p = YelmoMirrorParameters(filename)
 
     return YelmoMirror(p, time; alias, rundir, overwrite)
 end
 
-function YelmoMirror(p::YelmoParameters, time::Float64; 
+function YelmoMirror(p::YelmoMirrorParameters, time::Float64; 
     alias::String="ylmo1",
     rundir::String="./",
     overwrite::Bool=false

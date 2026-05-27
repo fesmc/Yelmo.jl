@@ -34,7 +34,7 @@ import Pkg; Pkg.activate("..")
 
 using Test
 using Yelmo
-using Yelmo.YelmoModelPar: ydyn_params, ymat_params, YelmoModelParameters
+using Yelmo.YelmoPar: ydyn_params, ymat_params, YelmoParameters
 using Oceananigans: interior
 
 include("helpers.jl")
@@ -147,7 +147,7 @@ end
 
         # Override solver to "sia" and pin n_glen = 3 to match the
         # BUELER-B convention.
-        p = YelmoModelParameters("sia_conv_$(Int(round(dx_km)))km";
+        p = YelmoParameters("sia_conv_$(Int(round(dx_km)))km";
                                  ydyn = ydyn_params(solver = "sia"),
                                  ymat = ymat_params(n_glen = 3.0))
 

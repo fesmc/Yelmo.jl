@@ -96,7 +96,7 @@ using .YelmoBenchmarks
 b = BuelerBenchmark(:B; dx_km = 10.0, R0_km = 750.0, H0 = 3600.0)
 
 # In-memory YelmoModel directly from the analytical state — no NetCDF.
-y = YelmoModel(b, 1000.0; p = YelmoModelParameters("bueler_b"))
+y = YelmoModel(b, 1000.0; p = YelmoParameters("bueler_b"))
 
 # Analytical velocity at the same time for comparison.
 ux_ref, uy_ref = analytical_velocity(b, 1000.0)

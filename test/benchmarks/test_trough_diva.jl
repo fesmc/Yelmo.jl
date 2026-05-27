@@ -25,7 +25,7 @@ using Oceananigans: interior
 include("helpers.jl")
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -36,7 +36,7 @@ const _SPEC_DIVA   = TroughBenchmark(:F17; dx_km = 8.0)
 # with `solver = "diva"` (matching the Fortran TROUGH-F17 namelist
 # default) and the new `no_slip = false` flag explicit.
 function _trough_diva_params()
-    return YelmoModelParameters("trough_f17_diva_load";
+    return YelmoParameters("trough_f17_diva_load";
         ydyn = ydyn_params(
             solver         = "diva",
             visc_method    = 1,

@@ -40,7 +40,7 @@ using Printf
 include(joinpath(@__DIR__, "..", "..", "test", "benchmarks", "helpers.jl"))
 using .YelmoBenchmarks
 
-using Yelmo.YelmoModelPar: YelmoModelParameters, ydyn_params, ymat_params,
+using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params
 
 # ----------------------------------------------------------------------
@@ -65,7 +65,7 @@ const OUTPUT_DIR = abspath(joinpath(@__DIR__, "..", "..", "logs",
 # ----------------------------------------------------------------------
 
 function _params()
-    return YelmoModelParameters("mismip3d_stnd_att_ramp";
+    return YelmoParameters("mismip3d_stnd_att_ramp";
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,

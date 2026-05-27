@@ -129,7 +129,7 @@ function init_topo_load!(y::YelmoModel;
                          grad_lim_zb::Real = 0.05,
                          boundaries::AbstractString = "infinite")
     y.p === nothing && error(
-        "init_topo_load!: y.p must be a YelmoModelParameters value " *
+        "init_topo_load!: y.p must be a YelmoParameters value " *
         "(with `yelmo_init_topo` filled in).")
 
     par       = y.p.yelmo_init_topo
@@ -270,7 +270,7 @@ custom region masks via `add_region!`, basin-aware physics hooks).
 """
 function init_masks!(y::YelmoModel)
     y.p === nothing && error(
-        "init_masks!: y.p must be a YelmoModelParameters value " *
+        "init_masks!: y.p must be a YelmoParameters value " *
         "(with `yelmo_masks` filled in).")
 
     par       = y.p.yelmo_masks
@@ -378,7 +378,7 @@ function data_load!(y::YelmoModel;
                     grad_lim_zb::Real = 0.05,
                     boundaries::AbstractString = "infinite")
     y.p === nothing && error(
-        "data_load!: y.p must be a YelmoModelParameters value (with " *
+        "data_load!: y.p must be a YelmoParameters value (with " *
         "`yelmo_data` filled in). Construct YelmoModel with parameters " *
         "before calling data_load!.")
 
