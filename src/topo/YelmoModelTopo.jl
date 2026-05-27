@@ -138,7 +138,7 @@ function topo_step!(y::YelmoModel, dt::Float64;
         end
     end
 
-    _apply_mask_ice_pass!(y, H_prev)
+    _apply_mask_ice_pass!(y)
 
     # Snapshot after dynamics + mask pass; used for `dHidt_dyn`.
     H_after_dyn = copy(interior(y.tpo.H_ice))
@@ -271,7 +271,7 @@ function _topo_mb_cascade!(y::YelmoModel, dt::Float64)
 
     # Residual cleanup tendency for margin/island regularisation.
     resid_tendency!(y.tpo.mb_resid, y.tpo.H_ice, y.tpo.f_ice, y.tpo.f_grnd,
-                    y.bnd.ice_allowed,
+                    y.bnd.mask_ice, y.bnd.H_ice_ref,
                     y.p.ytopo.H_min_flt, y.p.ytopo.H_min_grnd, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.mb_resid, dt; adjust_mb=true)
 
@@ -418,8 +418,8 @@ function topo_pc_step!(y::YelmoModel, dt::Float64;
                         adjust_mb = true,
                         mb_lim    = y.p.ytopo.dHdt_dyn_lim)
 
-        # 4. Mask-ice post-pass (NONE→0, FIXED→prior, DYNAMIC→max(0)).
-        apply_mask_ice_pass!(y, interior(y.tpo.H_ice_n))
+        # 4. Mask-ice post-pass (NONE→0, FIXED→H_ice_ref, DYNAMIC→max(0)).
+        apply_mask_ice_pass!(y)
         calc_f_ice!(y)
 
         # 5. MB cascade on H_pred.
@@ -450,7 +450,7 @@ function topo_pc_step!(y::YelmoModel, dt::Float64;
                         mb_lim    = y.p.ytopo.dHdt_dyn_lim)
 
         # 4. Mask-ice pass and f_ice refresh.
-        apply_mask_ice_pass!(y, interior(y.tpo.H_ice_n))
+        apply_mask_ice_pass!(y)
         calc_f_ice!(y)
 
         # 5. MB cascade on H_corr.
@@ -553,18 +553,26 @@ end
 # Per-cell post-step pass keyed off bnd.mask_ice. Stored values are
 # Float64 representations of the Int constants from YelmoCore.
 #
-# Also called from `pc_step!` (timestepping.jl) after the Heun corrector
-# average to restore mask invariants that the (H_n + H_**)/2 average
-# can violate (e.g. MASK_ICE_NONE cells get H_corr = H_n/2 > 0).
-function apply_mask_ice_pass!(y::YelmoModel, H_prev::AbstractArray)
-    H_ice    = interior(y.tpo.H_ice)
-    mask_ice = interior(y.bnd.mask_ice)
+# This is an invariant-restore pass with no mass-balance accounting:
+# the faithful `mb_resid` bookkeeping for the mask lives in
+# `resid_tendency!` (the `calc_G_boundaries` port). This pass is needed
+# at points where no residual step follows — notably after the Heun
+# corrector average in `pc_step!` (timestepping.jl), where the
+# (H_n + H_**)/2 average can violate mask invariants (e.g. a
+# MASK_ICE_NONE cell gets H_corr = H_n/2 > 0), and after the advective
+# stage in `topo_step!` / `topo_pc_step!` before the MB cascade reads
+# the geometry. Semantics match Fortran: MASK_ICE_NONE → 0,
+# MASK_ICE_FIXED → bnd.H_ice_ref, MASK_ICE_DYNAMIC → clamp ≥ 0.
+function apply_mask_ice_pass!(y::YelmoModel)
+    H_ice     = interior(y.tpo.H_ice)
+    mask_ice  = interior(y.bnd.mask_ice)
+    H_ice_ref = interior(y.bnd.H_ice_ref)
     @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
         m = mask_ice[i, j, 1]
         if m == Float64(MASK_ICE_NONE)
             H_ice[i, j, 1] = 0.0
         elseif m == Float64(MASK_ICE_FIXED)
-            H_ice[i, j, 1] = H_prev[i, j, 1]
+            H_ice[i, j, 1] = H_ice_ref[i, j, 1]
         else  # MASK_ICE_DYNAMIC (default)
             H_ice[i, j, 1] = max(H_ice[i, j, 1], 0.0)
         end

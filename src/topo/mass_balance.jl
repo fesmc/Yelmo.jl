@@ -119,14 +119,17 @@ function mbal_tendency!(G_mb, H_ice, f_grnd, mbal, dt::Real)
 end
 
 """
-    resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
+    resid_tendency!(G_resid, H_ice, f_ice, f_grnd, mask_ice, H_ice_ref,
                     H_min_flt, H_min_grnd, dt) -> G_resid
 
 Compute the residual mass-balance tendency `G_resid` [m/yr] that
 removes ice in cells where the dynamic + SMB update has produced an
 unphysical configuration (margins below the min-thickness threshold,
-isolated ice islands, margins thicker than their neighbors, ice in
-disallowed cells). The tendency is signed so that
+isolated ice islands, margins thicker than their neighbors), and that
+enforces the per-cell boundary mask `bnd.mask_ice`:
+`MASK_ICE_NONE` cells are forced to zero thickness and `MASK_ICE_FIXED`
+cells are imposed at the reference thickness `H_ice_ref`. The tendency
+is signed so that
 `apply_tendency!(H_ice, G_resid, dt)` would realise the cleanup.
 
 The factor of `1.1` on the rate is intentional: a downstream call to
@@ -144,16 +147,21 @@ distinct from 0 unless interior is itself 0; Periodic axes wrap).
 Port of `calc_G_boundaries` in
 `yelmo/src/physics/mass_conservation.f90:609`. The EISMINT-summit
 averaging block (lines 651-658) and the trailing per-BC border-
-zeroing switch (lines 761-805) are dropped — Oceananigans' BC
-machinery now handles boundary semantics.
+zeroing switch (lines 757-812, the `boundaries`-string cases) are
+dropped — Oceananigans' BC machinery now handles boundary semantics.
+The `bnd%mask_ice` handling is kept faithfully: `MASK_ICE_NONE` → 0
+(line 805/810), `MASK_ICE_FIXED` → `H_ice_ref` (line 816), and the
+mb_resid split where `MASK_ICE_FIXED` cells use the exact realised
+rate while all other cells keep the 1.1× overshoot (lines 824-828).
 """
-function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
+function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, mask_ice, H_ice_ref,
                          H_min_flt::Real, H_min_grnd::Real,
                          dt::Real)
     H_in = interior(H_ice)
     Fi   = interior(f_ice)
     Fg   = interior(f_grnd)
-    Ia   = interior(ice_allowed)
+    Mi   = interior(mask_ice)
+    Href = interior(H_ice_ref)
     G    = interior(G_resid)
 
     nx = size(H_in, 1)
@@ -170,9 +178,12 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
     H_tmp_f = CenterField(H_ice.grid; boundary_conditions=H_ice.boundary_conditions)
     H_tmp   = interior(H_tmp_f)
 
-    # ---- 1. Disallow ice where the boundary mask says so. -----------
+    mask_none = Float64(MASK_ICE_NONE)
+    mask_fixed = Float64(MASK_ICE_FIXED)
+
+    # ---- 1. Force zero thickness where the mask forbids ice. --------
     @inbounds for j in 1:ny, i in 1:nx
-        if Ia[i, j, 1] == 0.0
+        if Mi[i, j, 1] == mask_none
             H_new[i, j, 1] = 0.0
         end
     end
@@ -255,11 +266,27 @@ function resid_tendency!(G_resid, H_ice, f_ice, f_grnd, ice_allowed,
         end
     end
 
-    # ---- 5. Convert the realized H delta to a tendency. -------------
+    # ---- 5. Impose reference thickness on prescribed cells. ---------
+    # (applied universally, independent of the cleanup above — mirrors
+    #  `mass_conservation.f90:816`.)
+    @inbounds for j in 1:ny, i in 1:nx
+        if Mi[i, j, 1] == mask_fixed
+            H_new[i, j, 1] = Href[i, j, 1]
+        end
+    end
+
+    # ---- 6. Convert the realized H delta to a tendency. -------------
+    # MASK_ICE_FIXED (imposed) cells use the exact realised rate so that
+    # `apply_tendency!` lands exactly on `H_ice_ref` each step (no drift
+    # from a persistent dyn inflow/outflow imbalance). All other cells
+    # keep the 10% overshoot so the `apply_tendency!` clip-to-zero
+    # handles the MASK_ICE_NONE path robustly. Mirrors
+    # `mass_conservation.f90:824-828`.
     if dt != 0.0
         inv_dt = 1.0 / dt
         @inbounds for j in 1:ny, i in 1:nx
-            G[i, j, 1] = 1.1 * (H_new[i, j, 1] - H_in[i, j, 1]) * inv_dt
+            delta = (H_new[i, j, 1] - H_in[i, j, 1]) * inv_dt
+            G[i, j, 1] = Mi[i, j, 1] == mask_fixed ? delta : 1.1 * delta
         end
     else
         fill!(G, 0.0)

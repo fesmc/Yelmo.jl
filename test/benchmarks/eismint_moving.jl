@@ -183,16 +183,18 @@ function _eismint_moving_analytical_state(b::EISMINT1MovingBenchmark)
     Q_geo  = fill(b.Q_geo_const, Nx, Ny)
     T_shlf = fill(b.T_srf_const, Nx, Ny)
 
-    bmb_shlf    = zeros(Nx, Ny)
-    H_sed       = zeros(Nx, Ny)
-    ice_allowed = ones(Nx, Ny)
-    calv_mask   = zeros(Nx, Ny)
+    bmb_shlf  = zeros(Nx, Ny)
+    H_sed     = zeros(Nx, Ny)
+    # All cells dynamic; EISMINT border handling is done via the
+    # `boundaries` string, not the ice mask.
+    mask_ice  = fill(Float64(MASK_ICE_DYNAMIC), Nx, Ny)
+    calv_mask = zeros(Nx, Ny)
 
     return (xc = b.xc, yc = b.yc,
             H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb_ref, T_srf = T_srf, Q_geo = Q_geo,
             bmb_shlf = bmb_shlf, T_shlf = T_shlf, H_sed = H_sed,
-            ice_allowed = ice_allowed, calv_mask = calv_mask)
+            mask_ice = mask_ice, calv_mask = calv_mask)
 end
 
 _spec_name(b::EISMINT1MovingBenchmark) = "eismint_moving"
@@ -281,7 +283,7 @@ function write_fixture!(b::EISMINT1MovingBenchmark, path::AbstractString;
             ("bmb_shlf",    s.bmb_shlf,    "m/yr",     "Shelf bmb (zero)"),
             ("T_shlf",      s.T_shlf,      "K",        "Shelf base temperature"),
             ("H_sed",       s.H_sed,       "m",        "Sediment thickness (zero)"),
-            ("ice_allowed", s.ice_allowed, "1",        "Ice-allowed mask"),
+            ("mask_ice",    s.mask_ice,    "1",        "Ice mask (0=none, 1=fixed, 2=dynamic)"),
             ("calv_mask",   s.calv_mask,   "1",        "Calving mask (zero)"),
         )
             v = defVar(ds, name, Float64, ("xc", "yc"))

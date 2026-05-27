@@ -38,12 +38,11 @@ What it does, in order:
 6. Call [`load_state!`](@ref) to copy variable data from the restart
    into the pre-allocated fields, restricted to the groups in
    `groups`.
-7. Infer `bnd.mask_ice` from the restart: if `mask_ice` is in the
-   file, use it; otherwise fall back to `ice_allowed` (allowed →
-   `DYNAMIC`, not-allowed → `NONE`); otherwise leave the all-dynamic
-   default. See the
-   [mask constants](../api/core.md#mask-constants) for the bit
-   pattern.
+7. `bnd.mask_ice` comes from the restart: if `mask_ice` is in the
+   file, [`load_state!`](@ref) copies it in; otherwise the all-dynamic
+   default from step 5 stands. See the
+   [mask constants](../api/core.md#mask-constants) for the integer
+   value meanings.
 
 The `groups` keyword is useful when a Yelmo Fortran restart doesn't
 carry every group — e.g. the data group `dta` is rarely populated on

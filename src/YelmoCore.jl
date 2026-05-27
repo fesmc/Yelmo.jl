@@ -970,12 +970,6 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
 
-    # ice_allowed defaults to 1 (permit ice everywhere). resid_tendency!
-    # silently zeroes H_ice on cells where ice_allowed == 0, so the
-    # all-zero Oceananigans field default would suppress all SMB-driven
-    # nucleation unless overridden by a restart or explicit benchmark IC.
-    fill!(interior(bnd.ice_allowed), 1.0)
-
     # SIA / SSA solver scratch buffers; not in the dyn schema because
     # they are recomputed every `dyn_step!` and not part of the model
     # state. Exposed as `y.dyn.scratch.<name>`. See
@@ -1209,35 +1203,11 @@ function YelmoModel(restart_file::String, time::Float64;
 
     # Default mask_ice to all-dynamic before load_state!. If the restart
     # file carries `mask_ice`, load_state! overwrites this; otherwise the
-    # post-load inference may overwrite based on `ice_allowed`.
+    # all-dynamic default stands (legacy `ice_allowed` is no longer read).
     fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
 
     load_state!(y, restart_file; groups=groups, strict=strict, mps=mps)
 
-    _infer_mask_ice!(y, restart_file; mps=mps)
-
-    return y
-end
-
-# Fill `bnd.mask_ice` based on what is actually in the restart file.
-#  - If the restart contains `mask_ice`, do nothing (load_state! has
-#    already placed its values into `y.bnd.mask_ice`).
-#  - Else if it contains `ice_allowed`, derive: allowed → DYNAMIC,
-#    not-allowed → NONE. Read directly from the file so this works
-#    even when `:bnd` was not in the loaded `groups`.
-#  - Else leave the all-dynamic default established before load_state!.
-function _infer_mask_ice!(y::YelmoModel, restart_file::AbstractString;
-                          mps = nothing)
-    NCDataset(restart_file) do ds
-        haskey(ds, "mask_ice") && return  # already loaded
-        haskey(ds, "ice_allowed") || return  # nothing to infer from
-
-        ia = _read_nc_2d_mps(ds["ice_allowed"], mps, "ice_allowed")
-        mask_ice = interior(y.bnd.mask_ice)
-        @inbounds for j in axes(mask_ice, 2), i in axes(mask_ice, 1)
-            mask_ice[i, j, 1] = ia[i, j] != 0 ? Float64(MASK_ICE_DYNAMIC) : Float64(MASK_ICE_NONE)
-        end
-    end
     return y
 end
 

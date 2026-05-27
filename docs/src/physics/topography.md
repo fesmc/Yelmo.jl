@@ -81,7 +81,7 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
   overridden by passing `c=YelmoConstants(...)` to the constructor.
 - `dyn`: `ux_bar`, `uy_bar` (advection)
 - `bnd`: `smb_ref`, `bmb_shlf`, `fmb_shlf`, `z_bed`, `z_sl`,
-  `z_bed_sd`, `H_ice_ref`, `tau_relax`, `ice_allowed`, `mask_ice`
+  `z_bed_sd`, `H_ice_ref`, `tau_relax`, `mask_ice`
 - `thrm`: `bmb_grnd`
 
 **Written** (`tpo` group): the entire ytopo state — `H_ice`, `H_grnd`,
