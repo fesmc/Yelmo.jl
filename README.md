@@ -1,5 +1,7 @@
 # Yelmo.jl
 
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://fesmc.github.io/Yelmo.jl)
+
 A Julia implementation of the Yelmo ice-sheet model. The pure-Julia
 [`YelmoModel`](docs/src/api/) backend is the primary path; an optional
 [`YelmoMirror`](docs/src/api/mirror.md) backend wraps the Fortran model
