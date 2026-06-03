@@ -38,6 +38,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using LoopVectorization: @turbo
 
 # `vert_int_trapz_boundary!` is the same trapezoidal-with-explicit-
 # boundary helper used by dyn's `calc_visc_eff_int!`. Lives in the
@@ -90,14 +91,22 @@ function calc_viscosity_glen!(visc, de, ATT, f_ice;
     eps0sq = Float64(eps_0)^2
     vmin   = Float64(visc_min)
 
-    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
-        if fi[i, j, 1] == 1.0
-            de_reg = sqrt(De[i, j, k]^2 + eps0sq)
-            v = 0.5 * A[i, j, k]^exp1 * de_reg^exp2
-            V[i, j, k] = v < vmin ? vmin : v
-        else
-            V[i, j, k] = 0.0
-        end
+    # Branchless + SIMD-vectorized (@turbo): the original `if fi == 1`
+    # branch defeated LLVM auto-vectorization, leaving the two pow calls
+    # (`A^exp1 * de_reg^exp2`) scalar. We compute the math unconditionally
+    # with safe inputs on masked-out cells, then `ifelse` selects between
+    # the clipped value and 0.0. Externally-visible behaviour matches the
+    # branched form.
+    @turbo for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        iced    = fi[i, j, 1] == 1.0
+        # Floor A to a positive value on ice-free cells so A^exp1 doesn't
+        # NaN (exp1 is negative for n_glen > 1). De and its square are
+        # always finite — no floor needed.
+        a       = ifelse(iced, A[i, j, k], 1.0)
+        de_reg  = sqrt(De[i, j, k]^2 + eps0sq)
+        v       = 0.5 * a^exp1 * de_reg^exp2
+        v_clip  = ifelse(v < vmin, vmin, v)
+        V[i, j, k] = ifelse(iced, v_clip, 0.0)
     end
     return visc
 end
