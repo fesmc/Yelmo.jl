@@ -94,8 +94,16 @@ end
 # wraps would need iteration to convergence (rare in practice for
 # ice-sheet domains). Add explicit iteration if needed.
 function _chamfer_signed_distance!(D::Field, F::Field, dx::Float64)
+    # Lift to halo-inclusive `.data` OffsetArrays. Neighbour reads
+    # (`Fo[i-1, j, 1]`, `Do[i-1, j-1, 1]`) hit the same halo cells as
+    # `F[i-1, j, 1]` / `D[i-1, j-1, 1]` would via Field's getindex, but
+    # without the per-access dispatch through Field — the chamfer inner
+    # loop has 4–5 such neighbour reads per cell and ran ~3× slower
+    # through the Field-API path on initmip-grl.
     Di = interior(D)
+    Do = D.data
     Fi = interior(F)
+    Fo = F.data
     nx, ny = size(Di, 1), size(Di, 2)
     @assert size(Fi, 1) == nx && size(Fi, 2) == ny
 
@@ -106,10 +114,10 @@ function _chamfer_signed_distance!(D::Field, F::Field, dx::Float64)
     # + BC (clamp by default on Bounded; wrap on Periodic).
     @inbounds for j in 1:ny, i in 1:nx
         if Fi[i, j, 1] > 0.0
-            f_w = F[i-1, j,   1]
-            f_e = F[i+1, j,   1]
-            f_s = F[i,   j-1, 1]
-            f_n = F[i,   j+1, 1]
+            f_w = Fo[i-1, j,   1]
+            f_e = Fo[i+1, j,   1]
+            f_s = Fo[i,   j-1, 1]
+            f_n = Fo[i,   j+1, 1]
             Di[i, j, 1] = (f_w == 0.0 || f_e == 0.0 ||
                            f_s == 0.0 || f_n == 0.0) ? 0.0 : Inf
         else
@@ -122,20 +130,20 @@ function _chamfer_signed_distance!(D::Field, F::Field, dx::Float64)
     # 8-stencil reads include diagonals which `fill_halo_regions!`
     # alone leaves unfilled on Bounded sides.
     fill_halo_regions!(D); fill_corner_halos!(D)
-    _chamfer_forward!(D, dx, diag_dx, nx, ny)
+    _chamfer_forward!(D, Di, Do, dx, diag_dx, nx, ny)
 
     fill_halo_regions!(D); fill_corner_halos!(D)
-    _chamfer_backward!(D, dx, diag_dx, nx, ny)
+    _chamfer_backward!(D, Di, Do, dx, diag_dx, nx, ny)
 
     # One additional FB round to resolve potential wrap-around paths
     # on Periodic axes. On a fully Bounded domain this round is a
     # provable no-op (the first FB already converged) — about a 2x
     # cost on Bounded grids in exchange for correctness on Periodic.
     fill_halo_regions!(D); fill_corner_halos!(D)
-    _chamfer_forward!(D, dx, diag_dx, nx, ny)
+    _chamfer_forward!(D, Di, Do, dx, diag_dx, nx, ny)
 
     fill_halo_regions!(D); fill_corner_halos!(D)
-    _chamfer_backward!(D, dx, diag_dx, nx, ny)
+    _chamfer_backward!(D, Di, Do, dx, diag_dx, nx, ny)
 
     # Phase 3: sign flip for non-source cells (`F == 0`).
     @inbounds for j in 1:ny, i in 1:nx
@@ -149,30 +157,34 @@ end
 
 # Forward chamfer pass. Stencil reads cells already visited this pass
 # (the (j-1)-row plus (i-1, j) on the current row).
-function _chamfer_forward!(D::Field, dx::Float64, diag_dx::Float64,
+#
+# Loop-carried dependency in i: `Do[i-1, j, 1]` is the previous-i write
+# from this same row. Cannot be SIMD-vectorized — the algorithm itself
+# requires serialization along the iteration direction.
+function _chamfer_forward!(D::Field, Di, Do,
+                           dx::Float64, diag_dx::Float64,
                            nx::Int, ny::Int)
-    Di = interior(D)
     @inbounds for j in 1:ny, i in 1:nx
         d = Di[i, j, 1]
-        d = min(d, D[i-1, j-1, 1] + diag_dx)
-        d = min(d, D[i,   j-1, 1] + dx)
-        d = min(d, D[i+1, j-1, 1] + diag_dx)
-        d = min(d, D[i-1, j,   1] + dx)
+        d = min(d, Do[i-1, j-1, 1] + diag_dx)
+        d = min(d, Do[i,   j-1, 1] + dx)
+        d = min(d, Do[i+1, j-1, 1] + diag_dx)
+        d = min(d, Do[i-1, j,   1] + dx)
         Di[i, j, 1] = d
     end
 end
 
 # Backward chamfer pass. Reverse iteration order; stencil reads the
 # (j+1) row plus (i+1, j).
-function _chamfer_backward!(D::Field, dx::Float64, diag_dx::Float64,
+function _chamfer_backward!(D::Field, Di, Do,
+                            dx::Float64, diag_dx::Float64,
                             nx::Int, ny::Int)
-    Di = interior(D)
     @inbounds for j in ny:-1:1, i in nx:-1:1
         d = Di[i, j, 1]
-        d = min(d, D[i+1, j,   1] + dx)
-        d = min(d, D[i-1, j+1, 1] + diag_dx)
-        d = min(d, D[i,   j+1, 1] + dx)
-        d = min(d, D[i+1, j+1, 1] + diag_dx)
+        d = min(d, Do[i+1, j,   1] + dx)
+        d = min(d, Do[i-1, j+1, 1] + diag_dx)
+        d = min(d, Do[i,   j+1, 1] + dx)
+        d = min(d, Do[i+1, j+1, 1] + diag_dx)
         Di[i, j, 1] = d
     end
 end

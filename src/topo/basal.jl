@@ -10,6 +10,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using LoopVectorization: @turbo
 
 export calc_bmb_total!
 
@@ -51,29 +52,29 @@ function calc_bmb_total!(bmb, bmb_grnd, bmb_shlf,
     Hg  = interior(H_grnd)
     Fg  = interior(f_grnd)
 
+    # Each gl_method branch becomes a single @turbo loop with the
+    # ternary lifted to `ifelse`. Method dispatch is a single string
+    # compare per call — amortised across the whole 2D sweep.
     if bmb_gl_method == "fcmp"
-        @inbounds for j in axes(B, 2), i in axes(B, 1)
-            B[i, j, 1] = Hg[i, j, 1] <= 0.0 ? Bs[i, j, 1] : Bg[i, j, 1]
+        @turbo for j in axes(B, 2), i in axes(B, 1)
+            B[i, j, 1] = ifelse(Hg[i, j, 1] <= 0.0, Bs[i, j, 1], Bg[i, j, 1])
         end
 
     elseif bmb_gl_method == "fmp"
-        @inbounds for j in axes(B, 2), i in axes(B, 1)
-            B[i, j, 1] = Fg[i, j, 1] < 1.0 ? Bs[i, j, 1] : Bg[i, j, 1]
+        @turbo for j in axes(B, 2), i in axes(B, 1)
+            B[i, j, 1] = ifelse(Fg[i, j, 1] < 1.0, Bs[i, j, 1], Bg[i, j, 1])
         end
 
     elseif bmb_gl_method == "pmp"
-        @inbounds for j in axes(B, 2), i in axes(B, 1)
+        @turbo for j in axes(B, 2), i in axes(B, 1)
             fg = Fg[i, j, 1]
-            if fg < 1.0
-                B[i, j, 1] = fg * Bg[i, j, 1] + (1.0 - fg) * Bs[i, j, 1]
-            else
-                B[i, j, 1] = Bg[i, j, 1]
-            end
+            blend = fg * Bg[i, j, 1] + (1.0 - fg) * Bs[i, j, 1]
+            B[i, j, 1] = ifelse(fg < 1.0, blend, Bg[i, j, 1])
         end
 
     elseif bmb_gl_method == "nmp"
-        @inbounds for j in axes(B, 2), i in axes(B, 1)
-            B[i, j, 1] = Fg[i, j, 1] == 0.0 ? Bs[i, j, 1] : Bg[i, j, 1]
+        @turbo for j in axes(B, 2), i in axes(B, 1)
+            B[i, j, 1] = ifelse(Fg[i, j, 1] == 0.0, Bs[i, j, 1], Bg[i, j, 1])
         end
 
     elseif bmb_gl_method == "pmpt"
@@ -86,11 +87,11 @@ function calc_bmb_total!(bmb, bmb_grnd, bmb_shlf,
               "Supported: \"fcmp\", \"fmp\", \"pmp\", \"nmp\".")
     end
 
-    # No melt on bare grounded land.
-    @inbounds for j in axes(B, 2), i in axes(B, 1)
-        if Hg[i, j, 1] > 0.0 && H[i, j, 1] == 0.0
-            B[i, j, 1] = 0.0
-        end
+    # No melt on bare grounded land. Branchless mask: bare grounded
+    # cells get 0, everyone else keeps the just-computed B.
+    @turbo for j in axes(B, 2), i in axes(B, 1)
+        bare_grnd = (Hg[i, j, 1] > 0.0) & (H[i, j, 1] == 0.0)
+        B[i, j, 1] = ifelse(bare_grnd, 0.0, B[i, j, 1])
     end
 
     return bmb

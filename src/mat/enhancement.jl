@@ -22,6 +22,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using LoopVectorization: @turbo
 
 export define_enhancement_factor_2D!, define_enhancement_factor_3D!
 
@@ -97,12 +98,17 @@ function define_enhancement_factor_3D!(enh, f_grnd, f_shear;
     e_stream = Float64(enh_stream)
     e_shlf   = Float64(enh_shlf)
 
-    @inbounds for j in 1:Ny, i in 1:Nx
-        enh_ssa = Fg[i, j, 1] * e_stream + (1.0 - Fg[i, j, 1]) * e_shlf
-        for k in 1:Nz
-            E[i, j, k] = Fs[i, j, k] * e_shear +
-                         (1.0 - Fs[i, j, k]) * enh_ssa
-        end
+    # Loop order is (k, j, i) so the innermost iteration walks the fastest
+    # (column-major) stride of E and Fs — the original (j, i)-outer +
+    # k-inner pattern jumped by Nx·Ny floats per iteration, busting cache.
+    # `enh_ssa` (k-invariant) is recomputed inline rather than hoisted
+    # into a 2D scratch — the extra mul-add per cell is cheaper than a
+    # temporary allocation, and @turbo SIMD-vectorizes the whole body.
+    @turbo for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        fg      = Fg[i, j, 1]
+        enh_ssa = fg * e_stream + (1.0 - fg) * e_shlf
+        fs      = Fs[i, j, k]
+        E[i, j, k] = fs * e_shear + (1.0 - fs) * enh_ssa
     end
     return enh
 end

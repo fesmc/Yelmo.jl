@@ -12,6 +12,7 @@
 
 using Oceananigans.Fields: interior, CenterField
 using Oceananigans.BoundaryConditions: fill_halo_regions!
+using LoopVectorization: @turbo
 
 export apply_tendency!, mbal_tendency!, resid_tendency!
 
@@ -43,32 +44,50 @@ function apply_tendency!(H_ice, mb_dot, dt::Real;
 
     H = interior(H_ice)
     G = interior(mb_dot)
-
-    @inbounds for j in axes(H, 2), i in axes(H, 1)
-        H_prev = H[i, j, 1]
-
-        # Clip the requested tendency.
-        g = G[i, j, 1]
-        if g >  mb_lim;  g =  mb_lim;  end
-        if g < -mb_lim;  g = -mb_lim;  end
-
-        H_new = H_prev + dt * g
-
-        # Clamp to non-negative and zero out tiny residuals.
-        if H_new < 0.0
-            H_new = 0.0
-        elseif abs(H_new) < _APPLY_TOL
-            H_new = 0.0
-        end
-
-        H[i, j, 1] = H_new
-
-        if adjust_mb
-            G[i, j, 1] = (H_new - H_prev) / dt
-        end
+    # Split on the `adjust_mb` switch so both branches present a
+    # straight-line loop body to @turbo. `adjust_mb` is a Bool kwarg —
+    # cheap to dispatch on once per call.
+    if adjust_mb
+        _apply_tendency_kernel_adjust!(H, G, Float64(dt), mb_lim)
+    else
+        _apply_tendency_kernel!(H, G, Float64(dt), mb_lim)
     end
-
     return H_ice
+end
+
+# Branchless inner kernel. The 4 original `if` branches (mb_lim clip,
+# H_new < 0 floor, |H_new| < TOL collapse) are replaced with clamp /
+# ifelse, then @turbo SIMD-vectorizes the body.
+@inline function _apply_tendency_kernel!(H::AbstractArray{Float64},
+                                         G::AbstractArray{Float64},
+                                         dt::Float64, mb_lim::Float64)
+    @turbo for j in axes(H, 2), i in axes(H, 1)
+        g     = G[i, j, 1]
+        g     = ifelse(g >  mb_lim,  mb_lim, g)
+        g     = ifelse(g < -mb_lim, -mb_lim, g)
+        H_new = H[i, j, 1] + dt * g
+        H_new = ifelse(H_new < 0.0,                  0.0, H_new)
+        H_new = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
+        H[i, j, 1] = H_new
+    end
+end
+
+# Same kernel, but also writes back the realised tendency to G.
+@inline function _apply_tendency_kernel_adjust!(H::AbstractArray{Float64},
+                                                G::AbstractArray{Float64},
+                                                dt::Float64, mb_lim::Float64)
+    inv_dt = 1.0 / dt
+    @turbo for j in axes(H, 2), i in axes(H, 1)
+        H_prev = H[i, j, 1]
+        g      = G[i, j, 1]
+        g      = ifelse(g >  mb_lim,  mb_lim, g)
+        g      = ifelse(g < -mb_lim, -mb_lim, g)
+        H_new  = H_prev + dt * g
+        H_new  = ifelse(H_new < 0.0,                  0.0, H_new)
+        H_new  = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
+        H[i, j, 1] = H_new
+        G[i, j, 1] = (H_new - H_prev) * inv_dt
+    end
 end
 
 """
@@ -87,35 +106,46 @@ tendency `G_mb` [m/yr] given the current ice state. In place:
 Port of `calc_G_mbal` in `yelmo/src/physics/mass_conservation.f90:486`.
 """
 function mbal_tendency!(G_mb, H_ice, f_grnd, mbal, dt::Real)
-    G = interior(G_mb)
-    H = interior(H_ice)
+    G  = interior(G_mb)
+    H  = interior(H_ice)
     Fg = interior(f_grnd)
-    M = interior(mbal)
+    M  = interior(mbal)
+    _mbal_tendency_kernel!(G, H, Fg, M, Float64(dt))
+    return G_mb
+end
 
-    @inbounds for j in axes(G, 2), i in axes(G, 1)
-        g = M[i, j, 1]
-        h = H[i, j, 1]
+# Branchless inner kernel. The 3 original guard branches are replaced
+# with `ifelse`-mask predicates so the body is straight-line and
+# @turbo can SIMD-vectorize it. The `dt == 0` guard is hoisted out of
+# the loop (dt is loop-invariant) — we only enter the over-melt clamp
+# when dt is nonzero, and the per-cell over-melt test uses `dt != 0`
+# implicit via `(h + dt*g) < 0`.
+@inline function _mbal_tendency_kernel!(G::AbstractArray{Float64},
+                                        H::AbstractArray{Float64},
+                                        Fg::AbstractArray{Float64},
+                                        M::AbstractArray{Float64},
+                                        dt::Float64)
+    # Pre-compute `1/dt` if dt is nonzero; on dt == 0 the over-melt clamp
+    # is mathematically a no-op (the `(h + 0*g) < 0` test reduces to
+    # `h < 0`, which never fires since H_ice is non-negative).
+    inv_dt = dt == 0.0 ? 0.0 : 1.0 / dt
+    @turbo for j in axes(G, 2), i in axes(G, 1)
+        g  = M[i, j, 1]
+        h  = H[i, j, 1]
         fg = Fg[i, j, 1]
 
-        # No melt where there is no ice.
-        if g < 0.0 && h == 0.0
-            g = 0.0
-        end
-
-        # No accumulation in open ocean (un-grounded, ice-free cells).
-        if fg == 0.0 && h == 0.0
-            g = 0.0
-        end
-
-        # Don't over-melt the available ice in this step.
-        if dt != 0.0 && (h + dt * g) < 0.0
-            g = -h / dt
-        end
+        no_ice    = h == 0.0
+        # 1. no melt where there is no ice
+        g = ifelse(no_ice & (g < 0.0), 0.0, g)
+        # 2. no accumulation in open ocean
+        g = ifelse(no_ice & (fg == 0.0), 0.0, g)
+        # 3. don't over-melt available ice (skip if dt == 0)
+        cap   = -h * inv_dt
+        melts = (dt != 0.0) & ((h + dt * g) < 0.0)
+        g = ifelse(melts, cap, g)
 
         G[i, j, 1] = g
     end
-
-    return G_mb
 end
 
 """

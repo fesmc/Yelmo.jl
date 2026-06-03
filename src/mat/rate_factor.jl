@@ -18,6 +18,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using LoopVectorization: @turbo
 
 export calc_rate_factor!, calc_rate_factor_eismint!,
        scale_rate_factor_water!
@@ -93,19 +94,39 @@ calibrated for `n = 3`; mixing with other `n_glen` violates the
 calibration assumptions).
 """
 function calc_rate_factor!(ATT, T_ice, T_pmp, enh, T0::Real)
-    A   = interior(ATT)
-    Ti  = interior(T_ice)
-    Tp  = interior(T_pmp)
-    En  = interior(enh)
+    A    = interior(ATT)
+    Ti   = interior(T_ice)
+    Tpmp = interior(T_pmp)
+    En   = interior(enh)
 
     Nx, Ny, Nz = size(A)
-    @assert size(Ti) == size(A) "calc_rate_factor!: T_ice size mismatch"
-    @assert size(Tp) == size(A) "calc_rate_factor!: T_pmp size mismatch"
-    @assert size(En) == size(A) "calc_rate_factor!: enh size mismatch"
+    @assert size(Ti)   == size(A) "calc_rate_factor!: T_ice size mismatch"
+    @assert size(Tpmp) == size(A) "calc_rate_factor!: T_pmp size mismatch"
+    @assert size(En)   == size(A) "calc_rate_factor!: enh size mismatch"
 
-    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
-        A[i, j, k] = _rate_factor_gb(Ti[i, j, k], Tp[i, j, k],
-                                     En[i, j, k], T0)
+    # Inlined + branchless: the original looped over a non-SIMDable
+    # `@inline` helper with an internal `if Tp <= T_LIM` branch on the
+    # Arrhenius constant pair. Here both constants are selected via
+    # `ifelse` so the loop body is straight-line, and `@turbo` lifts the
+    # single `exp` call to SLEEFPirates' SIMD intrinsics.
+    T0_f  = Float64(T0)
+    Tflr  = _RF_GB_T_PRIME_FLOOR
+    Tlim  = _RF_GB_T_PRIME_LIM
+    A0_1  = _RF_GB_A0_1
+    A0_2  = _RF_GB_A0_2
+    Q_1   = _RF_GB_Q_1
+    Q_2   = _RF_GB_Q_2
+    R     = _RF_R
+    @turbo for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        t_pmp   = Tpmp[i, j, k]
+        t_prime = Ti[i, j, k] - t_pmp + T0_f
+        # Clamp T_prime to [T_FLOOR, T_pmp] (Fortran lines 408-409).
+        t_prime = ifelse(t_prime < Tflr,  Tflr,  t_prime)
+        t_prime = ifelse(t_prime > t_pmp, t_pmp, t_prime)
+        low     = t_prime <= Tlim
+        A0      = ifelse(low, A0_1, A0_2)
+        Q       = ifelse(low, Q_1,  Q_2)
+        A[i, j, k] = En[i, j, k] * A0 * exp(-Q / (R * t_prime))
     end
     return ATT
 end
@@ -123,19 +144,31 @@ Selected by `mat.par.rf_use_eismint2 = true` in the `rf_method = 1`
 branch.
 """
 function calc_rate_factor_eismint!(ATT, T_ice, T_pmp, enh, T0::Real)
-    A   = interior(ATT)
-    Ti  = interior(T_ice)
-    Tp  = interior(T_pmp)
-    En  = interior(enh)
+    A    = interior(ATT)
+    Ti   = interior(T_ice)
+    Tpmp = interior(T_pmp)
+    En   = interior(enh)
 
     Nx, Ny, Nz = size(A)
-    @assert size(Ti) == size(A) "calc_rate_factor_eismint!: T_ice size mismatch"
-    @assert size(Tp) == size(A) "calc_rate_factor_eismint!: T_pmp size mismatch"
-    @assert size(En) == size(A) "calc_rate_factor_eismint!: enh size mismatch"
+    @assert size(Ti)   == size(A) "calc_rate_factor_eismint!: T_ice size mismatch"
+    @assert size(Tpmp) == size(A) "calc_rate_factor_eismint!: T_pmp size mismatch"
+    @assert size(En)   == size(A) "calc_rate_factor_eismint!: enh size mismatch"
 
-    @inbounds for k in 1:Nz, j in 1:Ny, i in 1:Nx
-        A[i, j, k] = _rate_factor_eismint(Ti[i, j, k], Tp[i, j, k],
-                                          En[i, j, k], T0)
+    # Same shape as `calc_rate_factor!` but without the T_prime clamps
+    # (Fortran lines 451-455 only branch on T_PRIME_LIM).
+    T0_f  = Float64(T0)
+    Tlim  = _RF_E2_T_PRIME_LIM
+    A0_1  = _RF_E2_A0_1
+    A0_2  = _RF_E2_A0_2
+    Q_1   = _RF_E2_Q_1
+    Q_2   = _RF_E2_Q_2
+    R     = _RF_R
+    @turbo for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        t_prime = Ti[i, j, k] - Tpmp[i, j, k] + T0_f
+        low     = t_prime <= Tlim
+        A0      = ifelse(low, A0_1, A0_2)
+        Q       = ifelse(low, Q_1,  Q_2)
+        A[i, j, k] = En[i, j, k] * A0 * exp(-Q / (R * t_prime))
     end
     return ATT
 end
