@@ -132,6 +132,12 @@ Base.@kwdef struct YtopoParams
     H_min_flt           ::Float64 = 0.0
     margin2nd           ::Bool    = false
     margin_flt_subgrid  ::Bool    = false
+    # Mirror-only: selects Fortran's f_ice computation
+    # ("upstream" = H_ice/H_neighb, "lsf" = geometric LSF area fraction).
+    # Yelmo.jl's `calc_f_ice!` hardcodes the upstream method; this field
+    # exists solely so `to_mirror` can emit it in the generated nml
+    # (Fortran's `nml_read` errors if the parameter is missing).
+    f_ice_method        ::String  = "upstream"
     use_bmb             ::Bool    = true
     topo_fixed          ::Bool    = false
     topo_rel            ::Int     = 0

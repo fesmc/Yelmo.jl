@@ -90,6 +90,7 @@ Base.@kwdef struct YtopoParams
     dHdt_dyn_lim        ::Float64 = 100.0
     margin2nd           ::Bool    = false
     margin_flt_subgrid  ::Bool    = false
+    f_ice_method        ::String  = "upstream"
     use_bmb             ::Bool    = true
     topo_fixed          ::Bool    = false
     topo_rel            ::Int     = 0
