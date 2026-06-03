@@ -19,6 +19,7 @@ subsequent milestones.
 module YelmoModelTopo
 
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
+using LoopVectorization: @turbo
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel,
                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
@@ -567,17 +568,27 @@ function apply_mask_ice_pass!(y::YelmoModel)
     H_ice     = interior(y.tpo.H_ice)
     mask_ice  = interior(y.bnd.mask_ice)
     H_ice_ref = interior(y.bnd.H_ice_ref)
-    @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
-        m = mask_ice[i, j, 1]
-        if m == Float64(MASK_ICE_NONE)
-            H_ice[i, j, 1] = 0.0
-        elseif m == Float64(MASK_ICE_FIXED)
-            H_ice[i, j, 1] = H_ice_ref[i, j, 1]
-        else  # MASK_ICE_DYNAMIC (default)
-            H_ice[i, j, 1] = max(H_ice[i, j, 1], 0.0)
-        end
-    end
+    _apply_mask_ice_pass_kernel!(H_ice, mask_ice, H_ice_ref)
     return y
+end
+
+# Branchless 3-way mask select for @turbo: the default `:dynamic` case
+# is the always-computed `max(H, 0)` value, and the `:none` / `:fixed`
+# cases override it via `ifelse`. Comparing Float64-encoded mask values
+# against the Float64 cast of the integer constants matches the
+# original 3-arm if/elseif/else exactly.
+@inline function _apply_mask_ice_pass_kernel!(H_ice::AbstractArray{Float64},
+                                              mask_ice::AbstractArray{Float64},
+                                              H_ice_ref::AbstractArray{Float64})
+    m_none  = Float64(MASK_ICE_NONE)
+    m_fixed = Float64(MASK_ICE_FIXED)
+    @turbo for j in axes(H_ice, 2), i in axes(H_ice, 1)
+        m       = mask_ice[i, j, 1]
+        H_dyn   = ifelse(H_ice[i, j, 1] > 0.0, H_ice[i, j, 1], 0.0)
+        H_new   = ifelse(m == m_none,  0.0,
+                  ifelse(m == m_fixed, H_ice_ref[i, j, 1], H_dyn))
+        H_ice[i, j, 1] = H_new
+    end
 end
 const _apply_mask_ice_pass! = apply_mask_ice_pass!
 

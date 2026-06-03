@@ -12,6 +12,7 @@
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
+using LoopVectorization: @turbo
 
 export calc_z_srf!
 
@@ -46,10 +47,16 @@ function calc_z_srf!(z_srf, H_ice, f_ice, z_bed, z_sl,
 
     rho_ice_sw = rho_ice / rho_sw
 
-    @inbounds for j in axes(Z, 2), i in axes(Z, 1)
-        H_eff = Fi[i, j, 1] >= 1.0 ? H[i, j, 1] / Fi[i, j, 1] : 0.0
-        zb    = Zb[i, j, 1]
-        zsl   = Zsl[i, j, 1]
+    # Branchless via `ifelse` so @turbo can SIMD-vectorize. The
+    # `fi_safe` floor (to 1.0) is only used inside the divide; the
+    # final `ifelse` discards the H/fi_safe result on partial-ice cells.
+    @turbo for j in axes(Z, 2), i in axes(Z, 1)
+        fi      = Fi[i, j, 1]
+        full    = fi >= 1.0
+        fi_safe = ifelse(full, fi, 1.0)
+        H_eff   = ifelse(full, H[i, j, 1] / fi_safe, 0.0)
+        zb      = Zb[i, j, 1]
+        zsl     = Zsl[i, j, 1]
         Z[i, j, 1] = max(zb + H_eff, zsl + (1.0 - rho_ice_sw) * H_eff)
     end
     return z_srf
