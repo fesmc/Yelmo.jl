@@ -1,40 +1,54 @@
 # Yelmo.jl
 
-This package is designed to allow running Yelmo interactively from within the Julia environment.
+A Julia implementation of the Yelmo ice-sheet model. The pure-Julia
+[`YelmoModel`](docs/src/api/) backend is the primary path; an optional
+[`YelmoMirror`](docs/src/api/mirror.md) backend wraps the Fortran model
+through a C API for side-by-side comparison.
 
 ## Installation
 
-First make sure that Yelmo is downloaded, configured and compiled somewhere on your system.
-Then, download Yelmo.jl and add a link to Yelmo.
-
 ```bash
 git clone git@github.com:fesmc/Yelmo.jl.git
-cd Yelmo.jl
-ln -s /path/to/yelmo    # link to yelmo installation
-cd yelmo
-make yelmo-c            # compile c-interface to yelmo
-cd ..                   # back to Yelmo.jl
 ```
-
-Now Yelmo.jl is ready to use from within Julia:
 
 ```julia
-julia> using Pkg
-julia> Pkg.add(path/to/Yelmo.jl)
-julia> using Yelmo
+using Pkg
+Pkg.develop(path="/path/to/Yelmo.jl")
+using Yelmo
 ```
 
-## Quick-start
+The pure-Julia backend has no Fortran dependency.
+
+## Quick-start: Greenland (initmip-grl)
+
+The `benchmarks/initmip-grl/` directory runs a present-day Greenland
+configuration from defaults — a `YelmoParameters` value built in code,
+topography and forcing loaded from NetCDF, no namelist or restart file.
+
+```bash
+cd benchmarks/initmip-grl
+julia --project=. -e 'include("run.jl"); main(t_end=1.0)'  # one-year smoke test
+julia --project=. -e 'include("run.jl"); main()'           # default 20 yr
+```
+
+See [`benchmarks/initmip-grl/README.md`](benchmarks/initmip-grl/README.md)
+for the configuration, data sources, and how to adapt it.
+
+### Bare-bones equivalent
+
+The same pattern in a few lines — construct parameters, build the
+model, step it forward, write output:
 
 ```julia
 using Yelmo
 
-# Build a YelmoModel from a Yelmo Fortran restart NetCDF.
-y = YelmoModel("yelmo_restart.nc", 0.0;
-               alias  = "demo",
-               groups = (:bnd, :dyn, :mat, :thrm, :tpo),
-               strict = false)
+p = YelmoParameters("demo";
+    yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM",
+                         grid_path = "path/to/GRL-16KM_REGIONS.nc"),
+    # ... yelmo_init_topo, yelmo_masks, forcing groups ...
+)
 
+y = YelmoModel(p, 0.0)
 init_state!(y, 0.0)
 out = init_output(y, "demo.nc")
 
@@ -46,32 +60,36 @@ end
 close(out)
 ```
 
-A Fortran-backed [`YelmoMirror`] that goes through `libyelmo` exists
-behind the same interface — see the documentation linked below.
+## Optional: Fortran-backed `YelmoMirror`
+
+To run the same configuration through the Fortran model behind the
+same interface, build the C API shared library and select the mirror
+backend:
+
+```bash
+ln -s /path/to/yelmo yelmo
+cd yelmo && make yelmo-c        # builds libyelmo/include/libyelmo_c_api.so
+```
+
+```bash
+cd benchmarks/initmip-grl
+julia --project=. -e 'include("run.jl"); main(backend=:mirror)'
+```
+
+`YelmoMirror` requires `libyelmo_c_api.so`; the pure-Julia
+`YelmoModel` does not.
 
 ## Documentation
 
-The full documentation lives under [`docs/`](docs/) as a Documenter.jl
-site. Build locally:
+Full documentation lives under [`docs/`](docs/) as a Documenter.jl
+site, covering installation, both backends, the six-component state
+and Arakawa C grid, the topography pipeline (advection, mass balance,
+grounded fraction, calving), the API reference, and the canonical
+variable tables. Build locally:
 
 ```bash
 julia --project=docs -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.instantiate()'
 julia --project=docs docs/make.jl
 ```
 
-then open `docs/build/index.html`. The site covers:
-
-- **Getting started** — install, link the Yelmo Fortran tree, run a
-  five-step smoke test.
-- **Concepts** — the two backends (`YelmoModel` vs `YelmoMirror`),
-  the six-component state, the Arakawa C grid, parameters vs constants.
-- **Usage** — loading from a restart, stepping the model, NetCDF
-  output and selection, lockstepping the two backends.
-- **Physics** — the topography step's 21-phase pipeline, advection,
-  mass balance (SMB / BMB / FMB / DMB / residual cleanup), the CISM
-  subgrid-grounded-fraction algorithm with analytical-limit fixes,
-  optional relaxation, and the level-set calving formulation.
-- **API reference** — auto-generated from the docstrings, one page
-  per public-facing module.
-- **Variables** — the canonical variable tables for the six state
-  groups (and how to add a new field).
+then open `docs/build/index.html`.
