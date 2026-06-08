@@ -32,7 +32,34 @@ module YelmoBenchmarks
 using Yelmo
 using Oceananigans: interior
 
-include("benchmarks.jl")
+# The model-agnostic AbstractBenchmark interface + the generic
+# `Yelmo.YelmoModel(b::AbstractBenchmark, t)` constructor live in
+# IceSheetBenchmarks (the constructor is added via its YelmoBenchmarks
+# package extension, which activates when both packages are loaded).
+# This module only adds Yelmo-side scaffolding: BenchmarkSpec, the
+# YelmoMirror fixture-generation harness, and the per-benchmark IC
+# callbacks / fixture writers.
+using IceSheetBenchmarks: AbstractBenchmark, calvmip_exp1!, calvmip_exp2!
+import IceSheetBenchmarks: state, write_fixture!, analytical_velocity
+
+# Yelmo-side helper used by the per-benchmark IC callbacks to push
+# arrays into YelmoMirror Field interiors. Lives here (rather than in
+# IceSheetBenchmarks) because Field is an Oceananigans type used by
+# the YelmoMirror backend.
+function _assign_field!(field, arr::AbstractArray)
+    iv = interior(field)
+    if ndims(arr) == ndims(iv)
+        iv .= arr
+    elseif ndims(arr) == 2 && ndims(iv) == 3 && size(iv, 3) == 1
+        iv[:, :, 1] .= arr
+    elseif ndims(arr) == 3 && ndims(iv) == 3
+        iv .= arr
+    else
+        error("_assign_field!: incompatible shapes — arr=$(size(arr)) field=$(size(iv))")
+    end
+    return field
+end
+
 include("bueler.jl")
 include("trough.jl")
 include("hom_c.jl")
