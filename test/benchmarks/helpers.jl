@@ -39,8 +39,20 @@ using Oceananigans: interior
 # This module only adds Yelmo-side scaffolding: BenchmarkSpec, the
 # YelmoMirror fixture-generation harness, and the per-benchmark IC
 # callbacks / fixture writers.
-using IceSheetBenchmarks: AbstractBenchmark, calvmip_exp1!, calvmip_exp2!
+using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
+                           bueler_gamma, bueler_test_BC!,
+                           calvmip_exp1!, calvmip_exp2!
+# Brought into scope so test_sia.jl's `YelmoBenchmarks._halfar_dHdr_closed`
+# call site keeps resolving without an update.
+using IceSheetBenchmarks: _halfar_dHdr_closed
 import IceSheetBenchmarks: state, write_fixture!, analytical_velocity
+
+# Yelmo-side fixture-naming convention for ISB-resident benchmarks.
+# `regenerate.jl` reaches into `YelmoBenchmarks._spec_name` to resolve
+# the per-benchmark filename stem. Test-side specs that still live in
+# this directory (HOM-C, Trough, EISMINT, MISMIP3D, CalvingMIP) define
+# their own `_spec_name` method alongside the spec.
+_spec_name(b::BuelerBenchmark) = "bueler_$(lowercase(string(b.variant)))"
 
 # Yelmo-side helper used by the per-benchmark IC callbacks to push
 # arrays into YelmoMirror Field interiors. Lives here (rather than in
@@ -60,7 +72,6 @@ function _assign_field!(field, arr::AbstractArray)
     return field
 end
 
-include("bueler.jl")
 include("trough.jl")
 include("hom_c.jl")
 include("mismip3d.jl")

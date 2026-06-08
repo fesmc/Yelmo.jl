@@ -39,11 +39,13 @@ export AbstractBenchmark
 export state, write_fixture!, analytical_velocity
 export calvmip_exp1!, calvmip_exp2!
 
+include("bueler.jl")
 include("eismint_moving.jl")
 include("mismip3d.jl")
 include("calvingmip.jl")
 include("initmip.jl")
 
+export BuelerBenchmark, bueler_gamma, bueler_test_BC!
 export EISMINT1MovingBenchmark, eismint_moving_smb
 export MISMIP3DBenchmark
 export CalvingMIPBenchmark, calvmip_bed_circular, calvmip_bed_thule

@@ -2,7 +2,7 @@
 # Bueler analytical ice-flow solutions, ported from Yelmo Fortran
 # (`yelmo/tests/ice_benchmarks.f90`), and the corresponding
 # `BuelerBenchmark <: AbstractBenchmark` implementation of the
-# benchmark interface from `benchmarks.jl`.
+# AbstractBenchmark interface.
 #
 # Math layer:
 #   - `bueler_gamma`    : SIA prefactor `γ = 2 A (ρ_i g)^n / (n + 2)`.
@@ -22,9 +22,6 @@
 # (the Yelmo Fortran convention; the Halfar formula's `time` in the
 # similarity exponents is in the same units as `A`'s time, hence yr).
 # ----------------------------------------------------------------------
-
-export bueler_gamma, bueler_test_BC!
-export BuelerBenchmark
 
 # ----------------------------------------------------------------------
 # Math layer (ported verbatim from the previous bueler.jl).
@@ -181,7 +178,8 @@ Analytical Halfar state at time `t`. Returns a NamedTuple with:
 
 The keys other than `xc` / `yc` map onto Yelmo schema variables and
 are routed into the appropriate component group by the generic
-`YelmoModel(::AbstractBenchmark, t)` constructor in `benchmarks.jl`.
+`YelmoModel(::AbstractBenchmark, t)` constructor provided by the
+`YelmoBenchmarks` package extension.
 """
 function state(b::BuelerBenchmark, t::Real)
     Nx = length(b.xc)
@@ -445,8 +443,3 @@ function analytical_velocity(b::BuelerBenchmark, t::Real)
 
     return (ux_bar, uy_bar)
 end
-
-# Resolve the per-spec name used for fixture filenames. Mirrors
-# `_spec_name` for `BenchmarkSpec` (the YelmoMirror path) so
-# `regenerate.jl` can dispatch on either backend uniformly.
-_spec_name(b::BuelerBenchmark) = "bueler_$(lowercase(string(b.variant)))"
