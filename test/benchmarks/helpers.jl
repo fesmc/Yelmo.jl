@@ -41,18 +41,64 @@ using Oceananigans: interior
 # callbacks / fixture writers.
 using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
                            bueler_gamma, bueler_test_BC!,
+                           HOMCBenchmark,
                            calvmip_exp1!, calvmip_exp2!
-# Brought into scope so test_sia.jl's `YelmoBenchmarks._halfar_dHdr_closed`
-# call site keeps resolving without an update.
-using IceSheetBenchmarks: _halfar_dHdr_closed
+# Private-but-stable helpers brought into scope so existing test
+# call sites (`YelmoBenchmarks._halfar_dHdr_closed`, `_hom_c_beta`)
+# keep resolving without an update.
+using IceSheetBenchmarks: _halfar_dHdr_closed, _hom_c_beta
 import IceSheetBenchmarks: state, write_fixture!, analytical_velocity
 
 # Yelmo-side fixture-naming convention for ISB-resident benchmarks.
 # `regenerate.jl` reaches into `YelmoBenchmarks._spec_name` to resolve
 # the per-benchmark filename stem. Test-side specs that still live in
-# this directory (HOM-C, Trough, EISMINT, MISMIP3D, CalvingMIP) define
-# their own `_spec_name` method alongside the spec.
+# this directory (Trough, EISMINT, MISMIP3D, CalvingMIP) define their
+# own `_spec_name` method alongside the spec.
 _spec_name(b::BuelerBenchmark) = "bueler_$(lowercase(string(b.variant)))"
+_spec_name(b::HOMCBenchmark)   = "ismiphom_c_l$(round(Int, b.L_km))"
+
+"""
+    _setup_hom_c_beta!(y, b::HOMCBenchmark) -> y
+
+Fill `y.dyn.beta`, `y.dyn.beta_acx`, and `y.dyn.beta_acy` with the
+HOM-C analytical β perturbation (from `IceSheetBenchmarks._hom_c_beta`).
+Call after `YelmoModel(b, t; boundaries=:periodic)` and before
+`dyn_step!` for tests that use `beta_method = -1` (external β).
+
+Stagger conventions (matching `_assemble_ssa_matrix!`'s reads):
+
+  - `dyn.beta`     — Center, slot `[i, j, 1]` at cell-centre `(xc[i], yc[j])`.
+  - `dyn.beta_acx` — XFace under Periodic-x (interior shape `(Nx, Ny, 1)`).
+                     Slot `[ip1f, j, 1]` (where `ip1f = mod1(i+1, Nx)`)
+                     holds the face-east of cell `(i, j)` at position
+                     `0.5·(xc[i] + xc[i+1])` (with periodic wrap).
+  - `dyn.beta_acy` — YFace under Periodic-y, analogous.
+"""
+function _setup_hom_c_beta!(y, b::HOMCBenchmark)
+    Nx, Ny = length(b.xc), length(b.yc)
+    dx_m   = b.dx_km * 1e3
+
+    Bi = interior(y.dyn.beta)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        Bi[i, j, 1] = _hom_c_beta(b, b.xc[i], b.yc[j])
+    end
+
+    Bx = interior(y.dyn.beta_acx)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        x_face = b.xc[i] + 0.5 * dx_m
+        ip1f = mod1(i + 1, Nx)
+        Bx[ip1f, j, 1] = _hom_c_beta(b, x_face, b.yc[j])
+    end
+
+    By = interior(y.dyn.beta_acy)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        y_face = b.yc[j] + 0.5 * dx_m
+        jp1f = mod1(j + 1, Ny)
+        By[i, jp1f, 1] = _hom_c_beta(b, b.xc[i], y_face)
+    end
+
+    return y
+end
 
 # Yelmo-side helper used by the per-benchmark IC callbacks to push
 # arrays into YelmoMirror Field interiors. Lives here (rather than in
@@ -73,7 +119,6 @@ function _assign_field!(field, arr::AbstractArray)
 end
 
 include("trough.jl")
-include("hom_c.jl")
 include("mismip3d.jl")
 include("eismint_moving.jl")
 include("calvingmip.jl")
