@@ -25,7 +25,7 @@ using IceSheetBenchmarks: IceSheetBenchmarks, CalvingMIPBenchmark,
 using Oceananigans.Fields: interior
 
 # Re-export so existing tests (e.g. `test_calvingmip_exp1.jl`) that do
-# `using .YelmoBenchmarks` still see these names.
+# `using .YelmoBenchmarkHarness` still see these names.
 export CalvingMIPBenchmark, calvmip_bed_circular, calvmip_bed_thule
 export calvmip_exp1!, calvmip_exp2!
 
@@ -163,7 +163,7 @@ function _write_calvingmip_mirror_fixture!(b::CalvingMIPBenchmark,
     mkpath(fixtures_dir)
     isfile(path) && rm(path)
 
-    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+    paths = generate_fixture!(spec; fixtures_dir = fixtures_dir,
                                    overwrite = true)
     src = paths[1]
     if src != path

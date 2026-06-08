@@ -19,7 +19,7 @@ using IceSheetBenchmarks: IceSheetBenchmarks, MISMIP3DBenchmark,
                            _mismip3d_analytical_state,
                            _write_mismip3d_analytical_fixture!
 
-# Re-export so existing tests using `.YelmoBenchmarks` still see the name.
+# Re-export so existing tests using `.YelmoBenchmarkHarness` still see the name.
 export MISMIP3DBenchmark
 
 const _DEFAULT_MISMIP3D_NAMELIST = abspath(joinpath(@__DIR__, "specs",
@@ -179,7 +179,7 @@ function _write_mismip3d_mirror_fixture!(b::MISMIP3DBenchmark,
     mkpath(fixtures_dir)
     isfile(path) && rm(path)
 
-    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+    paths = generate_fixture!(spec; fixtures_dir = fixtures_dir,
                                   overwrite = true)
     src = paths[1]
     if src != path

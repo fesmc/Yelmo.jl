@@ -35,8 +35,8 @@ using Test
 using Yelmo
 using Oceananigans: interior
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 

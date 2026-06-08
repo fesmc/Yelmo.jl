@@ -1,5 +1,5 @@
 ! Yelmo namelist for the EISMINT-1 moving-margin benchmark, used by
-! `EISMINT1MovingBenchmark` via `run_mirror_benchmark!`. Mirrors
+! `EISMINT1MovingBenchmark` via `generate_fixture!`. Mirrors
 ! `/Users/alrobi001/models/yelmo/par-gmd/yelmo_EISMINT_moving.nml` with
 ! the file-loading flags flipped off so initial state comes from the
 ! Julia `_setup_eismint_moving_initial_state!` callback.

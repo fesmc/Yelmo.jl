@@ -7,7 +7,7 @@ import Pkg; Pkg.activate("..")
 #
 # The fixture `fixtures/trough_f17_t1000.nc` is produced by
 # `regenerate.jl trough_f17 --overwrite` (which drives
-# `run_mirror_benchmark!` end-to-end through YelmoMirror — the first
+# `generate_fixture!` end-to-end through YelmoMirror — the first
 # production exercise of that path). This test:
 #
 #   1. **Round-trip** — load the fixture two ways:
@@ -34,8 +34,8 @@ using Oceananigans: interior
 using Oceananigans.Grids: Bounded
 using NCDatasets
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params

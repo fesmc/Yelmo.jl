@@ -19,7 +19,7 @@ using IceSheetBenchmarks: IceSheetBenchmarks, TroughBenchmark,
                            _trough_f17_zbed
 
 # Re-export the ISB-resident name so existing tests doing
-# `using .YelmoBenchmarks` still see `TroughBenchmark`.
+# `using .YelmoBenchmarkHarness` still see `TroughBenchmark`.
 export TroughBenchmark
 
 # Yelmo Fortran namelist that YelmoMirror reads. Disables all file
@@ -201,7 +201,7 @@ function write_fixture!(b::TroughBenchmark, path::AbstractString;
     mkpath(fixtures_dir)
     isfile(path) && rm(path)
 
-    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+    paths = generate_fixture!(spec; fixtures_dir = fixtures_dir,
                                   overwrite = true)
     src = paths[1]
     if src != path

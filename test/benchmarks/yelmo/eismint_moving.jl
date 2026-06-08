@@ -18,7 +18,7 @@ using IceSheetBenchmarks: IceSheetBenchmarks, EISMINT1MovingBenchmark,
                            _eismint_moving_analytical_state,
                            _write_eismint_moving_analytical_fixture!
 
-# Re-export so existing tests using `.YelmoBenchmarks` still see the name.
+# Re-export so existing tests using `.YelmoBenchmarkHarness` still see the name.
 export EISMINT1MovingBenchmark, eismint_moving_smb
 
 const _DEFAULT_EISMINT_MOVING_NAMELIST = abspath(joinpath(@__DIR__, "specs",
@@ -121,7 +121,7 @@ function _write_eismint_moving_mirror_fixture!(b::EISMINT1MovingBenchmark,
     isfile(path) && rm(path)
 
     wall_clock_start = time()
-    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+    paths = generate_fixture!(spec; fixtures_dir = fixtures_dir,
                                   overwrite = true)
     wall_clock_s = time() - wall_clock_start
 

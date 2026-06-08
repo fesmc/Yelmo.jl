@@ -21,7 +21,7 @@ Each benchmark uses one of two backends, dispatched on type:
     round-trip. No Fortran library required. Used for benchmarks
     with closed-form solutions (BUELER-B Halfar today; future
     BUELER-A / BUELER-C variants slot in alongside).
-  - **YelmoMirror** (`BenchmarkSpec` in [`helpers.jl`](helpers.jl)) —
+  - **YelmoMirror** (`BenchmarkSpec` in [`harness.jl`](harness.jl)) —
     drive YelmoMirror with a Yelmo namelist + synthetic-grid axes +
     an `setup_initial_state!` callback, and write a restart at each
     output time. Used for benchmarks without analytical solutions
@@ -40,8 +40,8 @@ skip NetCDF entirely. CI never invokes [`regenerate.jl`](regenerate.jl)
 ```
 test/benchmarks/
 ├── README.md
-├── helpers.jl              # YelmoBenchmarks module umbrella
-│                           #   + BenchmarkSpec + run_mirror_benchmark! + load_fixture
+├── harness.jl              # YelmoBenchmarkHarness module umbrella
+│                           #   + BenchmarkSpec + generate_fixture! + load_fixture
 ├── benchmarks.jl           # AbstractBenchmark interface contract
 │                           #   + generic YelmoModel(::AbstractBenchmark, t)
 ├── bueler.jl               # Halfar / Bueler analytical formulas

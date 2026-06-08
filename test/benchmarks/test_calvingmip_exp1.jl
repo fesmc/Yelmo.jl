@@ -35,8 +35,8 @@ import Pkg; Pkg.activate("..")
 using Test
 using NCDatasets
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 using Yelmo
 using Oceananigans: interior
@@ -48,7 +48,7 @@ _ice_cell_count(y) = count(h -> h > 0.0, interior(y.tpo.H_ice))
 
 # Build `YelmoParameters` from the per-experiment Fortran namelist.
 function _calvingmip_params(b::CalvingMIPBenchmark)
-    return YelmoParameters(YelmoBenchmarks.calvingmip_namelist_path(b),
+    return YelmoParameters(YelmoBenchmarkHarness.calvingmip_namelist_path(b),
                                  "calvingmip_$(lowercase(string(b.exp)))")
 end
 
