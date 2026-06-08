@@ -1,5 +1,5 @@
 ! Yelmo namelist for the TROUGH-F17 benchmark, used by
-! `TroughBenchmark` via `run_mirror_benchmark!`. Mirrors
+! `TroughBenchmark` via `generate_fixture!`. Mirrors
 ! `/Users/alrobi001/models/yelmo/par/yelmo_TROUGH-F17.nml` with the
 ! file-loading flags flipped off so initial state comes from the
 ! Julia `_setup_trough_initial_state!` callback.

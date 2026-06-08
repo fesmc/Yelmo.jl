@@ -24,8 +24,8 @@ import Pkg; Pkg.activate("..")
 
 using Yelmo
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 # Spec registry. Heterogeneous: a Vector{Any} so we can hold both
 # AbstractBenchmark (analytical) and BenchmarkSpec (YelmoMirror)
@@ -60,7 +60,7 @@ const MISMIP3D_ATT_NAME  = "mismip3d_stnd_att"
 const MISMIP3D_ATT_TIMES = [500.0, 1000.0, 1500.0]
 const MISMIP3D_ATT_RF    = [3.1536e-18, 3.1536e-19, 3.1536e-18]
 
-_spec_name(b::AbstractBenchmark) = YelmoBenchmarks._spec_name(b)
+_spec_name(b::AbstractBenchmark) = YelmoBenchmarkHarness._spec_name(b)
 _spec_name(s::BenchmarkSpec)     = s.name
 
 function _regenerate_one!(b::AbstractBenchmark; fixtures_dir, overwrite)
@@ -77,7 +77,7 @@ function _regenerate_one!(b::AbstractBenchmark; fixtures_dir, overwrite)
 end
 
 function _regenerate_one!(spec::BenchmarkSpec; fixtures_dir, overwrite)
-    return run_mirror_benchmark!(spec; fixtures_dir, overwrite)
+    return generate_fixture!(spec; fixtures_dir, overwrite)
 end
 
 # MISMIP3D ATT ramp: drives YelmoMirror through `MISMIP3D_ATT_TIMES`
@@ -90,7 +90,7 @@ function _regenerate_mismip3d_att!(; fixtures_dir, overwrite)
     if !overwrite && isfile(path)
         error("regenerate: $(path) exists; pass --overwrite to clobber.")
     end
-    return YelmoBenchmarks._write_mismip3d_mirror_fixture_att!(
+    return YelmoBenchmarkHarness._write_mismip3d_mirror_fixture_att!(
         b, path, MISMIP3D_ATT_TIMES, MISMIP3D_ATT_RF)
 end
 
@@ -100,7 +100,7 @@ function main(args::Vector{String})
 
     # Special-case dispatch for the MISMIP3D ATT ramp (not in SPECS
     # since it requires multi-phase orchestration that the generic
-    # `run_mirror_benchmark!` does not support).
+    # `generate_fixture!` does not support).
     do_att = isempty(only_names) || MISMIP3D_ATT_NAME in only_names
     only_att = !isempty(only_names) && all(==(MISMIP3D_ATT_NAME), only_names)
 

@@ -25,7 +25,7 @@ using IceSheetBenchmarks: IceSheetBenchmarks, CalvingMIPBenchmark,
 using Oceananigans.Fields: interior
 
 # Re-export so existing tests (e.g. `test_calvingmip_exp1.jl`) that do
-# `using .YelmoBenchmarks` still see these names.
+# `using .YelmoBenchmarkHarness` still see these names.
 export CalvingMIPBenchmark, calvmip_bed_circular, calvmip_bed_thule
 export calvmip_exp1!, calvmip_exp2!
 
@@ -34,7 +34,7 @@ export calvmip_exp1!, calvmip_exp2!
 # memory Yelmo.jl path).
 # -----------------------------------------------------------------------
 
-const _CALVINGMIP_NAMELIST_DIR = abspath(joinpath(@__DIR__, "specs"))
+const _CALVINGMIP_NAMELIST_DIR = abspath(joinpath(@__DIR__, "..", "specs"))
 _calvingmip_namelist_path(exp::Symbol) = joinpath(
     _CALVINGMIP_NAMELIST_DIR,
     exp === :exp1 ? "yelmo_CalvingMIP_exp1.nml" :
@@ -49,7 +49,7 @@ calvingmip_namelist_path(b::CalvingMIPBenchmark) = _calvingmip_namelist_path(b.e
 
 _spec_name(b::CalvingMIPBenchmark) = "calvingmip_$(lowercase(string(b.exp)))"
 
-const _CALVINGMIP_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+const _CALVINGMIP_FIXTURES_DIR = abspath(joinpath(@__DIR__, "..", "fixtures"))
 
 function _calvingmip_fixture_path(b::CalvingMIPBenchmark, t::Real;
                                    fixtures_dir = _CALVINGMIP_FIXTURES_DIR)
@@ -163,7 +163,7 @@ function _write_calvingmip_mirror_fixture!(b::CalvingMIPBenchmark,
     mkpath(fixtures_dir)
     isfile(path) && rm(path)
 
-    paths = run_mirror_benchmark!(spec; fixtures_dir = fixtures_dir,
+    paths = generate_fixture!(spec; fixtures_dir = fixtures_dir,
                                    overwrite = true)
     src = paths[1]
     if src != path

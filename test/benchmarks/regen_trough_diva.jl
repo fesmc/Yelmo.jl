@@ -15,8 +15,8 @@ using Yelmo
 using Oceananigans: interior
 using NCDatasets
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 const SPECS_DIR    = abspath(joinpath(@__DIR__, "specs"))
@@ -56,10 +56,10 @@ function run_trough_mirror!(b::TroughBenchmark, namelist::AbstractString,
         output_times   = [t_out],
         dt             = 5.0,
         setup_initial_state! = (ymirror, t) ->
-            YelmoBenchmarks._setup_trough_initial_state!(ymirror, b, t),
+            YelmoBenchmarkHarness._setup_trough_initial_state!(ymirror, b, t),
     )
 
-    # Mirror's `run_mirror_benchmark!` creates its own internal
+    # Mirror's `generate_fixture!` creates its own internal
     # tempdir under TMPDIR (prefix `bench_<name>_`), `cd`s into it,
     # and gets it auto-cleaned at Julia exit. To capture Fortran's
     # `timesteps.nc` (which lands in that tempdir's CWD), we have to
@@ -72,7 +72,7 @@ function run_trough_mirror!(b::TroughBenchmark, namelist::AbstractString,
     @info "running YelmoMirror" out_dir t_out tmp_root
     t0 = time()
     paths = try
-        run_mirror_benchmark!(spec;
+        generate_fixture!(spec;
                               fixtures_dir = out_dir,
                               overwrite    = true)
     finally

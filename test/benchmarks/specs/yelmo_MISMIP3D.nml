@@ -1,5 +1,5 @@
 ! Yelmo namelist for the MISMIP3D Stnd benchmark, used by
-! `MISMIP3DBenchmark` via `run_mirror_benchmark!`. Mirrors
+! `MISMIP3DBenchmark` via `generate_fixture!`. Mirrors
 ! `/Users/alrobi001/models/yelmo/par-gmd/yelmo_MISMIP3D.nml` with the
 ! file-loading flags flipped off so initial state comes from the
 ! Julia `_setup_mismip3d_initial_state!` callback.

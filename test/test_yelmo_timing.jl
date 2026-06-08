@@ -15,8 +15,8 @@ using Test
 using Yelmo
 using Oceananigans: interior
 
-include("benchmarks/helpers.jl")
-using .YelmoBenchmarks
+include("benchmarks/harness.jl")
+using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
                            yneff_params, ytill_params, ytopo_params,

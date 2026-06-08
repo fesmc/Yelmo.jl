@@ -1,49 +1,140 @@
 # ----------------------------------------------------------------------
-# Benchmark scaffolding for YelmoModel validation.
+# Yelmo-side benchmark harness — scaffolding for driving YelmoModel /
+# YelmoMirror through the AbstractBenchmark specs that live in
+# IceSheetBenchmarks.
 #
 # Workflow:
-#   1. Define a `BenchmarkSpec` for a Fortran-internally-generated
-#      benchmark (e.g. BUELER-B). The spec carries the Yelmo namelist
-#      path, the synthetic-grid axes, the run length / output cadence,
-#      and a `setup_initial_state!` callback that sets H_ice / boundary
+#   1. Define a `BenchmarkSpec` for a Yelmo-driven benchmark fixture.
+#      The spec carries the Yelmo namelist path, the synthetic-grid
+#      axes, the run length / output cadence, and a
+#      `setup_initial_state!` callback that sets H_ice / boundary
 #      fields after YelmoMirror is constructed but before init_state!.
-#   2. `run_mirror_benchmark!(spec; fixtures_dir)` runs YelmoMirror on
+#   2. `generate_fixture!(spec; fixtures_dir)` drives YelmoMirror over
 #      the spec, writing a NetCDF restart at each `output_time` via
 #      `yelmo_write_restart!` (a thin Julia wrapper around the
 #      `yelmo_restart_write` C API). Fixture paths are returned.
-#   3. `load_fixture(spec; index)` constructs a `YelmoModel` from the
-#      fixture for downstream validation against the YelmoMirror
-#      reference (or, for BUELER tests, against the analytical
-#      solution).
+#   3. `load_fixture(spec; index)` constructs a `YelmoModel` from a
+#      previously-written fixture for downstream validation against the
+#      reference (or, for BUELER tests, against the analytical solution).
 #
-# CI does NOT invoke `run_mirror_benchmark!` — fixtures are committed
-# under `test/benchmarks/fixtures/`. The `regenerate.jl` script
-# refreshes them locally and requires `libyelmo_c_api.so` to be present.
+# CI does NOT invoke `generate_fixture!` — fixtures are committed under
+# `test/benchmarks/fixtures/`. The `regenerate.jl` script refreshes them
+# locally and requires `libyelmo_c_api.so` to be present.
 #
-# Halfar / Bueler analytical solutions live in `bueler.jl` (included
-# below), ported from `yelmo/tests/ice_benchmarks.f90`. The
-# `AbstractBenchmark` interface contract (and the in-memory
-# `YelmoModel(::AbstractBenchmark, t)` constructor) lives in
-# `benchmarks.jl`.
+# The model-agnostic AbstractBenchmark interface + the per-benchmark
+# specs (BUELER, HOM-C, Trough, EISMINT, MISMIP3D, CalvingMIP) live in
+# IceSheetBenchmarks. This module only adds Yelmo-side scaffolding:
+# BenchmarkSpec, the fixture-generation driver, and the per-benchmark
+# IC callbacks / Mirror-driven fixture writers in `yelmo/`.
 # ----------------------------------------------------------------------
 
-module YelmoBenchmarks
+module YelmoBenchmarkHarness
 
 using Yelmo
 using Oceananigans: interior
 
-include("benchmarks.jl")
-include("bueler.jl")
-include("trough.jl")
-include("hom_c.jl")
-include("mismip3d.jl")
-include("eismint_moving.jl")
-include("calvingmip.jl")
+# The model-agnostic AbstractBenchmark interface + the generic
+# `Yelmo.YelmoModel(b::AbstractBenchmark, t)` constructor live in
+# IceSheetBenchmarks (the constructor is added via its YelmoBenchmarks
+# package extension, which activates when both packages are loaded).
+# This module only adds Yelmo-side scaffolding: BenchmarkSpec, the
+# YelmoMirror fixture-generation harness, and the per-benchmark IC
+# callbacks / fixture writers.
+using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
+                           bueler_gamma, bueler_test_BC!,
+                           HOMCBenchmark,
+                           TroughBenchmark,
+                           EISMINT1MovingBenchmark, eismint_moving_smb,
+                           MISMIP3DBenchmark,
+                           CalvingMIPBenchmark,
+                           calvmip_bed_circular, calvmip_bed_thule,
+                           calvmip_exp1!, calvmip_exp2!
+# Private-but-stable helpers brought into scope so existing test
+# call sites (`YelmoBenchmarkHarness._halfar_dHdr_closed`, `_hom_c_beta`,
+# `_trough_f17_zbed`) keep resolving without an update.
+using IceSheetBenchmarks: _halfar_dHdr_closed, _hom_c_beta,
+                           _trough_f17_zbed
+using NCDatasets: NCDataset
+import IceSheetBenchmarks: state, write_fixture!, analytical_velocity
+
+# Yelmo-side fixture-naming convention for ISB-resident benchmarks.
+# `regenerate.jl` reaches into `YelmoBenchmarkHarness._spec_name` to resolve
+# the per-benchmark filename stem. Test-side specs that still live in
+# this directory (Trough, EISMINT, MISMIP3D, CalvingMIP) define their
+# own `_spec_name` method alongside the spec.
+_spec_name(b::BuelerBenchmark) = "bueler_$(lowercase(string(b.variant)))"
+_spec_name(b::HOMCBenchmark)   = "ismiphom_c_l$(round(Int, b.L_km))"
+
+"""
+    _setup_hom_c_beta!(y, b::HOMCBenchmark) -> y
+
+Fill `y.dyn.beta`, `y.dyn.beta_acx`, and `y.dyn.beta_acy` with the
+HOM-C analytical β perturbation (from `IceSheetBenchmarks._hom_c_beta`).
+Call after `YelmoModel(b, t; boundaries=:periodic)` and before
+`dyn_step!` for tests that use `beta_method = -1` (external β).
+
+Stagger conventions (matching `_assemble_ssa_matrix!`'s reads):
+
+  - `dyn.beta`     — Center, slot `[i, j, 1]` at cell-centre `(xc[i], yc[j])`.
+  - `dyn.beta_acx` — XFace under Periodic-x (interior shape `(Nx, Ny, 1)`).
+                     Slot `[ip1f, j, 1]` (where `ip1f = mod1(i+1, Nx)`)
+                     holds the face-east of cell `(i, j)` at position
+                     `0.5·(xc[i] + xc[i+1])` (with periodic wrap).
+  - `dyn.beta_acy` — YFace under Periodic-y, analogous.
+"""
+function _setup_hom_c_beta!(y, b::HOMCBenchmark)
+    Nx, Ny = length(b.xc), length(b.yc)
+    dx_m   = b.dx_km * 1e3
+
+    Bi = interior(y.dyn.beta)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        Bi[i, j, 1] = _hom_c_beta(b, b.xc[i], b.yc[j])
+    end
+
+    Bx = interior(y.dyn.beta_acx)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        x_face = b.xc[i] + 0.5 * dx_m
+        ip1f = mod1(i + 1, Nx)
+        Bx[ip1f, j, 1] = _hom_c_beta(b, x_face, b.yc[j])
+    end
+
+    By = interior(y.dyn.beta_acy)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        y_face = b.yc[j] + 0.5 * dx_m
+        jp1f = mod1(j + 1, Ny)
+        By[i, jp1f, 1] = _hom_c_beta(b, b.xc[i], y_face)
+    end
+
+    return y
+end
+
+# Yelmo-side helper used by the per-benchmark IC callbacks to push
+# arrays into YelmoMirror Field interiors. Lives here (rather than in
+# IceSheetBenchmarks) because Field is an Oceananigans type used by
+# the YelmoMirror backend.
+function _assign_field!(field, arr::AbstractArray)
+    iv = interior(field)
+    if ndims(arr) == ndims(iv)
+        iv .= arr
+    elseif ndims(arr) == 2 && ndims(iv) == 3 && size(iv, 3) == 1
+        iv[:, :, 1] .= arr
+    elseif ndims(arr) == 3 && ndims(iv) == 3
+        iv .= arr
+    else
+        error("_assign_field!: incompatible shapes — arr=$(size(arr)) field=$(size(iv))")
+    end
+    return field
+end
+
+include("yelmo/trough.jl")
+include("yelmo/mismip3d.jl")
+include("yelmo/eismint_moving.jl")
+include("yelmo/calvingmip.jl")
 
 export BenchmarkSpec
 export AbstractBenchmark, BuelerBenchmark, TroughBenchmark, HOMCBenchmark,
        MISMIP3DBenchmark, EISMINT1MovingBenchmark, CalvingMIPBenchmark
-export run_mirror_benchmark!, load_fixture
+export generate_fixture!, load_fixture
 export state, write_fixture!, analytical_velocity
 export bueler_test_BC!, bueler_gamma
 export _setup_hom_c_beta!
@@ -125,7 +216,7 @@ function _fixture_path(fixtures_dir::String, spec::BenchmarkSpec, time::Float64)
 end
 
 """
-    run_mirror_benchmark!(spec; fixtures_dir, overwrite=false) -> Vector{String}
+    generate_fixture!(spec; fixtures_dir, overwrite=false) -> Vector{String}
 
 Run `spec` via YelmoMirror, writing a NetCDF restart fixture at each
 output time. Returns a `Vector{String}` of the produced fixture paths.
@@ -139,7 +230,7 @@ library has been built locally) and to expose the `yelmo_init_grid`
 and `yelmo_restart_write` symbols. CI does not call this function —
 it loads pre-committed fixtures via [`load_fixture`](@ref).
 """
-function run_mirror_benchmark!(spec::BenchmarkSpec;
+function generate_fixture!(spec::BenchmarkSpec;
                                 fixtures_dir::String,
                                 overwrite::Bool = false)
     isfile(spec.namelist_path) ||
@@ -159,7 +250,7 @@ function run_mirror_benchmark!(spec::BenchmarkSpec;
     if !overwrite
         existing = filter(isfile, paths)
         isempty(existing) || error(
-            "run_mirror_benchmark!: fixtures already exist; pass " *
+            "generate_fixture!: fixtures already exist; pass " *
             "`overwrite=true` to clobber. Existing: " * join(existing, ", "))
     end
 
@@ -174,7 +265,7 @@ function run_mirror_benchmark!(spec::BenchmarkSpec;
     yelmo_input = abspath(joinpath(dirname(Yelmo.YelmoMirrorCore.yelmolib),
                                    "..", "..", "input"))
     isdir(yelmo_input) || error(
-        "run_mirror_benchmark!: yelmo input directory not found at $yelmo_input. " *
+        "generate_fixture!: yelmo input directory not found at $yelmo_input. " *
         "Expected the Yelmo Fortran source tree to be available alongside libyelmo.")
     symlink(yelmo_input, joinpath(rundir, "input"))
 
@@ -274,4 +365,4 @@ function load_fixture(spec::BenchmarkSpec;
                       kwargs...)
 end
 
-end # module YelmoBenchmarks
+end # module YelmoBenchmarkHarness

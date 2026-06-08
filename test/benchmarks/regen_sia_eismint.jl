@@ -16,8 +16,8 @@ using Yelmo
 using Oceananigans: interior
 using NCDatasets
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 const SPECS_DIR    = abspath(joinpath(@__DIR__, "specs"))
@@ -51,7 +51,7 @@ function run_mirror!(b::EISMINT1MovingBenchmark, namelist::AbstractString,
         output_times   = [t_out],
         dt             = 100.0,
         setup_initial_state! = (ymirror, t) ->
-            YelmoBenchmarks._setup_eismint_moving_initial_state!(ymirror, b, t),
+            YelmoBenchmarkHarness._setup_eismint_moving_initial_state!(ymirror, b, t),
     )
 
     # Run inside a bounded TMPDIR so we can find Fortran's timesteps.nc
@@ -63,7 +63,7 @@ function run_mirror!(b::EISMINT1MovingBenchmark, namelist::AbstractString,
     @info "running YelmoMirror" out_dir tmp_root t_out
     t0 = time()
     paths = try
-        run_mirror_benchmark!(spec; fixtures_dir = out_dir, overwrite = true)
+        generate_fixture!(spec; fixtures_dir = out_dir, overwrite = true)
     finally
         if old_tmpdir === nothing
             delete!(ENV, "TMPDIR")

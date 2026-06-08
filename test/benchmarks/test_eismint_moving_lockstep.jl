@@ -50,8 +50,8 @@ using Yelmo
 using Oceananigans: interior
 using NCDatasets
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yneff_params, ytill_params, ytopo_params,

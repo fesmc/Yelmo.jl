@@ -37,8 +37,8 @@ using Yelmo
 using Yelmo.YelmoPar: ydyn_params, ymat_params, YelmoParameters
 using Oceananigans: interior
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 # Margin-mask threshold (m) for the L2 error metric. Halfar's margin
 # (H -> 0, |grad H| -> infinity) is locally singular for SIA, so any
@@ -111,10 +111,10 @@ end
     end
 
     # Closed-form dH/dr at the same points (private helper from
-    # `bueler.jl` — accessed via the `YelmoBenchmarks` module).
+    # `bueler.jl` — accessed via the `YelmoBenchmarkHarness` module).
     dHdr_closed = zeros(length(rs))
     for (i, r) in enumerate(rs)
-        dHdr_closed[i] = YelmoBenchmarks._halfar_dHdr_closed(b, r, t)
+        dHdr_closed[i] = YelmoBenchmarkHarness._halfar_dHdr_closed(b, r, t)
     end
 
     # Interior agreement to numerical-differentiation tolerance. Skip

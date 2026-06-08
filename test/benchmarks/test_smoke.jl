@@ -35,8 +35,8 @@ using Test
 using Yelmo
 using Oceananigans: interior
 
-include("helpers.jl")
-using .YelmoBenchmarks
+include("harness.jl")
+using .YelmoBenchmarkHarness
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 
@@ -156,8 +156,9 @@ end
     @test b8.xc[end] == 696_000.0              # (Nx-1)·dx in metres
     @test b8.yc[1]   == -80_000.0              # -ly/2
     @test b8.yc[end] ==  80_000.0              # +ly/2
-    @test b8.namelist_path |> isabspath        # resolved path
-    @test endswith(b8.namelist_path, "specs/yelmo_TROUGH.nml")
+    nml_path = YelmoBenchmarkHarness._trough_namelist_path(b8)
+    @test isabspath(nml_path)                  # resolved path
+    @test endswith(nml_path, "specs/yelmo_TROUGH.nml")
 
     # 4-km variant for higher-fidelity local runs.
     b4 = TroughBenchmark(:F17; dx_km=4.0)

@@ -44,8 +44,6 @@
 # to the default error stub).
 # ----------------------------------------------------------------------
 
-export HOMCBenchmark
-
 """
     HOMCBenchmark(variant::Symbol = :C; L_km=80.0, dx_km=L_km*0.025,
                   alpha_deg=0.1, A_glen=1e-16, n_glen=3.0,
@@ -156,11 +154,6 @@ function state(b::HOMCBenchmark, t::Real)
             H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb, T_srf = Tsrf, Q_geo = Qgeo)
 end
-
-# Spec name used by `regenerate.jl` and the fixture filename.
-# `ismiphom_c_l<L_km>` matches the trough naming convention.
-_spec_name(b::HOMCBenchmark) =
-    "ismiphom_c_l$(round(Int, b.L_km))"
 
 # Default zeta axes for HOM-C analytical fixture. Match the BUELER
 # default (uniform 11-point ice / 5-point rock) so the file-based
@@ -274,71 +267,13 @@ function write_fixture!(b::HOMCBenchmark, path::AbstractString;
     return [path]
 end
 
-# ----------------------------------------------------------------------
-# β perturbation helpers — direct fill of dyn.beta / dyn.beta_acx /
-# dyn.beta_acy on a constructed YelmoModel.
-#
-# `beta_method = -1` (`src/dyn/basal_dragging.jl:601`) is a no-op and
-# `beta_gl_stag = -1` (`basal_dragging.jl:987`) bypasses the standard
-# acx/acy staggering AND the GL block — so pre-filled β fields survive
-# every Picard iteration.
-# ----------------------------------------------------------------------
-
 # Closed-form β at an (x_m, y_m) point (metres):
 #   β = β₀ + β_amp · sin(2π x / L) · sin(2π y / L)
+#
+# Used by the Yelmo-side `_setup_hom_c_beta!` to fill dyn.beta fields
+# on a constructed YelmoModel. Pure math, exposed here so any host
+# can reuse the formula.
 @inline function _hom_c_beta(b::HOMCBenchmark, x_m::Real, y_m::Real)
     omega = 2π / (b.L_km * 1e3)
     return b.beta0 + b.beta_amp * sin(omega * Float64(x_m)) * sin(omega * Float64(y_m))
-end
-
-"""
-    _setup_hom_c_beta!(y, b::HOMCBenchmark) -> y
-
-Fill `y.dyn.beta`, `y.dyn.beta_acx`, and `y.dyn.beta_acy` with the
-HOM-C analytical β perturbation. Call after `YelmoModel(b, t;
-boundaries=:periodic)` and before `dyn_step!` for tests that use
-`beta_method = -1` (external β).
-
-Stagger conventions (matching `_assemble_ssa_matrix!`'s reads):
-
-  - `dyn.beta`     — Center, slot `[i, j, 1]` at cell-centre `(xc[i], yc[j])`.
-  - `dyn.beta_acx` — XFace under Periodic-x (interior shape `(Nx, Ny, 1)`).
-                     Slot `[ip1f, j, 1]` (where `ip1f = mod1(i+1, Nx)`)
-                     holds the face-east of cell `(i, j)` at position
-                     `0.5·(xc[i] + xc[i+1])` (with periodic wrap).
-  - `dyn.beta_acy` — YFace under Periodic-y, analogous.
-"""
-function _setup_hom_c_beta!(y, b::HOMCBenchmark)
-    Nx, Ny = length(b.xc), length(b.yc)
-    L_m    = b.L_km * 1e3
-    dx_m   = b.dx_km * 1e3
-
-    # aa-cell β at xc[i], yc[j].
-    Bi = interior(y.dyn.beta)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        Bi[i, j, 1] = _hom_c_beta(b, b.xc[i], b.yc[j])
-    end
-
-    # acx-face β at face-east of cell (i, j). Under fully-periodic the
-    # face position is xc[i] + dx/2 (cell-centre + half spacing) — for
-    # cell i = Nx this is L - dx/2 + dx/2 = L, equivalent to 0 by
-    # periodicity. The slot under Periodic-x is `mod1(i+1, Nx)` (so
-    # cell i = Nx writes to slot 1, the wrapped neighbour).
-    Bx = interior(y.dyn.beta_acx)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        x_face = b.xc[i] + 0.5 * dx_m
-        # No need to mod x_face since sin is L-periodic.
-        ip1f = mod1(i + 1, Nx)
-        Bx[ip1f, j, 1] = _hom_c_beta(b, x_face, b.yc[j])
-    end
-
-    # acy-face β at face-north of cell (i, j). Analogous to acx.
-    By = interior(y.dyn.beta_acy)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        y_face = b.yc[j] + 0.5 * dx_m
-        jp1f = mod1(j + 1, Ny)
-        By[i, jp1f, 1] = _hom_c_beta(b, b.xc[i], y_face)
-    end
-
-    return y
 end
