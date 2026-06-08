@@ -138,8 +138,11 @@ function _mismip3d_analytical_state(b::MISMIP3DBenchmark)
     # H_ice = H0 where z_bed ≥ z_bed_floor, else 0 (literal Fortran IC).
     H_ice = [z_bed[i, j] >= b.z_bed_floor ? b.H0 : 0.0 for i in 1:Nx, j in 1:Ny]
 
-    ice_allowed = ones(Float64, Nx, Ny)
-    ice_allowed[Nx, :] .= 0.0    # eastern column = calving boundary
+    # Yelmo `mask_ice` convention (0 = zero, 1 = fixed, 2 = dynamic).
+    # All cells dynamic except the eastern (calving-boundary) column,
+    # which is forced to zero ice.
+    mask_ice = fill(2.0, Nx, Ny)
+    mask_ice[Nx, :] .= 0.0
 
     smb_ref  = fill(b.smb_const,   Nx, Ny)
     T_srf    = fill(b.T_srf_const, Nx, Ny)
@@ -153,7 +156,7 @@ function _mismip3d_analytical_state(b::MISMIP3DBenchmark)
             H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb_ref, T_srf = T_srf, Q_geo = Q_geo,
             bmb_shlf = bmb_shlf, T_shlf = T_shlf, H_sed = H_sed,
-            ice_allowed = ice_allowed)
+            mask_ice = mask_ice)
 end
 
 const _MISMIP3D_DEFAULT_ZETA_AC      = collect(range(0.0, 1.0; length=11))
@@ -174,7 +177,15 @@ function write_fixture!(b::MISMIP3DBenchmark, path::AbstractString;
     t == 0.0 ||
         error("MISMIP3DBenchmark.write_fixture!: only t = 0 is supported " *
               "(got t = $t).")
+    return _write_mismip3d_analytical_fixture!(b, path, t)
+end
 
+# Analytical fixture writer (t = 0). Factored out so a host whose
+# `write_fixture!` override handles both analytical (t = 0) and
+# host-driven (t > 0) branches can delegate the analytical path here.
+function _write_mismip3d_analytical_fixture!(b::MISMIP3DBenchmark,
+                                              path::AbstractString,
+                                              t::Float64)
     s = _mismip3d_analytical_state(b)
     mkpath(dirname(path))
     isfile(path) && rm(path)
@@ -217,7 +228,7 @@ function write_fixture!(b::MISMIP3DBenchmark, path::AbstractString;
             ("bmb_shlf",    s.bmb_shlf,    "m/yr",     "Shelf bmb (zero)"),
             ("T_shlf",      s.T_shlf,      "K",        "Shelf base temperature"),
             ("H_sed",       s.H_sed,       "m",        "Sediment thickness (zero)"),
-            ("ice_allowed", s.ice_allowed, "1",        "Ice-allowed mask (eastern column = 0)"),
+            ("mask_ice",    s.mask_ice,    "1",        "Ice mask (0=none, 1=fixed, 2=dynamic; eastern column = 0)"),
         )
             v = defVar(ds, name, Float64, ("xc", "yc"))
             v[:, :] = data

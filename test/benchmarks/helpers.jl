@@ -43,6 +43,10 @@ using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
                            bueler_gamma, bueler_test_BC!,
                            HOMCBenchmark,
                            TroughBenchmark,
+                           EISMINT1MovingBenchmark, eismint_moving_smb,
+                           MISMIP3DBenchmark,
+                           CalvingMIPBenchmark,
+                           calvmip_bed_circular, calvmip_bed_thule,
                            calvmip_exp1!, calvmip_exp2!
 # Private-but-stable helpers brought into scope so existing test
 # call sites (`YelmoBenchmarks._halfar_dHdr_closed`, `_hom_c_beta`,

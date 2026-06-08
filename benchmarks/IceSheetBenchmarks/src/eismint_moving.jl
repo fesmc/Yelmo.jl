@@ -127,16 +127,19 @@ function _eismint_moving_analytical_state(b::EISMINT1MovingBenchmark)
     Q_geo  = fill(b.Q_geo_const, Nx, Ny)
     T_shlf = fill(b.T_srf_const, Nx, Ny)
 
-    bmb_shlf    = zeros(Nx, Ny)
-    H_sed       = zeros(Nx, Ny)
-    ice_allowed = ones(Nx, Ny)
-    calv_mask   = zeros(Nx, Ny)
+    bmb_shlf  = zeros(Nx, Ny)
+    H_sed     = zeros(Nx, Ny)
+    # Yelmo `mask_ice` convention (0 = zero, 1 = fixed, 2 = dynamic).
+    # All cells dynamic; EISMINT border handling is via the
+    # `boundaries` string, not the ice mask.
+    mask_ice  = fill(2.0, Nx, Ny)
+    calv_mask = zeros(Nx, Ny)
 
     return (xc = b.xc, yc = b.yc,
             H_ice = H_ice, z_bed = z_bed, z_sl = z_sl,
             smb_ref = smb_ref, T_srf = T_srf, Q_geo = Q_geo,
             bmb_shlf = bmb_shlf, T_shlf = T_shlf, H_sed = H_sed,
-            ice_allowed = ice_allowed, calv_mask = calv_mask)
+            mask_ice = mask_ice, calv_mask = calv_mask)
 end
 
 # Default zeta axes for the analytical fixture writer.
@@ -165,7 +168,16 @@ function write_fixture!(b::EISMINT1MovingBenchmark, path::AbstractString;
     t == 0.0 ||
         error("EISMINT1MovingBenchmark.write_fixture!: only t = 0 supported " *
               "(got t = $t).")
+    return _write_eismint_moving_analytical_fixture!(b, path, t)
+end
 
+# Analytical fixture writer (t = 0). Factored out so a host whose
+# `write_fixture!` override handles both analytical (t = 0) and
+# host-driven (t > 0) branches can delegate the analytical path here
+# without an `invoke` dance.
+function _write_eismint_moving_analytical_fixture!(b::EISMINT1MovingBenchmark,
+                                                     path::AbstractString,
+                                                     t::Float64)
     s = _eismint_moving_analytical_state(b)
     mkpath(dirname(path))
     isfile(path) && rm(path)
@@ -206,7 +218,7 @@ function write_fixture!(b::EISMINT1MovingBenchmark, path::AbstractString;
             ("bmb_shlf",    s.bmb_shlf,    "m/yr",     "Shelf bmb (zero)"),
             ("T_shlf",      s.T_shlf,      "K",        "Shelf base temperature"),
             ("H_sed",       s.H_sed,       "m",        "Sediment thickness (zero)"),
-            ("ice_allowed", s.ice_allowed, "1",        "Ice-allowed mask"),
+            ("mask_ice",    s.mask_ice,    "1",        "Ice mask (0=none, 1=fixed, 2=dynamic)"),
             ("calv_mask",   s.calv_mask,   "1",        "Calving mask (zero)"),
         )
             v = defVar(ds, name, Float64, ("xc", "yc"))
