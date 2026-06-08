@@ -184,6 +184,9 @@ end
 # the repo root.
 const _YELMO_UUID                = "f480e141-c095-4a5e-9e4c-f8685db772bc"
 const _ICE_SHEET_BENCHMARKS_UUID = "8c4d0a2e-6f3b-4e0a-9f6e-1e2d3a4b5c6d"
+const _ICE_SHEET_BENCHMARKS_URL  = "https://github.com/fesmc/IceSheetBenchmarks.jl.git"
+# Pinned per the dep-swap commit; bump when a new ISB release lands.
+const _ICE_SHEET_BENCHMARKS_REV  = "ce8c2731da6d142705e442040ee48a14b65177bf"
 const _STDLIB_DEPS = (
     "Statistics" => "10745b16-79ce-11e8-11f9-7d13ad32a3b2",
     "Printf"     => "de0858da-6303-5e67-8744-51eddeeeb8d7",
@@ -202,9 +205,11 @@ function _write_project_toml(target_dir::AbstractString)
         end
         println(io)
         println(io, "[sources]")
-        # Paths are relative to the project (benchmark) dir.
+        # Yelmo path is relative to the project (benchmark) dir; ISB
+        # is pinned to a specific commit on the standalone repo so
+        # benchmark Manifests are reproducible.
         println(io, "Yelmo = {path = \"../..\"}")
-        println(io, "IceSheetBenchmarks = {path = \"../IceSheetBenchmarks\"}")
+        println(io, "IceSheetBenchmarks = {url = \"$_ICE_SHEET_BENCHMARKS_URL\", rev = \"$_ICE_SHEET_BENCHMARKS_REV\"}")
     end
     return project_path
 end
@@ -235,7 +240,7 @@ function main()
     name = ARGS[1]
     occursin(r"^[A-Za-z0-9_\-]+$", name) ||
         error("benchmark name must match [A-Za-z0-9_-]+ (got '$name')")
-    name in ("new", "README", "_template", "IceSheetBenchmarks") &&
+    name in ("new", "README", "_template") &&
         error("'$name' is a reserved name; pick something else.")
 
     target = joinpath(BENCHMARKS_DIR, name)
