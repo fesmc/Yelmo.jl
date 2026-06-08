@@ -14,5 +14,5 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Yelmo = "f480e141-c095-4a5e-9e4c-f8685db772bc"
 
 [sources]
-IceSheetBenchmarks = {path = "../benchmarks/IceSheetBenchmarks"}
+IceSheetBenchmarks = {url = "https://github.com/fesmc/IceSheetBenchmarks.jl.git", rev = "ce8c2731da6d142705e442040ee48a14b65177bf"}
 Yelmo = {path = ".."}

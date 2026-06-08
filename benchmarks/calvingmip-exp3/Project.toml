@@ -10,5 +10,5 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Yelmo = "f480e141-c095-4a5e-9e4c-f8685db772bc"
 
 [sources]
-IceSheetBenchmarks = {path = "../IceSheetBenchmarks"}
+IceSheetBenchmarks = {url = "https://github.com/fesmc/IceSheetBenchmarks.jl.git", rev = "ce8c2731da6d142705e442040ee48a14b65177bf"}
 Yelmo = {path = "../.."}

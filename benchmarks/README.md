@@ -13,13 +13,13 @@ analytical references, see `test/benchmarks/` instead.
 
 ## Layout
 
-- `IceSheetBenchmarks/` — vendored portable Julia package providing
-  the model-agnostic benchmark specs (`AbstractBenchmark`,
-  `EISMINT1MovingBenchmark`, …) and a `YelmoBenchmarks` package
-  extension that adds `Yelmo.YelmoModel(::AbstractBenchmark, t)`
-  when both packages are loaded. Long-term home is the standalone
-  [fesmc/IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl)
-  repo.
+The model-agnostic benchmark specs (`AbstractBenchmark`,
+`BuelerBenchmark`, `EISMINT1MovingBenchmark`, …) and the
+`YelmoBenchmarks` package extension that adds
+`Yelmo.YelmoModel(::AbstractBenchmark, t)` live in
+[fesmc/IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl)
+— pulled in as a git dependency by each benchmark's `Project.toml`.
+
 - `<benchmark-name>/` — one directory per benchmark, each a
   self-contained Julia project with its own `Project.toml` /
   `Manifest.toml`, plus `run.jl` (simulation), `summary.jl`
@@ -80,9 +80,9 @@ After scaffolding, edit `run.jl` and `summary.jl` to implement the
 specific benchmark, then add a row to the table above and commit.
 
 While developing, the benchmark spec (`MyBenchmark <: AbstractBenchmark`)
-can live inline at the top of `run.jl` — once stable, move it into
-`IceSheetBenchmarks/src/` so other benchmarks and downstream consumers
-can use it.
+can live inline at the top of `run.jl` — once stable, contribute it
+to [fesmc/IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl)
+so other benchmarks and downstream consumers can use it.
 
 ## Conventions
 

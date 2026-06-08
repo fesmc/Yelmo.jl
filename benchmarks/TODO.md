@@ -21,14 +21,16 @@ In priority order — each follows the existing scaffolder pattern
   Exp1 spins up the equilibrium ice cap (`calvmip_exp1!` pinned front);
   Exp2 chains from the Exp1 restart, runs the oscillating-front
   `calvmip_exp2!` law, tracks an 8-direction asymmetry metric, and
-  stops on threshold. Spec + bed geometry now live in
-  `IceSheetBenchmarks/src/calvingmip.jl`; calving-law hooks in the
-  `YelmoBenchmarks` package extension.
+  stops on threshold. Spec + bed geometry live in
+  [IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl)
+  (`src/calvingmip.jl`); calving-law hooks in the `YelmoBenchmarks`
+  package extension.
 
 - [ ] **CalvingMIP-Exp3..5** — remaining CalvingMIP experiments
   (Thule geometry). No reference solution; runnable reproductions for
   paper figures. Will share the bed-geometry helpers already in
-  `IceSheetBenchmarks/src/calvingmip.jl`.
+  [IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl)
+  (`src/calvingmip.jl`).
 
 ## `init_state!` — remaining gaps
 
@@ -74,17 +76,10 @@ sane (no clamped velocities, GL moves correctly).
 
 ## Infrastructure
 
-- [ ] **`IceSheetBenchmarks/` consolidation with `test/benchmarks/`.**
-  Today the benchmark structs (`EISMINT1MovingBenchmark`,
-  `MISMIP3DBenchmark`) live in both
-  `benchmarks/IceSheetBenchmarks/src/` (model-agnostic, no Yelmo dep)
-  and `test/benchmarks/eismint_moving.jl` / `mismip3d.jl`
-  (test-version with YelmoMirror Fortran-driver scaffolding). The
-  test-side files should `using IceSheetBenchmarks` for the structs
-  and only define the Mirror-specific extensions on top. Follow-up
-  PR.
-
-- [ ] **`benchmarks/IceSheetBenchmarks/` → standalone repo.** The
-  long-term home is [fesmc/IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl).
-  Once the package stabilises and is registered, replace the vendored
-  copy with a regular dependency.
+- [x] **`IceSheetBenchmarks/` consolidation with `test/benchmarks/`.**
+  Done in #83 — duplicate structs collapsed; test-side uses ISB types
+  and adds only Yelmo-Mirror scaffolding.
+- [x] **`benchmarks/IceSheetBenchmarks/` → standalone repo.** Lives at
+  [fesmc/IceSheetBenchmarks.jl](https://github.com/fesmc/IceSheetBenchmarks.jl);
+  pulled in as a git-pinned dependency. Registration in the General
+  registry is a future step.
