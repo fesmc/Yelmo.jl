@@ -34,7 +34,7 @@ export calvmip_exp1!, calvmip_exp2!
 # memory Yelmo.jl path).
 # -----------------------------------------------------------------------
 
-const _CALVINGMIP_NAMELIST_DIR = abspath(joinpath(@__DIR__, "specs"))
+const _CALVINGMIP_NAMELIST_DIR = abspath(joinpath(@__DIR__, "..", "specs"))
 _calvingmip_namelist_path(exp::Symbol) = joinpath(
     _CALVINGMIP_NAMELIST_DIR,
     exp === :exp1 ? "yelmo_CalvingMIP_exp1.nml" :
@@ -49,7 +49,7 @@ calvingmip_namelist_path(b::CalvingMIPBenchmark) = _calvingmip_namelist_path(b.e
 
 _spec_name(b::CalvingMIPBenchmark) = "calvingmip_$(lowercase(string(b.exp)))"
 
-const _CALVINGMIP_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+const _CALVINGMIP_FIXTURES_DIR = abspath(joinpath(@__DIR__, "..", "fixtures"))
 
 function _calvingmip_fixture_path(b::CalvingMIPBenchmark, t::Real;
                                    fixtures_dir = _CALVINGMIP_FIXTURES_DIR)

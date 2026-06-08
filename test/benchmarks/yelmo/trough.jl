@@ -25,14 +25,14 @@ export TroughBenchmark
 # Yelmo Fortran namelist that YelmoMirror reads. Disables all file
 # loads so the initial state comes from the Julia
 # `_setup_trough_initial_state!` callback.
-const _DEFAULT_TROUGH_NAMELIST = abspath(joinpath(@__DIR__, "specs",
+const _DEFAULT_TROUGH_NAMELIST = abspath(joinpath(@__DIR__, "..", "specs",
                                                    "yelmo_TROUGH.nml"))
 _trough_namelist_path(::TroughBenchmark) = _DEFAULT_TROUGH_NAMELIST
 
 # Fixture-filename convention used by regenerate.jl.
 _spec_name(b::TroughBenchmark) = "trough_$(lowercase(string(b.variant)))"
 
-const _TROUGH_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+const _TROUGH_FIXTURES_DIR = abspath(joinpath(@__DIR__, "..", "fixtures"))
 
 function _trough_fixture_path(b::TroughBenchmark, t::Real;
                               fixtures_dir::AbstractString = _TROUGH_FIXTURES_DIR)

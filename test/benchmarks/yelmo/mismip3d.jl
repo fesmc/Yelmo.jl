@@ -22,13 +22,13 @@ using IceSheetBenchmarks: IceSheetBenchmarks, MISMIP3DBenchmark,
 # Re-export so existing tests using `.YelmoBenchmarkHarness` still see the name.
 export MISMIP3DBenchmark
 
-const _DEFAULT_MISMIP3D_NAMELIST = abspath(joinpath(@__DIR__, "specs",
+const _DEFAULT_MISMIP3D_NAMELIST = abspath(joinpath(@__DIR__, "..", "specs",
                                                      "yelmo_MISMIP3D.nml"))
 _mismip3d_namelist_path(::MISMIP3DBenchmark) = _DEFAULT_MISMIP3D_NAMELIST
 
 _spec_name(b::MISMIP3DBenchmark) = "mismip3d_$(lowercase(string(b.variant)))"
 
-const _MISMIP3D_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+const _MISMIP3D_FIXTURES_DIR = abspath(joinpath(@__DIR__, "..", "fixtures"))
 
 function _mismip3d_fixture_path(b::MISMIP3DBenchmark, t::Real;
                                 fixtures_dir::AbstractString = _MISMIP3D_FIXTURES_DIR)

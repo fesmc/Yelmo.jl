@@ -21,14 +21,14 @@ using IceSheetBenchmarks: IceSheetBenchmarks, EISMINT1MovingBenchmark,
 # Re-export so existing tests using `.YelmoBenchmarkHarness` still see the name.
 export EISMINT1MovingBenchmark, eismint_moving_smb
 
-const _DEFAULT_EISMINT_MOVING_NAMELIST = abspath(joinpath(@__DIR__, "specs",
+const _DEFAULT_EISMINT_MOVING_NAMELIST = abspath(joinpath(@__DIR__, "..", "specs",
                                                             "yelmo_EISMINT_moving.nml"))
 _eismint_moving_namelist_path(::EISMINT1MovingBenchmark) =
     _DEFAULT_EISMINT_MOVING_NAMELIST
 
 _spec_name(::EISMINT1MovingBenchmark) = "eismint_moving"
 
-const _EISMINT_MOVING_FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
+const _EISMINT_MOVING_FIXTURES_DIR = abspath(joinpath(@__DIR__, "..", "fixtures"))
 
 function _eismint_moving_fixture_path(b::EISMINT1MovingBenchmark, t::Real;
                                        fixtures_dir::AbstractString = _EISMINT_MOVING_FIXTURES_DIR)
