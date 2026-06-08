@@ -42,11 +42,14 @@ using Oceananigans: interior
 using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
                            bueler_gamma, bueler_test_BC!,
                            HOMCBenchmark,
+                           TroughBenchmark,
                            calvmip_exp1!, calvmip_exp2!
 # Private-but-stable helpers brought into scope so existing test
-# call sites (`YelmoBenchmarks._halfar_dHdr_closed`, `_hom_c_beta`)
-# keep resolving without an update.
-using IceSheetBenchmarks: _halfar_dHdr_closed, _hom_c_beta
+# call sites (`YelmoBenchmarks._halfar_dHdr_closed`, `_hom_c_beta`,
+# `_trough_f17_zbed`) keep resolving without an update.
+using IceSheetBenchmarks: _halfar_dHdr_closed, _hom_c_beta,
+                           _trough_f17_zbed
+using NCDatasets: NCDataset
 import IceSheetBenchmarks: state, write_fixture!, analytical_velocity
 
 # Yelmo-side fixture-naming convention for ISB-resident benchmarks.
