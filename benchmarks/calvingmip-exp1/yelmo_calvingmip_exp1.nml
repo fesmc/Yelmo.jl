@@ -1,5 +1,5 @@
 ! Yelmo namelist for the CalvingMIP Exp1 (circular domain) benchmark.
-! Used by `CalvingMIPBenchmark` via `run_mirror_benchmark!`.
+! Used by `CalvingMIPBenchmark` via `generate_fixture!`.
 ! Mirrors yelmo/par/yelmo_calvingmip.nml with adaptations:
 !   - init_topo_load = .false. (initial state set by Julia callback)
 !   - calv_flt_method = "exp1" (Fortran dispatches its own exp1 law)
