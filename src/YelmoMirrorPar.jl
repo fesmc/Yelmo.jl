@@ -224,18 +224,18 @@ yneff_params(; kwargs...) = YneffParams(; kwargs...)
 # &yhyd
 #
 # Minimal current-schema counterpart to the legacy `YneffParams` above: only
-# `is_external` is modelled, the one &yhyd flag Mirror callers need to set from
-# Julia. Every other &yhyd key (method_til, bkt_*, k24_*, ...) is left to
+# `bkt_N_closure` is modelled, the one &yhyd key Mirror callers need to set from
+# Julia. Every other &yhyd key (method_til, bkt_till_rate, k24_*, ...) is left to
 # Fortran's own yelmo_defaults.nml -- `write_nml` emits a &yhyd block containing
-# only `is_external`, and Fortran's per-key defaults_file fallback fills the rest.
+# only `bkt_N_closure`, and Fortran's per-key defaults_file fallback fills the rest.
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YhydParams
-    # `false` (Fortran's default): calc_ydyn_neff overwrites dyn%now%N_eff from
-    # hyd%now%N every step, as usual. Set `true` only when an external host --
-    # e.g. a coupled Julia hydrology model driving YelmoMirror -- pushes N_eff in
-    # itself via yelmo_sync!/dyn.N_eff, otherwise Fortran clobbers the pushed
-    # value before calc_c_bed ever sees it.
-    is_external ::Bool = false
+    # 3 = TILL (Fortran's default): apply_N_closure computes hyd%now%N from the
+    # configured closure every step, as usual. Set -1 (EXTERNAL) only when an
+    # external host -- e.g. a coupled Julia hydrology model driving YelmoMirror --
+    # owns N itself and pushes it in via yelmo_sync!/hyd.N, otherwise Fortran's
+    # closure overwrites the pushed value on the next step.
+    bkt_N_closure ::Int = 3
 end
 yhyd_params(; kwargs...) = YhydParams(; kwargs...)
 # ---------------------------------------------------------------------------
@@ -519,7 +519,7 @@ function to_mirror(p::YelmoPar.YelmoParameters)
         _translate_group(ydyn_params(),            p.ydyn,            ()),
         _translate_group(ytill_params(),           p.ytill,           ()),
         _translate_group(yneff_params(),           p.yneff,           ()),
-        yhyd_params(),   # no &yhyd counterpart on the pure-Julia side; Mirror-only flag
+        yhyd_params(),   # no &yhyd counterpart on the pure-Julia side; Mirror-only key
         _translate_group(ymat_params(),            p.ymat,            ()),
         _translate_group(ytherm_params(),          p.ytherm,          ()),
         _translate_group(yelmo_masks_params(),     p.yelmo_masks,     ()),
