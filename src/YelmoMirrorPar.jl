@@ -44,7 +44,13 @@ Base.@kwdef struct YelmoParams
     nml_ycalv        ::String  = "ycalv"
     nml_ydyn         ::String  = "ydyn"
     nml_ytill        ::String  = "ytill"
-    nml_yneff        ::String  = "yneff"
+    # Renamed from `nml_yneff = "yneff"`: Fortran-yelmo renamed this &yelmo-block key
+    # when it folded effective-pressure/hydrology into a FastHydrology-integrated &yhyd
+    # block, and its nml_validate now rejects `nml_yneff` outright. `YneffParams` below is
+    # kept for READING nml files that still carry a legacy &yneff block, but is no longer
+    # written back out -- its field set doesn't match current Fortran's &yhyd schema.
+    # `YhydParams` is the current-schema counterpart written under this name instead.
+    nml_yhyd         ::String  = "yhyd"
     nml_ymat         ::String  = "ymat"
     nml_ytherm       ::String  = "ytherm"
     nml_masks        ::String  = "yelmo_masks"
@@ -162,7 +168,14 @@ Base.@kwdef struct YdynParams
     eps_0           ::Float64 = 1e-6
     scale_T         ::Int     = 1
     T_frz           ::Float64 = -3.0
-    ssa_lis_opt     ::String  = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
+    # Split from `ssa_lis_opt`: Fortran-yelmo added a second SSA assembly method
+    # ("energy", alongside the original "residual") and takes a separate LIS solver-option
+    # string per method. Our previous single value matches Fortran's own
+    # ssa_lis_opt_residual default exactly; ssa_lis_opt_energy is Fortran's own default too
+    # (unused unless ssa_solver="energy", which we never write, so Fortran defaults it to
+    # "residual" on its own).
+    ssa_lis_opt_residual::String = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
+    ssa_lis_opt_energy  ::String = "-i cg -p jacobi -maxiter 200 -tol 1.0e-4 -initx_zeros false"
     ssa_lat_bc      ::String  = "floating"
     ssa_beta_max    ::Float64 = 1e20
     ssa_vel_max     ::Float64 = 5000.0
@@ -208,6 +221,24 @@ Base.@kwdef struct YneffParams
 end
 yneff_params(; kwargs...) = YneffParams(; kwargs...)
 # ---------------------------------------------------------------------------
+# &yhyd
+#
+# Minimal current-schema counterpart to the legacy `YneffParams` above: only
+# `bkt_N_closure` is modelled, the one &yhyd key Mirror callers need to set from
+# Julia. Every other &yhyd key (method_til, bkt_till_rate, k24_*, ...) is left to
+# Fortran's own yelmo_defaults.nml -- `write_nml` emits a &yhyd block containing
+# only `bkt_N_closure`, and Fortran's per-key defaults_file fallback fills the rest.
+# ---------------------------------------------------------------------------
+Base.@kwdef struct YhydParams
+    # 3 = TILL (Fortran's default): apply_N_closure computes hyd%now%N from the
+    # configured closure every step, as usual. Set -1 (EXTERNAL) only when an
+    # external host -- e.g. a coupled Julia hydrology model driving YelmoMirror --
+    # owns N itself and pushes it in via yelmo_sync!/hyd.N, otherwise Fortran's
+    # closure overwrites the pushed value on the next step.
+    bkt_N_closure ::Int = 3
+end
+yhyd_params(; kwargs...) = YhydParams(; kwargs...)
+# ---------------------------------------------------------------------------
 # &ymat
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YmatParams
@@ -227,8 +258,8 @@ Base.@kwdef struct YmatParams
     enh_shlf            ::Float64 = 0.7
     enh_umin            ::Float64 = 50.0
     enh_umax            ::Float64 = 500.0
-    calc_age            ::Bool    = false
-    age_iso             ::Vector{Float64} = [11.7, 29.0, 57.0, 115.0]
+    # `calc_age`/`age_iso` dropped: Fortran-yelmo's &ymat no longer has them (age tracking
+    # moved to the new &ytrc passive-tracer subsystem). Same schema drift as nml_yhyd above.
     tracer_method       ::String  = "expl"
     tracer_impl_kappa   ::Float64 = 1.5
 end
@@ -249,8 +280,8 @@ Base.@kwdef struct YthermParams
     const_kt        ::Float64 = 6.62e7
     enth_cr         ::Float64 = 1e-3
     omega_max       ::Float64 = 0.01
-    till_rate       ::Float64 = 0.001
-    H_w_max         ::Float64 = 2.0
+    # `till_rate`/`H_w_max` dropped: Fortran-yelmo's own &ytherm comment says it outright --
+    # "Basal water bucket (till_rate, H_w_max) moved to &yhyd."
     rock_method     ::String  = "equil"
     nzr_aa          ::Int     = 5
     zeta_scale_rock ::String  = "exp-inv"
@@ -356,6 +387,7 @@ struct YelmoMirrorParameters
     ydyn            ::YdynParams
     ytill           ::YtillParams
     yneff           ::YneffParams
+    hyd             ::YhydParams
     ymat            ::YmatParams
     ytherm          ::YthermParams
     yelmo_masks     ::YelmoMasksParams
@@ -384,6 +416,7 @@ function YelmoMirrorParameters(name;
     ydyn            = ydyn_params(),
     ytill           = ytill_params(),
     yneff           = yneff_params(),
+    hyd             = yhyd_params(),
     ymat            = ymat_params(),
     ytherm          = ytherm_params(),
     yelmo_masks     = yelmo_masks_params(),
@@ -392,7 +425,7 @@ function YelmoMirrorParameters(name;
     phys            = phys_params(),
 )
     return YelmoMirrorParameters(
-        name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, ymat, ytherm,
+        name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, hyd, ymat, ytherm,
         yelmo_masks, yelmo_init_topo, yelmo_data, phys,
     )
 end
@@ -400,7 +433,7 @@ end
 function YelmoMirrorParameters(filename, name)
     p = read_nml(filename)
     return YelmoMirrorParameters(
-        name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
+        name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff, p.hyd,
         p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
     )
 end
@@ -486,6 +519,7 @@ function to_mirror(p::YelmoPar.YelmoParameters)
         _translate_group(ydyn_params(),            p.ydyn,            ()),
         _translate_group(ytill_params(),           p.ytill,           ()),
         _translate_group(yneff_params(),           p.yneff,           ()),
+        yhyd_params(),   # no &yhyd counterpart on the pure-Julia side; Mirror-only key
         _translate_group(ymat_params(),            p.ymat,            ()),
         _translate_group(ytherm_params(),          p.ytherm,          ()),
         _translate_group(yelmo_masks_params(),     p.yelmo_masks,     ()),
@@ -561,7 +595,9 @@ function write_nml(filename::AbstractString, p::YelmoMirrorParameters; overwrite
         write_group(io, "ycalv",           p.ycalv)
         write_group(io, "ydyn",            p.ydyn)
         write_group(io, "ytill",           p.ytill)
-        write_group(io, "yneff",           p.yneff)
+        # &yhyd written from the minimal `YhydParams`; legacy &yneff is deliberately NOT
+        # written -- see the nml_yhyd field comment in YelmoParams above for why.
+        write_group(io, "yhyd",            p.hyd)
         write_group(io, "ymat",            p.ymat)
         write_group(io, "ytherm",          p.ytherm)
         write_group(io, "yelmo_masks",     p.yelmo_masks)
@@ -755,6 +791,7 @@ function read_nml(filename::AbstractString)
         ydyn            = struct_from_dict(YdynParams,           get_group("ydyn")),
         ytill           = struct_from_dict(YtillParams,          get_group("ytill")),
         yneff           = struct_from_dict(YneffParams,          get_group("yneff")),
+        hyd             = struct_from_dict(YhydParams,           get_group("yhyd")),
         ymat            = struct_from_dict(YmatParams,           get_group("ymat")),
         ytherm          = struct_from_dict(YthermParams,         get_group("ytherm")),
         yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
@@ -780,7 +817,7 @@ function Base.:(==)(a::YelmoMirrorParameters, b::YelmoMirrorParameters)
 end
 
 for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
-          YneffParams, YmatParams, YthermParams, YelmoMasksParams,
+          YneffParams, YhydParams, YmatParams, YthermParams, YelmoMasksParams,
           YelmoInitTopoParams, YelmoDataParams, PhysParams)
     @eval function Base.:(==)(a::$S, b::$S)
         for fname in fieldnames($S)
