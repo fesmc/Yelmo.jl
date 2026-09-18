@@ -17,6 +17,14 @@ export yelmo_set_var2D!, yelmo_set_var3D!
 const yelmopath = joinpath(@__DIR__, "..", "yelmo")
 const yelmolib = joinpath(@__DIR__, "..", "yelmo", "libyelmo", "include", "libyelmo_c_api.so")
 
+# Verification shim (not a first-class field yet -- see fesmc/yelmo PR #5,
+# which adds hyd_N/hyd_W_til C-API setters so an external host can drive
+# hyd%now%N when hyd.bkt_N_closure == -1). Reuses ylmo.dyn.N_eff as the
+# source buffer, pushed additionally under the "hyd_N" cname.
+const _HYD_N_EXTERNAL_META = VariableMeta(0, "hyd", :N, Vector{UInt8}("hyd_N\0"),
+                                           (:xc, :yc), "Pa",
+                                           "External effective pressure pushed to hyd%now%N")
+
 # ---------------------------------------------------------------------------
 mutable struct YelmoMirror{B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     alias::String
@@ -266,6 +274,7 @@ function yelmo_sync!(ylmo::YelmoMirror)
     # Dyn
     _set_var!(ylmo.dyn.cb_ref, ylmo.v.dyn.cb_ref, ylmo.buffers, ylmo.calias)
     _set_var!(ylmo.dyn.N_eff,  ylmo.v.dyn.N_eff,  ylmo.buffers, ylmo.calias)
+    _set_var!(ylmo.dyn.N_eff,  _HYD_N_EXTERNAL_META, ylmo.buffers, ylmo.calias)
     _set_var!(ylmo.dyn.ux,     ylmo.v.dyn.ux,     ylmo.buffers, ylmo.calias)
     _set_var!(ylmo.dyn.uy,     ylmo.v.dyn.uy,     ylmo.buffers, ylmo.calias)
     _set_var!(ylmo.dyn.uz,     ylmo.v.dyn.uz,     ylmo.buffers, ylmo.calias)
