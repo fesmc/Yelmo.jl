@@ -7,3 +7,4 @@ plots
 docs/build
 logs
 test/run01
+test/spinup_tutorial
