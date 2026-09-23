@@ -9,6 +9,7 @@ include("YelmoConst.jl")
 # modules so they can use `@timed_section` at their call sites.
 include("timing.jl")
 include("utils/YelmoUtils.jl")
+include("opt/YelmoOpt.jl")
 include("dyn/solvers.jl")
 include("integration.jl")
 # `YelmoPar` (primary, pure-Julia params) owns the generic `write_nml`,
@@ -44,6 +45,7 @@ using .YelmoConst
 using .YelmoTiming
 using .YelmoMirrorPar
 using .YelmoUtils
+using .YelmoOpt
 using .YelmoSolvers
 using .YelmoIntegration
 using .YelmoPar
@@ -84,6 +86,11 @@ export gq2d_nodes, gq2d_nodes_2pt, gq2d_interp_to_node, gq2d_shape_functions
 export GridScaleWeights, map_field_to_lo, map_field_to_lo!,
        map_field_to_hi, map_field_to_hi!,
        refine_grid, coarsen_grid
+
+# YelmoOpt (spin-up cb_ref/tf_corr optimizer, ported from ice_optimization.f90)
+export optimize_transient_param
+export calc_magnitude_from_staggered_ice, optimize_cb_ref!
+export optimize_tf_corr!
 
 # YelmoSolvers
 export Solver, SSASolver, resolve_linear_method
