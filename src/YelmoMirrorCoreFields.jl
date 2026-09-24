@@ -61,9 +61,11 @@ function YelmoMirror(filename::String, time::Float64;
 end
 
 """
-    YelmoMirror(p, time; grid=nothing, alias, rundir, overwrite)
+    YelmoMirror(p, time; grid=nothing, alias, rundir, overwrite, nml_file=nothing)
 
-Construct a `YelmoMirror` from a `YelmoMirrorParameters` set. The optional
+Construct a `YelmoMirror` from a `YelmoMirrorParameters` set. If `nml_file` is
+given, that namelist is handed to the Fortran `yelmo_init` as-is instead of a
+namelist regenerated from `p` (`p` then only supplies the label).  The optional
 `grid` keyword switches grid-construction strategy:
 
   - `grid === nothing` (default): the underlying Fortran `yelmo_init`
@@ -90,7 +92,8 @@ from xc/yc).
 """
 function YelmoMirror(p::YelmoMirrorParameters, time::Float64;
     grid::Union{Nothing,NamedTuple}=nothing,
-    alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
+    alias::String="ylmo1", rundir::String="./", overwrite::Bool=false,
+    nml_file::Union{Nothing,String}=nothing)
 
     calias = Vector{UInt8}("$(alias)\0")
 
@@ -99,8 +102,16 @@ function YelmoMirror(p::YelmoMirrorParameters, time::Float64;
     #      everything from disk.
     #    - synthetic (grid=NamedTuple): construct the grid via
     #      yelmo_init_grid_fromaxes first, then yelmo_init(grid_def="none").
-    filename = joinpath(rundir, p.name * ".nml")
-    write_nml(filename, p; overwrite)
+    if nml_file === nothing
+        filename = joinpath(rundir, p.name * ".nml")
+        write_nml(filename, p; overwrite)
+    else
+        # Use an existing namelist verbatim (no Julia round-trip): every group the
+        # Fortran side reads -- including ones YelmoMirrorParameters does not carry --
+        # is exactly what the classic yelmox driver would see.
+        isfile(nml_file) || error("YelmoMirror: nml_file not found: $(nml_file)")
+        filename = nml_file
+    end
     if grid === nothing
         _init_yelmomirror(filename, time, calias)
     else
