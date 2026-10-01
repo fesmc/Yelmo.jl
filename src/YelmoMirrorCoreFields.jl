@@ -12,6 +12,7 @@ export YelmoMirror, init_state!, step!, yelmo_sync!, yelmo_write_restart!
 export yelmo_get_var2D, yelmo_get_var2D!
 export yelmo_get_var3D, yelmo_get_var3D!
 export yelmo_set_var2D!, yelmo_set_var3D!
+export yelmo_set_hydrology_exchange!
 
 # ---------------------------------------------------------------------------
 const yelmopath = joinpath(@__DIR__, "..", "yelmo")
@@ -294,6 +295,24 @@ function yelmo_sync!(ylmo::YelmoMirror)
     _set_var!(ylmo.thrm.T_ice, ylmo.v.thrm.T_ice, ylmo.buffers, ylmo.calias)
     _set_var!(ylmo.thrm.H_w,   ylmo.v.thrm.H_w,   ylmo.buffers, ylmo.calias)
 
+    return nothing
+end
+
+"""
+    yelmo_set_hydrology_exchange!(ylmo; C_frz = nothing, Q_diss = nothing, Q_sens = nothing)
+
+Push the fields an external hydrology model hands back to Yelmo's thermodynamics into
+`hyd%now` (SI units, `Nx x Ny`): `C_frz`, the freeze-on capacity [m/s ice equivalent], read by the
+capacity basal boundary condition with `ytherm.cap_source = "hyd"`; `Q_diss` and `Q_sens`, the heat
+dissipated by and carried with the water flow [W/m2], added to the grounded basal heat balance. Pass
+only the fields the model provides; the others keep their current Fortran values (zero by default).
+Call it after the hydrology step, before the next `step!`.
+"""
+function yelmo_set_hydrology_exchange!(ylmo::YelmoMirror; C_frz = nothing, Q_diss = nothing, Q_sens = nothing)
+    for (name, v) in (("hyd_C_frz", C_frz), ("hyd_Q_diss", Q_diss), ("hyd_Q_sens", Q_sens))
+        v === nothing && continue
+        yelmo_set_var2D!(Array{Float64}(v), Vector{UInt8}("$(name)\0"), ylmo.calias)
+    end
     return nothing
 end
 
