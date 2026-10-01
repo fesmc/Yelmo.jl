@@ -68,7 +68,6 @@ Base.@kwdef struct YelmoParams
     dt_method        ::Int     = 2
     dt_min           ::Float64 = 0.1
     cfl_max          ::Float64 = 0.1
-    cfl_diff_max     ::Float64 = 0.12
     # `YelmoMirrorParameters` describes the Mirror backend (Fortran via the
     # C-API); its defaults intentionally match Fortran's native defaults,
     # not Yelmo.jl's. Fortran ships with `pc_method = "AB-SAM"` —
@@ -79,7 +78,6 @@ Base.@kwdef struct YelmoParams
     pc_controller    ::String  = "PI42"
     pc_use_H_pred    ::Bool    = true
     pc_filter_vel    ::Bool    = true
-    pc_corr_vel      ::Bool    = false
     pc_n_redo        ::Int     = 5
     pc_tol           ::Float64 = 5.0
     pc_eps           ::Float64 = 1.0
@@ -90,13 +88,8 @@ yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YtopoParams
     solver              ::String  = "impl-lis"
-    surf_gl_method      ::Int     = 0
     grad_lim            ::Float64 = 0.5
     grad_lim_zb         ::Float64 = 0.5
-    dHdt_dyn_lim        ::Float64 = 100.0
-    margin2nd           ::Bool    = false
-    margin_flt_subgrid  ::Bool    = false
-    f_ice_method        ::String  = "upstream"
     use_bmb             ::Bool    = true
     topo_fixed          ::Bool    = false
     topo_rel            ::Int     = 0
@@ -137,7 +130,6 @@ Base.@kwdef struct YcalvParams
     w2              ::Float64 = 0.0
     kt_ref          ::Float64 = 0.0025
     kt_deep         ::Float64 = 0.1
-    tau_ice         ::Float64 = 250.0e3
     Hc_ref_flt      ::Float64 = 200.0
     Hc_ref_grnd     ::Float64 = 200.0
     Hc_ref_thin     ::Float64 = 50.0
@@ -166,8 +158,6 @@ Base.@kwdef struct YdynParams
     H_grnd_lim      ::Float64 = 500.0
     beta_min        ::Float64 = 100.0
     eps_0           ::Float64 = 1e-6
-    scale_T         ::Int     = 1
-    T_frz           ::Float64 = -3.0
     # Split from `ssa_lis_opt`: Fortran-yelmo added a second SSA assembly method
     # ("energy", alongside the original "residual") and takes a separate LIS solver-option
     # string per method. Our previous single value matches Fortran's own
@@ -177,13 +167,11 @@ Base.@kwdef struct YdynParams
     ssa_lis_opt_residual::String = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
     ssa_lis_opt_energy  ::String = "-i cg -p jacobi -maxiter 200 -tol 1.0e-4 -initx_zeros false"
     ssa_lat_bc      ::String  = "floating"
-    ssa_beta_max    ::Float64 = 1e20
     ssa_vel_max     ::Float64 = 5000.0
     ssa_iter_max    ::Int     = 20
     ssa_iter_rel    ::Float64 = 0.7
     ssa_iter_conv   ::Float64 = 1e-2
     taud_lim        ::Float64 = 2e5
-    cb_sia          ::Float64 = 0.0
 end
 ydyn_params(; kwargs...) = YdynParams(; kwargs...)
 # ---------------------------------------------------------------------------
@@ -294,7 +282,6 @@ Base.@kwdef struct YthermParams
     zeta_scale_rock ::String  = "exp-inv"
     zeta_exp_rock   ::Float64 = 2.0
     H_rock          ::Float64 = 2000.0
-    cp_rock         ::Float64 = 1000.0
     kt_rock         ::Float64 = 6.3e7
 end
 ytherm_params(; kwargs...) = YthermParams(; kwargs...)
@@ -458,7 +445,7 @@ timestepping. `to_mirror` never copies these from a `YelmoParameters`
 into the generated Mirror configuration — the Mirror keeps its own
 Fortran-native values (e.g. `pc_method = "AB-SAM"`, since Julia's
 "HEUN" ≠ Fortran's "HEUN" despite the shared name). The shared adaptive
-controls (`dt_method`, `dt_min`, `cfl_max`, `cfl_diff_max`) are NOT in
+controls (`dt_method`, `dt_min`, `cfl_max`) are NOT in
 this set — they have identical meaning on both backends and are copied.
 
 Setting any parameter listed here to a non-default value on the Julia
