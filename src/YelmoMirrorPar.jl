@@ -280,6 +280,13 @@ Base.@kwdef struct YthermParams
     const_kt        ::Float64 = 6.62e7
     enth_cr         ::Float64 = 1e-3
     omega_max       ::Float64 = 0.01
+    # Grounded basal BC (Fortran basal-bc-capacity): "capacity" or the deprecated "wtil";
+    # cap_source "auto" picks "hyd" with Fortran-side water transport, else "till". A host that
+    # runs its own hydrology and pushes hyd%now%C_frz (yelmo_set_hydrology_exchange!) sets "hyd".
+    basal_bc_method ::String  = "capacity"
+    cap_source      ::String  = "auto"
+    cap_W_floor     ::Float64 = 0.0
+    cap_eps         ::Float64 = 1e-4
     # `till_rate`/`H_w_max` dropped: Fortran-yelmo's own &ytherm comment says it outright --
     # "Basal water bucket (till_rate, H_w_max) moved to &yhyd."
     rock_method     ::String  = "equil"
