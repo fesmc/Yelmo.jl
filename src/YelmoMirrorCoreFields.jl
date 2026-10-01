@@ -293,7 +293,8 @@ function yelmo_sync!(ylmo::YelmoMirror)
 
     # Thrm
     _set_var!(ylmo.thrm.T_ice, ylmo.v.thrm.T_ice, ylmo.buffers, ylmo.calias)
-    _set_var!(ylmo.thrm.H_w,   ylmo.v.thrm.H_w,   ylmo.buffers, ylmo.calias)
+    # thrm_H_w is not pushed: basal water lives in Fortran hyd%now (pushed via
+    # yelmo_set_hydrology_exchange! / hyd_N), and there is no thrm_H_w setter.
 
     return nothing
 end

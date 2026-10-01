@@ -20,6 +20,5 @@
 | 17 | calv_mask         | xc, yc      | -           | Locations where calving is not allowed                 |
 | 18 | H_ice_ref         | xc, yc      | m           | Reference ice thickness for relaxation routines        |
 | 19 | z_bed_ref         | xc, yc      | m           | Reference bedrock elevation for relaxation routines    |
-| 20 | domain_mask       | xc, yc      | -           | Domain for mask                                        |
 | 21 | mask_ice          | xc, yc      | -           | Per-cell ice evolution mask (0=none, 1=fixed, 2=dynamic) |
 | 22 | tau_relax         | xc, yc      | yr          | User-supplied relaxation timescale (used when ytopo.topo_rel = -1) |
