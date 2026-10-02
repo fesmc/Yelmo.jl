@@ -268,6 +268,7 @@ Base.@kwdef struct YthermParams
     const_kt        ::Float64 = 6.62e7
     enth_cr         ::Float64 = 1e-3
     omega_max       ::Float64 = 0.01
+    H_ice_thin      ::Float64 = 10.0      # [m] columns thinner than this are not solved (linear profile)
     # Grounded basal BC (Fortran basal-bc-capacity): "capacity" or the deprecated "wtil";
     # cap_source "auto" picks "hyd" with Fortran-side water transport, else "till". A host that
     # runs its own hydrology and pushes hyd%now%C_frz (yelmo_set_hydrology_exchange!) sets "hyd".
