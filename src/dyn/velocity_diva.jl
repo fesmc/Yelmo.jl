@@ -661,6 +661,10 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
 
+    # Effective-pressure hook (see YelmoHooks.jl): N from the iteration's own u_b.
+    neff_hook = y.hooks.neff_from_ub
+    c_bed_nm1 = neff_hook === nothing ? nothing : similar(interior(y.dyn.c_bed))   # plain Array
+
     for iter in 1:ssa.picard_iter_max
         iter_now = iter
 
@@ -890,6 +894,38 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         # Step 11 — zero face velocities at fully-empty margins.
         set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice_dyn)
 
+        # Step 11b — effective pressure that depends on the sliding speed
+        # (a steady hydrology such as K24): recover this iteration's basal
+        # velocity, let the hook re-evaluate N from it, and rebuild c_bed
+        # so that the next iteration's beta uses N consistent with the
+        # current velocity. N and u_b then converge together instead of
+        # alternating between steps. Mirrors Fortran velocity_diva.f90
+        # `neff_hook` (called after calc_vel_basal in every iteration).
+        c_bed_settled = true
+        if neff_hook !== nothing
+            c_bed_nm1 .= interior(y.dyn.c_bed)
+            calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
+                               sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
+                               y.dyn.ux_bar, y.dyn.uy_bar)
+            calc_vel_basal_diva!(y.dyn.ux_b, y.dyn.uy_b,
+                                 y.dyn.ux_bar, y.dyn.uy_bar,
+                                 y.dyn.taub_acx, y.dyn.taub_acy,
+                                 sc.diva_F2, y.tpo.f_ice_dyn;
+                                 no_slip = no_slip)
+            neff_hook(y.dyn.N_eff, y.dyn.ux_b, y.dyn.uy_b)
+            calc_c_bed!(y.dyn.c_bed,
+                        y.dyn.cb_ref, y.dyn.N_eff, y.thrm.T_prime_b,
+                        y.p.ytill.is_angle, y.p.ytill.cf_ref,
+                        y.p.ydyn.T_frz, y.p.ydyn.scale_T)
+            # Converged only once c_bed has stopped changing too (relative L1
+            # change below picard_tol): a warm-started solve can otherwise
+            # exit after one iteration without ever updating N.
+            c_new = interior(y.dyn.c_bed)
+            c_old = c_bed_nm1
+            c_bed_settled = sum(abs, c_new .- c_old) <=
+                            ssa.picard_tol * max(sum(abs, c_new), 1e-300)
+        end
+
         # Step 12 — convergence (L2 relative residual on ux_bar, uy_bar).
         l2_resid = picard_calc_convergence_l2(
             interior(y.dyn.ux_bar), interior(sc.diva_picard_ux_bar_nm1),
@@ -897,7 +933,7 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         if iter ≤ n_resid_max
             sc.ssa_residuals[iter] = l2_resid
         end
-        if l2_resid < ssa.picard_tol && iter > 1
+        if l2_resid < ssa.picard_tol && iter > 1 && c_bed_settled
             break
         end
     end

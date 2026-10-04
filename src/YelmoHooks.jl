@@ -35,6 +35,28 @@
 # Set `calv_flt_method = "custom"` in the namelist so the parameter
 # validator does not reject the model; the actual law comes from the
 # hook.
+#
+# Effective-pressure hook (`neff_from_ub`)
+# ----------------------------------------
+# For a steady hydrology whose effective pressure N depends on the
+# sliding speed u_b (K24, see FastHydrology.N_responds_to_ub): N computed
+# once per step from the previous u_b alternates with u_b from step to
+# step. With `y.hooks.neff_from_ub = f` set, the DIVA Picard iteration
+# calls
+#
+#   f(N_eff, ux_b, uy_b) -> nothing
+#
+# after every iteration's basal-velocity recovery, where `N_eff` is
+# `y.dyn.N_eff` (CenterField, Pa) to overwrite in place and `ux_b`,
+# `uy_b` are the iteration's basal velocity on the faces (m/yr). Yelmo
+# then recomputes `c_bed` from the new `N_eff` (`calc_c_bed!`), so the
+# next iteration's friction uses N consistent with the current velocity,
+# and the solve counts as converged only once `c_bed` has also settled
+# (relative L1 change below `ssa_solver.picard_tol`). Anything else the
+# hook needs (geometry, rate factor, the hydrology state) is captured
+# via closure. Requires `yneff.method = -1` so that `calc_ydyn_neff!`
+# does not overwrite the N the hook produced. Only the DIVA solver
+# calls it.
 # ----------------------------------------------------------------------
 
 module YelmoHooks
@@ -44,7 +66,7 @@ export YelmoHooks
 """
     YelmoHooks
 
-Mutable container for user-supplied calving-rate hooks. Attach to a
+Mutable container for user-supplied hooks (calving rates, and the sliding-speed-dependent effective pressure `neff_from_ub`). Attach to a
 `YelmoModel` via `y.hooks.calv_flt = f` after construction.
 
 See `src/YelmoHooks.jl` for the hook function signature.
@@ -52,7 +74,8 @@ See `src/YelmoHooks.jl` for the hook function signature.
 mutable struct YelmoHooks
     calv_flt  ::Union{Nothing, Function}
     calv_grnd ::Union{Nothing, Function}
-    YelmoHooks() = new(nothing, nothing)
+    neff_from_ub ::Union{Nothing, Function}
+    YelmoHooks() = new(nothing, nothing, nothing)
 end
 
 end # module YelmoHooks
