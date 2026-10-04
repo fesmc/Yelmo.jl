@@ -503,7 +503,10 @@ function _run_uniform_slab(solver_name::String;
                             ATT_const::Float64 = 1e-16,
                             picard_tol::Float64 = 1e-8,
                             picard_iter_max::Int = 100,
-                            boundaries::Symbol = :periodic_y)
+                            boundaries::Symbol = :periodic_y,
+                            beta_method::Int = 0,
+                            beta_u0::Float64 = 31556926.0,
+                            neff_hook_factory = nothing)
     tdir = mktempdir(; prefix="hybrid_$(solver_name)_")
     path = joinpath(tdir, "ssa_restart.nc")
     _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
@@ -514,7 +517,8 @@ function _run_uniform_slab(solver_name::String;
             solver         = solver_name,
             visc_method    = 0,
             visc_const     = visc_const,
-            beta_method    = 0,
+            beta_method    = beta_method,
+            beta_u0        = beta_u0,
             beta_const     = beta_const,
             beta_gl_scale  = 0,
             beta_min       = 0.0,
@@ -536,6 +540,7 @@ function _run_uniform_slab(solver_name::String;
     fill!(interior(y.mat.ATT), ATT_const)
     fill!(interior(y.dyn.cb_ref), 1.0)
     fill!(interior(y.dyn.N_eff), 1e7)
+    neff_hook_factory === nothing || (y.hooks.neff_from_ub = neff_hook_factory(y))
     Yelmo.update_diagnostics!(y)
     Yelmo.YelmoModelDyn.dyn_step!(y, 1.0)
     return y
@@ -593,6 +598,45 @@ end
     # and should be non-zero on this driving-stress fixture (the
     # no-slip flag zeros only basal sliding, not depth-averaged flow).
     @test maximum(abs.(interior(y.dyn.ux_bar))) > 1e-12
+end
+
+@testset "diva: neff_from_ub hook solves N and u_b together" begin
+    # Linear friction beta = c_bed / u0 with c_bed = cb_ref * N_eff, and an N that falls with
+    # the sliding speed, N = N0 / (1 + u_b / u_s) (a stand-in for a steady hydrology whose N
+    # depends on u_b). Without the hook N stays at its pushed value; with it the DIVA iteration
+    # re-evaluates N from each iteration's u_b, so the converged N is the one of the converged
+    # u_b and c_bed follows it.
+    Nx, Ny, Nz = 7, 3, 4
+    N0, u_s = 1e7, 0.05
+    f_N(u) = N0 / (1 + u / u_s)
+
+    hook_factory = function (y)
+        return function (N_eff, ux_b, uy_b)
+            uxy = y.dyn.uxy_b      # scratch: recomputed by the end-of-step diagnostics
+            Yelmo.YelmoModelDyn.calc_magnitude_from_staggered!(uxy, ux_b, uy_b, y.tpo.f_ice_dyn)
+            interior(N_eff) .= f_N.(interior(uxy))
+            return nothing
+        end
+    end
+
+    kw = (Nx = Nx, Ny = Ny, dx = 1000.0, Nz = Nz, beta_method = 1, beta_u0 = 100.0,
+          picard_tol = 1e-8, picard_iter_max = 100)
+    y_off = _run_uniform_slab("diva"; kw...)
+    y_on  = _run_uniform_slab("diva"; kw..., neff_hook_factory = hook_factory)
+
+    @test all(==(1e7), interior(y_off.dyn.N_eff))
+    @test y_on.dyn.scratch.ssa_iter_now[] > 1
+
+    # N is the one of the converged sliding speed, and c_bed follows it
+    uxy_b = interior(y_on.dyn.uxy_b)
+    inner = (3:5, :, 1)
+    @test maximum(abs.(interior(y_on.dyn.N_eff)[inner...] .- f_N.(uxy_b[inner...]))) <
+          1e-6 * N0
+    @test interior(y_on.dyn.c_bed)[inner...] ≈ interior(y_on.dyn.cb_ref)[inner...] .* interior(y_on.dyn.N_eff)[inner...]
+
+    # ... which is lower than the pushed N, so the ice slides faster
+    @test all(interior(y_on.dyn.N_eff)[inner...] .< 1e7)
+    @test minimum(interior(y_on.dyn.uxy_b)[inner...]) > maximum(interior(y_off.dyn.uxy_b)[inner...])
 end
 
 # ======================================================================
