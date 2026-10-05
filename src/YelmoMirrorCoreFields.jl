@@ -12,7 +12,7 @@ export YelmoMirror, init_state!, step!, yelmo_sync!, yelmo_write_restart!
 export yelmo_get_var2D, yelmo_get_var2D!
 export yelmo_get_var3D, yelmo_get_var3D!
 export yelmo_set_var2D!, yelmo_set_var3D!
-export yelmo_set_hydrology_exchange!
+export yelmo_set_hydrology_exchange!, yelmo_set_neff_callback!
 
 # ---------------------------------------------------------------------------
 const yelmopath = joinpath(@__DIR__, "..", "yelmo")
@@ -219,6 +219,50 @@ function init_state!(ylmo::YelmoMirror, time::Float64; thrm_method::String="robi
     return ylmo
 end
 
+# ---------------------------------------------------------------------------
+# Effective-pressure callback: a hydrology owned by Julia (K24 in FastHydrology.jl) is evaluated
+# inside Fortran Yelmo's DIVA Picard iteration, with the iteration's own basal speed, instead of once
+# per step from the previous speed. See `yelmo_set_neff_callback!`.
+const _NEFF_CALLBACKS = Any[]            # indexed by the tag handed to Fortran
+const _NEFF_ERROR     = Ref{Any}(nothing)  # an exception thrown inside a callback, rethrown by step!
+
+# Called by Fortran (yelmo_dynamics.f90, neff_from_hydrology) as cb(tag, uxy_b, N_eff, nx, ny).
+function _neff_trampoline(tag::Cint, uxy_b::Ptr{Cdouble}, N_eff::Ptr{Cdouble}, nx::Cint, ny::Cint)::Cvoid
+    try
+        dims = (Int(nx), Int(ny))
+        _NEFF_CALLBACKS[tag](unsafe_wrap(Array, N_eff, dims), unsafe_wrap(Array, uxy_b, dims))
+    catch err
+        # Do not unwind through Fortran frames: keep the incoming N and rethrow after the step.
+        _NEFF_ERROR[] === nothing && (_NEFF_ERROR[] = (err, catch_backtrace()))
+    end
+    return nothing
+end
+
+"""
+    yelmo_set_neff_callback!(ylmo::YelmoMirror, f)
+
+Register `f(N_eff, uxy_b)` as the effective-pressure callback of Fortran Yelmo's DIVA solver. In every
+Picard iteration Fortran calls it with the basal speed magnitude `uxy_b` [m/yr] on aa-nodes (a
+`Nx x Ny` array) and a `Nx x Ny` array `N_eff` [Pa] holding the current N, to be overwritten in
+place. Yelmo then rebuilds `c_bed` from it and counts the solve as converged only once `c_bed` has
+also settled. For a steady hydrology whose N depends on the sliding speed (K24), so that N and u_b
+converge together instead of alternating step to step. N must be driven externally
+(`hyd.bkt_N_closure = -1`). `f = nothing` unregisters. An exception thrown by `f` is rethrown by the
+`step!` that called it.
+"""
+function yelmo_set_neff_callback!(ylmo::YelmoMirror, f)
+    if f === nothing
+        ccall((:yelmo_set_neff_callback, yelmolib), Cvoid, (Ptr{Cvoid}, Cint, Ptr{UInt8}),
+              C_NULL, 0, ylmo.calias)
+        return nothing
+    end
+    push!(_NEFF_CALLBACKS, f)
+    cb = @cfunction(_neff_trampoline, Cvoid, (Cint, Ptr{Cdouble}, Ptr{Cdouble}, Cint, Cint))
+    ccall((:yelmo_set_neff_callback, yelmolib), Cvoid, (Ptr{Cvoid}, Cint, Ptr{UInt8}),
+          cb, length(_NEFF_CALLBACKS), ylmo.calias)
+    return nothing
+end
+
 function step!(ylmo::YelmoMirror, dt::Float64)
 
     # Sync yelmo to fortran
@@ -229,6 +273,11 @@ function step!(ylmo::YelmoMirror, dt::Float64)
     
     # Call yelmo_step in fortran
     ccall((:yelmo_step, yelmolib), Cvoid, (Float64, Ptr{UInt8}), ylmo.time, ylmo.calias)
+    if _NEFF_ERROR[] !== nothing
+        err, bt = _NEFF_ERROR[]; _NEFF_ERROR[] = nothing
+        @error "effective-pressure callback failed inside yelmo_step" exception = (err, bt)
+        throw(err)
+    end
 
     # Update yelmo in julia
     yelmo_get_variables!(ylmo)
