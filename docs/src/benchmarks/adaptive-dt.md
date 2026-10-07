@@ -49,12 +49,13 @@ The adaptive and fixed-FE runs need not produce bit-identical output — they
 converge to the same attractor but via different trajectories.  The ±10%
 tolerance confirms they land in the same neighbourhood.
 
-Observed agreement (typical):
+Observed (albedo, yelmo dev time loop):
 
-| Quantity | Fixed FE | HEUN | FE-SBE | AB-SAM |
+| Quantity | Fixed dt (`dt_method = 0`) | FE-SBE | HEUN | AB-SAM |
 |---|---|---|---|---|
-| `max(H)` | ~1575 m | ~1540 m | ~1530 m | ~1545 m |
-| `mean(f_grnd)` | ~0.490 | ~0.488 | ~0.486 | ~0.489 |
+| `max(H)` | 1576.27 m | 1576.29 m | 1576.29 m | 1576.27 m |
+| `mean(H)` | 840.63 m | 841.26 m | 841.25 m | 841.20 m |
+| `mean(f_grnd)` | 0.4902 | 0.4902 | 0.4902 | 0.4902 |
 
 ### 3. Rollback path actually fires on the cliff IC
 
@@ -62,7 +63,7 @@ The MISMIP3D thicker IC produces a velocity cliff on the first step
 (unconstrained SSA gives ~5000 m/yr at the calving column, then
 `ssa_vel_max` clips it).  The first outer step should trigger at least one
 adaptive rejection or sub-step.  The test asserts
-`n_rejections > 0` OR `n_steps_taken > 1` OR `min(dt_history) < 1 yr`.
+`n_rejections > 0` OR `n_steps_taken > 1` OR `min(pc_dt) < 1 yr`.
 
 ## Step-size controller details
 
