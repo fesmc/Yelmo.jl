@@ -593,17 +593,15 @@ end
 # ======================================================================
 
 """
-    calc_velocity_diva!(y; no_slip = nothing) -> y
+    calc_velocity_diva!(y; no_slip) -> y
 
 Top-level DIVA driver. Iterates the SSA-like 2D depth-integrated
 momentum balance with depth-integrated effective friction `beta_eff`
 until the depth-averaged velocity converges, then reconstructs the
 3D horizontal velocity field via the F1 closed-form integral.
 
-`no_slip` overrides the no-slip flag for this call. When `nothing`
-(default) the value is taken from `y.p.ydyn.no_slip`. The `dyn_step!`
-dispatch passes `no_slip = true` for the `"diva-noslip"` solver
-keyword (mirroring Fortran's `yelmo_dynamics.f90:477-480`).
+`no_slip` (no basal sliding) defaults to `ydyn.solver == "diva-noslip"`,
+as in Fortran (`yelmo_dynamics.f90`, which has no separate `no_slip` key).
 
 Picard outer loop mirrors `calc_velocity_ssa!` step-for-step; the
 only differences vs SSA are:
@@ -623,7 +621,7 @@ only differences vs SSA are:
 
 Port of Fortran `velocity_diva.f90:69-412 calc_velocity_diva`.
 """
-function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
+function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip")
     p_ydyn = y.p.ydyn
     p_ymat = y.p.ymat
     ssa    = p_ydyn.ssa_solver
@@ -638,7 +636,6 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
     dy = abs(Float64(dy_g isa Number ? dy_g : error("calc_velocity_diva!: stretched y-grid not supported.")))
 
     sc = y.dyn.scratch
-    no_slip = no_slip === nothing ? p_ydyn.no_slip : no_slip
 
     # Step 1 — SSA masks.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
@@ -665,7 +662,7 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
     neff_hook = y.hooks.neff_from_ub
     c_bed_nm1 = neff_hook === nothing ? nothing : similar(interior(y.dyn.c_bed))   # plain Array
 
-    for iter in 1:ssa.picard_iter_max
+    for iter in 1:p_ydyn.ssa_iter_max
         iter_now = iter
 
         interior(sc.ssa_picard_visc_eff_nm1) .= interior(y.dyn.visc_eff)
@@ -727,7 +724,7 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         #     cheap; cost is downstream solvers converging to a
         #     slightly different fixed point).
         picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1;
-                           rel = ssa.picard_relax)
+                           rel = p_ydyn.ssa_iter_rel)
 
         # Step 4 — depth-integrated viscosity (same as SSA).
         @views interior(sc.ssa_visc_eff_b)[:, :, 1] .=
@@ -888,7 +885,7 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
             picard_relax_vel!(y.dyn.ux_bar, y.dyn.uy_bar,
                               sc.diva_picard_ux_bar_nm1,
                               sc.diva_picard_uy_bar_nm1,
-                              ssa.picard_relax)
+                              p_ydyn.ssa_iter_rel)
         end
 
         # Step 11 — zero face velocities at fully-empty margins.
@@ -913,17 +910,14 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
                                  sc.diva_F2, y.tpo.f_ice_dyn;
                                  no_slip = no_slip)
             neff_hook(y.dyn.N_eff, y.dyn.ux_b, y.dyn.uy_b)
-            calc_c_bed!(y.dyn.c_bed,
-                        y.dyn.cb_ref, y.dyn.N_eff, y.thrm.T_prime_b,
-                        y.p.ytill.is_angle, y.p.ytill.cf_ref,
-                        y.p.ydyn.T_frz, y.p.ydyn.scale_T)
+            calc_c_bed!(y.dyn.c_bed, y.dyn.cb_ref, y.dyn.N_eff, y.p.ytill.is_angle)
             # Converged only once c_bed has stopped changing too (relative L1
-            # change below picard_tol): a warm-started solve can otherwise
+            # change below ydyn.ssa_iter_conv): a warm-started solve can otherwise
             # exit after one iteration without ever updating N.
             c_new = interior(y.dyn.c_bed)
             c_old = c_bed_nm1
             c_bed_settled = sum(abs, c_new .- c_old) <=
-                            ssa.picard_tol * max(sum(abs, c_new), 1e-300)
+                            p_ydyn.ssa_iter_conv * max(sum(abs, c_new), 1e-300)
         end
 
         # Step 12 — convergence (L2 relative residual on ux_bar, uy_bar).
@@ -933,7 +927,7 @@ function calc_velocity_diva!(y; no_slip::Union{Nothing,Bool} = nothing)
         if iter ≤ n_resid_max
             sc.ssa_residuals[iter] = l2_resid
         end
-        if l2_resid < ssa.picard_tol && iter > 1 && c_bed_settled
+        if l2_resid < p_ydyn.ssa_iter_conv && iter > 1 && c_bed_settled
             break
         end
     end

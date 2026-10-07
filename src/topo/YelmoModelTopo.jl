@@ -50,7 +50,7 @@ export topo_step!, topo_pc_step!, PCStageBuf,
        calc_gradient_acx!, calc_gradient_acy!,
        calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
        calc_f_grnd_pinning_points!, calc_grounded_fractions!,
-       extend_floating_slab!, calc_dynamic_ice_fields!,
+       calc_dynamic_ice_fields!,
        update_diagnostics!
 
 include("advection.jl")
@@ -273,7 +273,7 @@ function _topo_mb_cascade!(y::YelmoModel, dt::Float64)
     # Residual cleanup tendency for margin/island regularisation.
     resid_tendency!(y.tpo.mb_resid, y.tpo.H_ice, y.tpo.f_ice, y.tpo.f_grnd,
                     y.bnd.mask_ice, y.bnd.H_ice_ref,
-                    y.p.ytopo.H_min_flt, y.p.ytopo.H_min_grnd, dt)
+                    y.p.ycalv.H_min_flt, y.p.ycalv.H_min_grnd, dt)
     apply_tendency!(y.tpo.H_ice, y.tpo.mb_resid, dt; adjust_mb=true)
 
     # Final f_ice refresh after the cleanup step.
@@ -369,8 +369,8 @@ end
 #   - `:predictor` — snapshot input state (`H_ice_n`, `dHidt_dyn_n`,
 #     `lsf_n`); compute pure advective tendency at `H_n` with the
 #     current velocity field; β-mix `dHidt_dyn = β1·dHidt_now +
-#     β2·dHidt_dyn_n`; apply the tendency on top of `H_ice_n` (with
-#     `mb_lim = dHdt_dyn_lim`); run the full MB cascade on top of the
+#     β2·dHidt_dyn_n`; apply the tendency on top of `H_ice_n`; run the
+#     full MB cascade on top of the
 #     resulting `H_pred`; save the per-stage outputs to `pred_buf`.
 #     On exit, live `y.tpo.H_ice = H_pred` — the next `dyn_step!` solves
 #     SSA at this state.
@@ -416,8 +416,7 @@ function topo_pc_step!(y::YelmoModel, dt::Float64;
         # 3. Apply mixed advective tendency on top of H_n (H_ice already
         # equals H_ice_n since the tendency helper restores).
         apply_tendency!(y.tpo.H_ice, y.tpo.dHidt_dyn, dt;
-                        adjust_mb = true,
-                        mb_lim    = y.p.ytopo.dHdt_dyn_lim)
+                        adjust_mb = true)
 
         # 4. Mask-ice post-pass (NONE→0, FIXED→H_ice_ref, DYNAMIC→max(0)).
         apply_mask_ice_pass!(y)
@@ -447,8 +446,7 @@ function topo_pc_step!(y::YelmoModel, dt::Float64;
         copyto!(interior(y.tpo.H_ice), interior(y.tpo.H_ice_n))
         copyto!(interior(y.tpo.lsf),   interior(y.tpo.lsf_n))
         apply_tendency!(y.tpo.H_ice, y.tpo.dHidt_dyn, dt;
-                        adjust_mb = true,
-                        mb_lim    = y.p.ytopo.dHdt_dyn_lim)
+                        adjust_mb = true)
 
         # 4. Mask-ice pass and f_ice refresh.
         apply_mask_ice_pass!(y)
@@ -659,8 +657,7 @@ function _update_diagnostics!(y::YelmoModel,
     # ice-thickness gradients).
     dx = _dx(y.g)
     dy = _dy(y.g)
-    grad_lim  = y.p.ytopo.grad_lim
-    margin2nd = y.p.ytopo.margin2nd
+    grad_lim = y.p.ytopo.grad_lim
     # Periodic-wrap slope offsets. Default 0.0 (production ice sheets,
     # Bounded lateral axes); set in benchmark configs with a uniform-
     # slope surface across a periodic axis (HOM-C, MISMIP3D Stnd).
@@ -672,27 +669,27 @@ function _update_diagnostics!(y::YelmoModel,
     dzsdy_off = y.p.ytopo.dzsdy_periodic_offset
 
     calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,  y.tpo.f_ice, dx;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = false,
                        periodic_offset = dzsdx_off)
     calc_gradient_acy!(y.tpo.dzsdy, y.tpo.z_srf,  y.tpo.f_ice, dy;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = false,
                        periodic_offset = dzsdy_off)
 
     calc_gradient_acx!(y.tpo.dHidx, y.tpo.H_ice,  y.tpo.f_ice, dx;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = true)
     calc_gradient_acy!(y.tpo.dHidy, y.tpo.H_ice,  y.tpo.f_ice, dy;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = true)
 
     calc_gradient_acx!(y.tpo.dzbdx, y.tpo.z_base, y.tpo.f_ice, dx;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = false,
                        periodic_offset = dzsdx_off)
     calc_gradient_acy!(y.tpo.dzbdy, y.tpo.z_base, y.tpo.f_ice, dy;
-                       grad_lim = grad_lim, margin2nd = margin2nd,
+                       grad_lim = grad_lim,
                        zero_outside = false,
                        periodic_offset = dzsdy_off)
 

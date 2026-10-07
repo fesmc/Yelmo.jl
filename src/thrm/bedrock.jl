@@ -24,9 +24,9 @@
 #   - `zeta_aa` for bedrock starts at `0` (deep) and ends at `1` (bed
 #     surface). The "surface" of the bedrock column (`k = nz_aa`)
 #     equals the BASE of the ice column.
-#   - `cp_rock`, `kt_rock` are scalar (constant per Yelmo
-#     convention) — the param struct stores them as `cp_rock`,
-#     `kt_rock`.
+#   - `rhoc_rock` (volumetric heat capacity ρc) and `kt_rock` are
+#     scalars (`ytherm.rhoc_rock`, `ytherm.kt_rock`). No bedrock
+#     enthalpy is kept (Fortran dev removed `enth_rock`).
 #
 # `rock_method = "fixed"` is a no-op handled inline in `therm_step!`.
 # `rock_method = "active"` is implemented via `define_temp_bedrock_active_3D!`,
@@ -79,25 +79,22 @@ upwind temperature gradient between `T_rock[nz_aa]` and `T_rock[nz_aa-1]`.
 end
 
 """
-    define_temp_bedrock_3D!(enth_rock_field, T_rock_field, Q_rock_field,
+    define_temp_bedrock_3D!(T_rock_field, Q_rock_field,
                             T_ice_b_field, Q_geo_field,
-                            cp_rock, kt_rock, H_rock,
+                            kt_rock, H_rock,
                             zeta_aa, sec_year) -> nothing
 
-Fill `T_rock`, `Q_rock`, `enth_rock` for the `rock_method = "equil"`
+Fill `T_rock`, `Q_rock` for the `rock_method = "equil"`
 mode: linear profile at every (i, j) anchored at `T_bed = T_ice_b[i,j,1]`
-(ice basal boundary field at ζ=0) with deep slope from
-`Q_geo`. `enth_rock = cp_rock * T_rock` (Fortran calls
-`convert_to_enthalpy(enth, T, omega=0, T_pmp=0, cp, L=0)`).
+(ice basal boundary field at ζ=0) with deep slope from `Q_geo`.
 """
-function define_temp_bedrock_3D!(enth_rock_field, T_rock_field,
+function define_temp_bedrock_3D!(T_rock_field,
                                  Q_rock_field, T_ice_b_field,
                                  Q_geo_field,
-                                 cp_rock::Real, kt_rock::Real,
+                                 kt_rock::Real,
                                  H_rock::Real,
                                  zeta_aa_rock::AbstractVector{<:Real},
                                  sec_year::Real)
-    er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
     Tib_d = T_ice_b_field.data
@@ -106,16 +103,15 @@ function define_temp_bedrock_3D!(enth_rock_field, T_rock_field,
     Ny    = T_rock_field.grid.Ny
     Nz    = T_rock_field.grid.Nz
     zeta  = collect(Float64, zeta_aa_rock)
-    return _define_temp_bedrock_3D_kernel!(er_d, Tr_d, Qr_d, Tib_d, Qg_d,
-                                           Float64(cp_rock),
+    return _define_temp_bedrock_3D_kernel!(Tr_d, Qr_d, Tib_d, Qg_d,
                                            Float64(kt_rock),
                                            Float64(H_rock),
                                            zeta, Float64(sec_year),
                                            Nx, Ny, Nz)
 end
 
-function _define_temp_bedrock_3D_kernel!(er, Tr, Qr, Tib, Qg,
-                                         cp_rock::Float64, kt_rock::Float64,
+function _define_temp_bedrock_3D_kernel!(Tr, Qr, Tib, Qg,
+                                         kt_rock::Float64,
                                          H_rock::Float64,
                                          zeta_aa::Vector{Float64},
                                          sec_year::Float64,
@@ -127,18 +123,15 @@ function _define_temp_bedrock_3D_kernel!(er, Tr, Qr, Tib, Qg,
                                     zeta_aa, sec_year)
         Qr[i, j, 1] = calc_Q_bedrock_column(T_rock_col, kt_rock,
                                             H_rock, zeta_aa, sec_year)
-        for k in 1:Nz
-            er[i, j, k] = cp_rock * T_rock_col[k]
-        end
     end
     return nothing
 end
 
 """
-    define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
+    define_temp_bedrock_active_3D!(T_rock_field,
                                    Q_rock_field, T_ice_b_field,
                                    Q_geo_field,
-                                   cp_rock, kt_rock, rho_rock, H_rock,
+                                   rhoc_rock, kt_rock, H_rock,
                                    zeta_aa, zeta_ac, dzeta_a, dzeta_b,
                                    sec_year, dt) -> nothing
 
@@ -146,19 +139,19 @@ Implicit-solve variant for `rock_method = "active"`. Mirrors Fortran
 `calc_temp_bedrock_column` (`physics/ice_enthalpy.f90:250-366`) per
 column. No advection, no strain heat — surface (top, bedrock-ice
 interface) is Dirichlet at the ice basal temperature (`T_ice_b_field`
-at ζ=0), base (deep) is Neumann from Q_geo.
+at ζ=0), base (deep) is Neumann from Q_geo. Diffusivity
+`kt_rock / rhoc_rock` (`rhoc_rock` = volumetric heat capacity ρc).
 """
-function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
+function define_temp_bedrock_active_3D!(T_rock_field,
                                         Q_rock_field, T_ice_b_field,
                                         Q_geo_field,
-                                        cp_rock::Real, kt_rock::Real,
-                                        rho_rock::Real, H_rock::Real,
+                                        rhoc_rock::Real, kt_rock::Real,
+                                        H_rock::Real,
                                         zeta_aa_rock::AbstractVector{<:Real},
                                         zeta_ac_rock::AbstractVector{<:Real},
                                         dzeta_a_rock::AbstractVector{<:Real},
                                         dzeta_b_rock::AbstractVector{<:Real},
                                         sec_year::Real, dt::Real)
-    er_d  = enth_rock_field.data
     Tr_d  = T_rock_field.data
     Qr_d  = Q_rock_field.data
     Tib_d = T_ice_b_field.data
@@ -173,7 +166,7 @@ function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
     dzeta_b = collect(Float64, dzeta_b_rock)
 
     # Per-column scratch.
-    kappa_buf    = fill(Float64(kt_rock) / (Float64(rho_rock) * Float64(cp_rock)), Nz)
+    kappa_buf    = fill(Float64(kt_rock) / Float64(rhoc_rock), Nz)
     advecxy_zero = zeros(Float64, Nz)
     Q_strn_zero  = zeros(Float64, Nz)
     uz_zero      = zeros(Float64, Nz + 1)
@@ -185,8 +178,7 @@ function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
     cp_tri       = Vector{Float64}(undef, Nz)
     dp_tri       = Vector{Float64}(undef, Nz)
 
-    return _define_temp_bedrock_active_3D_kernel!(er_d, Tr_d, Qr_d, Tib_d, Qg_d,
-                                                  Float64(cp_rock),
+    return _define_temp_bedrock_active_3D_kernel!(Tr_d, Qr_d, Tib_d, Qg_d,
                                                   Float64(kt_rock),
                                                   Float64(H_rock),
                                                   zeta_aa, zeta_ac,
@@ -202,8 +194,7 @@ function define_temp_bedrock_active_3D!(enth_rock_field, T_rock_field,
                                                   Nx, Ny, Nz)
 end
 
-function _define_temp_bedrock_active_3D_kernel!(er, Tr, Qr, Tib, Qg,
-                                                cp_rock::Float64,
+function _define_temp_bedrock_active_3D_kernel!(Tr, Qr, Tib, Qg,
                                                 kt_rock::Float64,
                                                 H_rock::Float64,
                                                 zeta_aa::Vector{Float64},
@@ -249,9 +240,6 @@ function _define_temp_bedrock_active_3D_kernel!(er, Tr, Qr, Tib, Qg,
 
         Qr[i, j, 1] = calc_Q_bedrock_column(T_col, kt_rock, H_rock,
                                             zeta_aa, sec_year)
-        for k in 1:Nz
-            er[i, j, k] = cp_rock * T_col[k]
-        end
     end
     return nothing
 end

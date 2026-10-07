@@ -2,15 +2,16 @@
 # Solver type hierarchy for the Yelmo.jl dynamics module.
 #
 # `Solver` is the abstract supertype for all dynamic-velocity solver
-# configurations. Concrete solver types carry the full set of knobs
-# needed to configure both the inner linear solve (Krylov method,
-# preconditioner, tolerances) and the outer non-linear iteration
-# (Picard relaxation, convergence tolerance, max iterations).
+# configurations. Concrete solver types carry the assembly choice and the
+# knobs of the inner linear solve (Krylov method, preconditioner,
+# tolerances). The outer Picard iteration is set by the Fortran keys
+# `ydyn.ssa_iter_max` / `ssa_iter_rel` / `ssa_iter_conv`, shared with the
+# Fortran model.
 #
 # Currently defined:
 #
-#   - `SSASolver` — knobs for the SSA Picard iteration + Krylov+AMG
-#     inner linear solve. Used by the `solver = "ssa"` and
+#   - `SSASolver` — assembly choice + Krylov/AMG inner linear solve of
+#     the SSA/DIVA velocity solution. Used by the `solver = "ssa"` and
 #     `solver = "hybrid"` dispatch branches in `dyn_step!`.
 #
 # Future expansion: `DIVASolver`, `L1L2Solver`, etc. will extend
@@ -21,12 +22,12 @@
 #
 # Locked-in design decisions (PR-B / milestone 3d):
 #
-#   - Default assembly `method` for SSA: `:residual` — assemble the
-#     Jacobian of the strong-form SSA momentum residual directly.
-#     Faithful to the Fortran port. The resulting matrix is non-
-#     symmetric in general (BC handling, mask-based calving-front
-#     treatment) so the inner Krylov method defaults to BiCGStab.
-#   - Alternative `method = :energy_quadratic`: assemble the Hessian of
+#   - `method = :residual` (Fortran `ssa_solver = "residual"`): assemble
+#     the Jacobian of the strong-form SSA momentum residual directly. The
+#     matrix is non-symmetric in general (BC handling, mask-based
+#     calving-front treatment) so the inner Krylov method is BiCGStab.
+#   - `method = :energy_quadratic` (Fortran `ssa_solver = "energy"`, the
+#     Fortran default and so the default here): assemble the Hessian of
 #     the discrete viscous-energy functional E[u] (ν, β, H frozen per
 #     Picard iteration). Symmetric positive-definite by construction;
 #     pairs naturally with CG. See `velocity_ssa_energy.jl` and the
@@ -38,10 +39,6 @@
 #     `method = :residual`, `:cg` for `method = :energy_quadratic`.
 #   - Default smoother for AMG: Gauss-Seidel (`:gauss_seidel`). Robust
 #     on non-symmetric M-matrix-like systems.
-#   - Default Picard tolerance: `1e-2`. Matches Fortran's
-#     `YdynParams.ssa_iter_conv` default and the MISMIP+ namelist.
-#   - Default Picard relaxation: `0.7`. Matches Fortran's
-#     `YdynParams.ssa_iter_rel` default.
 #
 # This file is included directly by `Yelmo.jl` at the top level so that
 # both `YelmoPar` (which carries an `SSASolver` field on
@@ -63,30 +60,30 @@ corresponding solver branch in `dyn_step!`.
 abstract type Solver end
 
 """
-    SSASolver(; method = :residual, linear_method = :auto,
+    SSASolver(; method = :energy_quadratic, linear_method = :auto,
                 precond = :jacobi, smoother = :gauss_seidel,
-                rtol = 1e-6, itmax = 200,
-                picard_tol = 1e-2, picard_relax = 0.7,
-                picard_iter_max = 50)
+                rtol = 1e-6, itmax = 200)
 
-Configuration object for the Shallow-Shelf Approximation (SSA) solver.
-Carries the choice of assembly formulation (`method`), the inner
-linear-solve parameters (Krylov method, preconditioner, tolerances),
-and the outer Picard iteration parameters (relaxation, convergence
-tolerance, max iterations).
+Configuration object for the Shallow-Shelf Approximation (SSA) solver,
+held in `ydyn.ssa_solver`. Carries the choice of assembly formulation
+(`method`, the Fortran key `ssa_solver`) and the inner linear-solve
+parameters (Krylov method, preconditioner, tolerances), which replace
+Fortran's Lis option strings `ssa_lis_opt_*`. The outer Picard iteration
+is set by `ydyn.ssa_iter_max`, `ssa_iter_rel` and `ssa_iter_conv`.
 
 Used by `dyn_step!` when `y.p.ydyn.solver ∈ ("ssa", "hybrid")`.
 
 Fields:
 
   - `method::Symbol` — assembly formulation for the SSA stiffness
-    matrix. Default `:residual`. Supported values:
-      * `:residual` — DEFAULT. Assemble `A` as the Jacobian of the
-        strong-form SSA momentum residual, faithful to the Fortran
-        port (`solver_ssa_ac.f90`). The matrix is non-symmetric in
+    matrix. Default `:energy_quadratic`. Supported values:
+      * `:residual` — Fortran `ssa_solver = "residual"`. Assemble `A`
+        as the Jacobian of the strong-form SSA momentum residual
+        (`solver_ssa_ac.f90`). The matrix is non-symmetric in
         general (BC handling, mask-based calving fronts), so
         `linear_method = :auto` resolves to `:bicgstab`.
-      * `:energy_quadratic` — assemble `A` as the Hessian of the
+      * `:energy_quadratic` — DEFAULT, Fortran `ssa_solver = "energy"`
+        (`solver_ssa_ac_energy.f90`). Assemble `A` as the Hessian of the
         discrete viscous-energy functional `E[u]` with η, β, H frozen
         per Picard iteration. Symmetric positive-definite by
         construction; `linear_method = :auto` resolves to `:cg`.
@@ -129,41 +126,28 @@ Fields:
     Krylov iteration stops when `‖r‖ ≤ rtol · ‖b‖`. Default `1e-6`.
   - `itmax::Int` — maximum Krylov iterations per linear solve before
     soft-warning on non-convergence. Default `200`.
-  - `picard_tol::Float64` — outer Picard convergence tolerance on the
-    L2-relative velocity change. Mirrors Fortran's
-    `YdynParams.ssa_iter_conv` default. Default `1e-2`.
-  - `picard_relax::Float64` — Picard relaxation parameter (mixing
-    weight for the new velocity solution against the previous). Mirrors
-    Fortran's `YdynParams.ssa_iter_rel`. Default `0.7`.
-  - `picard_iter_max::Int` — maximum Picard outer iterations before
-    soft-warning on non-convergence. Default `50`.
 
 Mirrors Fortran's `velocity_ssa.f90:60-335 calc_velocity_ssa` outer
-loop (Picard iteration with constant relaxation per Q5 / option (a)).
+loop (Picard iteration with constant relaxation `ydyn.ssa_iter_rel`).
 The Lis-syntax `ssa_lis_opt` namelist string is replaced by the
 explicit Julia-native fields above.
 """
 Base.@kwdef struct SSASolver <: Solver
-    method::Symbol         = :residual
+    method::Symbol         = :energy_quadratic
     linear_method::Symbol  = :auto
     precond::Symbol        = :jacobi
     smoother::Symbol       = :gauss_seidel
     rtol::Float64          = 1e-6
     itmax::Int             = 200
-    picard_tol::Float64    = 1e-2
-    picard_relax::Float64  = 0.7
-    picard_iter_max::Int   = 50
 
-    function SSASolver(method, linear_method, precond, smoother,
-                       rtol, itmax, picard_tol, picard_relax, picard_iter_max)
+    function SSASolver(method, linear_method, precond, smoother, rtol, itmax)
         method ∈ (:residual, :energy_quadratic, :energy_nonlinear) || error(
             "SSASolver: method=$(method) not recognized. Expected one of " *
             ":residual, :energy_quadratic, :energy_nonlinear.")
         linear_method ∈ (:auto, :bicgstab, :cg, :gmres) || error(
             "SSASolver: linear_method=$(linear_method) not recognized. " *
             "Expected one of :auto, :bicgstab, :cg, :gmres.")
-        new(method, linear_method, precond, smoother,
-            rtol, itmax, picard_tol, picard_relax, picard_iter_max)
+        new(method, linear_method, precond, smoother, rtol, itmax)
     end
 end
 

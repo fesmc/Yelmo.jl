@@ -23,9 +23,8 @@ Port plan (incremental):
     universal post-step diagnostics (`T_prime`, `T_prime_b`, `f_pmp`,
     `enth`).
   - **PR3 (this commit)**: heat sources (`Q_strn`, `Q_b`) and basal
-    water (`H_w`, `dHwdt`). Adds `qb_method ∈ {1, 2}` dispatch, the
-    `use_strain_sia` toggle for the SIA-style strain-heating
-    approximation, and the per-step `H_w` mass-balance update inside
+    water (`H_w`, `dHwdt`). Adds `qb_method ∈ {3, 4}` dispatch, the
+    `strain_heating` switch ("full", "sia", "none"), and the per-step `H_w` mass-balance update inside
     a `dt > 0` gate. With analytic / fixed methods the Fortran RK2
     half-then-full split degenerates to a single full-dt update; PR4
     will reintroduce the split when the implicit solver writes
@@ -122,11 +121,11 @@ Phase order (Fortran `calc_ytherm`, yelmo_thermodynamics.f90:22):
   1. **Properties** — refresh `cp`, `kt` from current `T_ice` (or pin
      to `const_cp` / `const_kt`); refresh `T_pmp` from current `H_ice`.
   2. **Basal heat Q_b** — `calc_basal_heating_simplestagger!`
-     (`qb_method = 1`) or `calc_basal_heating_nodes!`
-     (`qb_method = 2`, default).
-  3. **Strain heat Q_strn** — `calc_strain_heating!` (general
-     `4 * visc * de^2`) or `calc_strain_heating_sia!`
-     (`use_strain_sia = true`).
+     (`qb_method = 3`) or `calc_basal_heating_nodes!`
+     (`qb_method = 4`). Fortran dev's default 2 is not ported.
+  3. **Strain heat Q_strn** — `strain_heating = "full"`:
+     `calc_strain_heating!` (`4 * visc * de^2`); `"sia"`:
+     `calc_strain_heating_sia!`; `"none"`: zero.
   4. **dQsdT = 0** — Fortran-faithful (the `dQsdT` derivative is
      gated behind a hard-coded `false` in calc_ytherm).
   5. **Q_rock fallback** — if `Q_rock` is identically zero (first
@@ -189,30 +188,37 @@ function therm_step!(y::YelmoModel, dt::Float64)
                               y.tpo.H_ice,
                               c.T0, c.T_pmp_beta, c.rho_ice, c.g)
 
-    # 2. Heat sources — basal frictional heating Q_b.
-    if par.qb_method == 1
+    # 2. Heat sources — basal frictional heating Q_b. Fortran dev numbering:
+    #    3 = simple staggering, 4 = quadrature nodes (1 and 2, the
+    #    energy-consistent face schemes, are not ported).
+    if par.qb_method == 3
         calc_basal_heating_simplestagger!(y.thrm.Q_b,
                                           y.dyn.ux_b, y.dyn.uy_b,
                                           y.dyn.taub_acx, y.dyn.taub_acy,
                                           c.sec_year)
-    elseif par.qb_method == 2
+    elseif par.qb_method == 4
         calc_basal_heating_nodes!(y.thrm.Q_b,
                                   y.dyn.ux_b, y.dyn.uy_b,
                                   y.dyn.taub_acx, y.dyn.taub_acy,
                                   y.tpo.f_ice, c.sec_year)
     else
-        error("therm_step!: unknown qb_method=$(par.qb_method); supported: 1 (\"aa\"), 2 (\"nodes\").")
+        error("therm_step!: qb_method=$(par.qb_method) not ported; supported: 3 (simple stagger), 4 (quadrature).")
     end
 
     # 3. Heat sources — internal strain heating Q_strn.
-    if par.use_strain_sia
+    if par.strain_heating == "full"
+        calc_strain_heating!(y.thrm.Q_strn, y.dyn.strn_de, y.mat.visc)
+    elseif par.strain_heating == "sia"
         calc_strain_heating_sia!(y.thrm.Q_strn,
                                  y.dyn.ux, y.dyn.uy,
                                  y.tpo.dzsdx, y.tpo.dzsdy,
                                  y.tpo.H_ice,
                                  zeta_aa, zeta_ac, c.rho_ice, c.g)
+    elseif par.strain_heating == "none"
+        fill!(interior(y.thrm.Q_strn), 0.0)
     else
-        calc_strain_heating!(y.thrm.Q_strn, y.dyn.strn_de, y.mat.visc)
+        error("therm_step!: ytherm.strain_heating = \"$(par.strain_heating)\"; " *
+              "expected \"full\", \"sia\" or \"none\".")
     end
 
     # 4. dQ_strn/dT — Fortran gates this behind a hard-coded
@@ -260,8 +266,8 @@ function therm_step!(y::YelmoModel, dt::Float64)
         _calc_basal_water_local_kernel!(y.thrm.H_w.data, y.thrm.dHwdt.data,
                                         y.tpo.f_ice.data, y.tpo.f_grnd.data,
                                         bmb_w_scratch,
-                                        0.5 * dt, Float64(par.till_rate),
-                                        Float64(par.H_w_max),
+                                        0.5 * dt, Float64(y.p.yhyd.bkt_till_rate),
+                                        Float64(y.p.yhyd.W_til_max),
                                         Nx_2D, Ny_2D)
 
         # 6c. Method dispatch — write `T_ice`, `omega`, possibly
@@ -356,21 +362,21 @@ function therm_step!(y::YelmoModel, dt::Float64)
         _calc_basal_water_local_kernel!(y.thrm.H_w.data, y.thrm.dHwdt.data,
                                         y.tpo.f_ice.data, y.tpo.f_grnd.data,
                                         bmb_w_scratch,
-                                        dt, Float64(par.till_rate),
-                                        Float64(par.H_w_max),
+                                        dt, Float64(y.p.yhyd.bkt_till_rate),
+                                        Float64(y.p.yhyd.W_til_max),
                                         Nx_2D, Ny_2D)
 
         # 6e. Bedrock dispatch.
         rock_method = par.rock_method
         if rock_method == "fixed"
-            # Pass-through; T_rock / enth_rock / Q_rock unchanged.
+            # Pass-through; T_rock / Q_rock unchanged.
         elseif rock_method == "equil"
             zeta_aa_rock = znodes(y.gr, Center())
-            define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+            define_temp_bedrock_3D!(y.thrm.T_rock,
                                      y.thrm.Q_rock,
                                      y.thrm.T_ice_b,
                                      y.bnd.Q_geo,
-                                     par.cp_rock, par.kt_rock, par.H_rock,
+                                     par.kt_rock, par.H_rock,
                                      zeta_aa_rock, c.sec_year)
             # T_rock_b: deep-boundary diagnostic (deepest bedrock layer, ζ≈0).
             interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
@@ -383,12 +389,12 @@ function therm_step!(y::YelmoModel, dt::Float64)
             calc_dzeta_terms!(dzeta_a_rock, dzeta_b_rock,
                               collect(Float64, zeta_aa_rock),
                               collect(Float64, zeta_ac_rock))
-            define_temp_bedrock_active_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+            define_temp_bedrock_active_3D!(y.thrm.T_rock,
                                             y.thrm.Q_rock,
                                             y.thrm.T_ice_b,
                                             y.bnd.Q_geo,
-                                            par.cp_rock, par.kt_rock,
-                                            c.rho_rock, par.H_rock,
+                                            par.rhoc_rock, par.kt_rock,
+                                            par.H_rock,
                                             zeta_aa_rock, zeta_ac_rock,
                                             dzeta_a_rock, dzeta_b_rock,
                                             c.sec_year, dt)

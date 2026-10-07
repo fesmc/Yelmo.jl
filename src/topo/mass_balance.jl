@@ -22,24 +22,23 @@ export apply_tendency!, mbal_tendency!, resid_tendency!
 const _APPLY_TOL = 1e-9
 
 """
-    apply_tendency!(H_ice, mb_dot, dt; adjust_mb=false, mb_lim=9999.0) -> H_ice
+    apply_tendency!(H_ice, mb_dot, dt; adjust_mb=false) -> H_ice
 
 Apply the per-cell mass-balance tendency `mb_dot` [m/yr] to the ice
 thickness `H_ice` [m] over time interval `dt` [yr]. Per cell:
 
-  1. Clip `mb_dot[i,j]` to `[-mb_lim, +mb_lim]`.
-  2. `H_ice[i,j] += dt * mb_dot[i,j]`.
-  3. Clamp `H_ice` to `≥ 0` and zero values thinner than `1e-9 m`.
-  4. If `adjust_mb` is `true`, rewrite `mb_dot[i,j]` to the realized
+  1. `H_ice[i,j] += dt * mb_dot[i,j]`.
+  2. Clamp `H_ice` to `≥ 0` and zero values thinner than `1e-9 m`.
+  3. If `adjust_mb` is `true`, rewrite `mb_dot[i,j]` to the realized
      rate `(H_new - H_prev) / dt` so the tendency reflects what was
      actually applied (after the clamp / tolerance zeroing).
 
 No-op when `dt ≤ 0`. Port of `apply_tendency` in
-`yelmo/src/physics/mass_conservation.f90:112`.
+`yelmo/src/physics/mass_conservation.f90` (yelmo dev has no rate limit;
+`dHdt_dyn_lim` was removed).
 """
 function apply_tendency!(H_ice, mb_dot, dt::Real;
-                         adjust_mb::Bool = false,
-                         mb_lim::Float64 = 9999.0)
+                         adjust_mb::Bool = false)
     dt > 0 || return H_ice
 
     H = interior(H_ice)
@@ -48,24 +47,21 @@ function apply_tendency!(H_ice, mb_dot, dt::Real;
     # straight-line loop body to @turbo. `adjust_mb` is a Bool kwarg —
     # cheap to dispatch on once per call.
     if adjust_mb
-        _apply_tendency_kernel_adjust!(H, G, Float64(dt), mb_lim)
+        _apply_tendency_kernel_adjust!(H, G, Float64(dt))
     else
-        _apply_tendency_kernel!(H, G, Float64(dt), mb_lim)
+        _apply_tendency_kernel!(H, G, Float64(dt))
     end
     return H_ice
 end
 
-# Branchless inner kernel. The 4 original `if` branches (mb_lim clip,
-# H_new < 0 floor, |H_new| < TOL collapse) are replaced with clamp /
-# ifelse, then @turbo SIMD-vectorizes the body.
+# Branchless inner kernel. The `if` branches (H_new < 0 floor,
+# |H_new| < TOL collapse) are replaced with ifelse, then @turbo
+# SIMD-vectorizes the body.
 @inline function _apply_tendency_kernel!(H::AbstractArray{Float64},
                                          G::AbstractArray{Float64},
-                                         dt::Float64, mb_lim::Float64)
+                                         dt::Float64)
     @turbo for j in axes(H, 2), i in axes(H, 1)
-        g     = G[i, j, 1]
-        g     = ifelse(g >  mb_lim,  mb_lim, g)
-        g     = ifelse(g < -mb_lim, -mb_lim, g)
-        H_new = H[i, j, 1] + dt * g
+        H_new = H[i, j, 1] + dt * G[i, j, 1]
         H_new = ifelse(H_new < 0.0,                  0.0, H_new)
         H_new = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
         H[i, j, 1] = H_new
@@ -75,14 +71,11 @@ end
 # Same kernel, but also writes back the realised tendency to G.
 @inline function _apply_tendency_kernel_adjust!(H::AbstractArray{Float64},
                                                 G::AbstractArray{Float64},
-                                                dt::Float64, mb_lim::Float64)
+                                                dt::Float64)
     inv_dt = 1.0 / dt
     @turbo for j in axes(H, 2), i in axes(H, 1)
         H_prev = H[i, j, 1]
-        g      = G[i, j, 1]
-        g      = ifelse(g >  mb_lim,  mb_lim, g)
-        g      = ifelse(g < -mb_lim, -mb_lim, g)
-        H_new  = H_prev + dt * g
+        H_new  = H_prev + dt * G[i, j, 1]
         H_new  = ifelse(H_new < 0.0,                  0.0, H_new)
         H_new  = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
         H[i, j, 1] = H_new

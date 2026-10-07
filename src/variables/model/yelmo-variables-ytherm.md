@@ -21,13 +21,12 @@
 | 17 | H_cts             | xc, yc            | m            | Height of the CTS (cold-temperate surface)    |
 | 18 | advecxy           | xc, yc, zeta      | -            | Horizontal advection                          |
 | 19 | Q_rock            | xc, yc            | W m^-2       | Heat flux from bedrock                        |
-| 20 | enth_rock         | xc, yc, zeta_rock | J m^-3       | Bedrock enthalpy                              |
-| 21 | T_rock            | xc, yc, zeta_rock | K            | Bedrock temperature                           |
-| 22 | T_ice_b           | xc, yc            | K            | Basal ice temperature (z=0 boundary)          |
-| 23 | T_ice_s           | xc, yc            | K            | Surface ice temperature (z=1 boundary)        |
-| 24 | enth_b            | xc, yc            | J m^-3       | Basal ice enthalpy (z=0 boundary)             |
-| 25 | enth_s            | xc, yc            | J m^-3       | Surface ice enthalpy (z=1 boundary)           |
-| 26 | T_pmp_b           | xc, yc            | K            | Basal pressure-corrected melting point        |
-| 27 | T_pmp_s           | xc, yc            | K            | Surface pressure-corrected melting point      |
-| 28 | T_prime_s         | xc, yc            | K            | Homologous temperature at the surface         |
-| 29 | T_rock_b          | xc, yc            | K            | Bedrock temperature at the deep boundary      |
+| 20 | T_rock            | xc, yc, zeta_rock | K            | Bedrock temperature                           |
+| 21 | T_ice_b           | xc, yc            | K            | Basal ice temperature (z=0 boundary)          |
+| 22 | T_ice_s           | xc, yc            | K            | Surface ice temperature (z=1 boundary)        |
+| 23 | enth_b            | xc, yc            | J m^-3       | Basal ice enthalpy (z=0 boundary)             |
+| 24 | enth_s            | xc, yc            | J m^-3       | Surface ice enthalpy (z=1 boundary)           |
+| 25 | T_pmp_b           | xc, yc            | K            | Basal pressure-corrected melting point        |
+| 26 | T_pmp_s           | xc, yc            | K            | Surface pressure-corrected melting point      |
+| 27 | T_prime_s         | xc, yc            | K            | Homologous temperature at the surface         |
+| 28 | T_rock_b          | xc, yc            | K            | Bedrock temperature at the deep boundary      |

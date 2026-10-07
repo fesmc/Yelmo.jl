@@ -7,6 +7,15 @@ constructors; the Fortran-backed Mirror (`YelmoMirrorPar`) imports and extends
 them for its own `YelmoMirrorParameters`, so users see a single generic
 function across both backends.
 
+The parameter schema follows Fortran Yelmo's `input/yelmo_defaults.nml`
+(yelmo `dev`, `eda5462f`): every Fortran key is a field here, with the Fortran
+default. Julia-only fields are listed in `JULIA_ONLY_KEYS`, each with the reason
+it has no Fortran counterpart. `write_nml` always writes the complete namelist,
+so `write_defaults_nml` produces a defaults file from Julia alone.
+
+Options that exist in Fortran but are not yet ported are rejected by
+`check_ported` when a `YelmoModel` is built (see `PORT_STATUS`).
+
 Usage:
     using .YelmoPar
     p = YelmoParameters("experiment1";
@@ -15,8 +24,6 @@ Usage:
     write_nml("run.nml", p)
 """
 module YelmoPar
-
-using Printf
 
 using ..YelmoSolvers: Solver, SSASolver
 
@@ -28,164 +35,115 @@ using ..YelmoSolvers: Solver, SSASolver
 
 export YelmoParameters
 export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
-       ytill_params, yneff_params, ymat_params, ytherm_params,
+       ytill_params, yhyd_params, ymat_params, ytrc_params, ytherm_params,
        yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
-export write_nml
+export write_nml, write_defaults_nml
 export read_nml
 export compare
+export check_ported
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YelmoParams
-    domain           ::String  = "Greenland"
-    grid_name        ::String  = "GRL-16KM"
-    grid_path        ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
-    phys_const       ::String  = "Earth"
-    experiment       ::String  = "None"
-    nml_ytopo        ::String  = "ytopo"
-    nml_ycalv        ::String  = "ycalv"
-    nml_ydyn         ::String  = "ydyn"
-    nml_ytill        ::String  = "ytill"
-    nml_yneff        ::String  = "yneff"
-    nml_ymat         ::String  = "ymat"
-    nml_ytherm       ::String  = "ytherm"
-    nml_masks        ::String  = "yelmo_masks"
-    nml_init_topo    ::String  = "yelmo_init_topo"
-    nml_data         ::String  = "yelmo_data"
-    restart          ::String  = "None"
-    restart_z_bed    ::Bool    = false
-    restart_H_ice    ::Bool    = false
-    restart_relax    ::Float64 = 1e3
-    log_timestep     ::Bool    = false
-    disable_kill     ::Bool    = false
-    zeta_scale       ::String  = "exp"
-    zeta_exp         ::Float64 = 2.0
-    nz_aa            ::Int     = 10
-    # Fortran default is `dt_method = 2` (adaptive PC). Yelmo.jl
-    # defaults to `0` (fixed forward Euler) so existing tests
-    # written before adaptive landed keep their original semantics.
-    # Set `dt_method = 2` explicitly to opt into adaptive PC.
-    dt_method        ::Int     = 0
-    dt_min           ::Float64 = 0.1
-    cfl_max          ::Float64 = 0.1
-    cfl_diff_max     ::Float64 = 0.12
-    # Default is "HEUN" (flipped from "AB-SAM" on 2026-05-12).
-    #
-    # On margin-heavy Greenland (initmip-grl 16-km) AB-SAM takes
-    # ~1.8× more PC substeps than HEUN under the adaptive controller
-    # because its Adams-Bashforth predictor extrapolates last-step
-    # ΔH and amplifies any per-stage disagreement in the
-    # cascade-twice topo path. Fortran's native default is still
-    # "AB-SAM" — set `pc_method = "AB-SAM"` explicitly when matching
-    # Fortran is the goal. All three schemes — "HEUN", "FE-SBE",
-    # "AB-SAM" — are implemented; see the per-scheme docstrings in
-    # `src/timestepping.jl`.
-    #
-    # Use "FE-SBE" when nonlinear cascade kernels (LSF calving,
-    # finite `H_min_*`, `topo_rel != 0`) demand corrector-from-H_n
-    # geometry. See memory `pc_advective_port_status.md`.
-    pc_method        ::String  = "HEUN"
-    pc_controller    ::String  = "PI42"
-    pc_use_H_pred    ::Bool    = true
-    pc_filter_vel    ::Bool    = true
-    pc_corr_vel      ::Bool    = false
-    # When `true`, the adaptive PC schemes run Fortran's advective-only
-    # predictor-corrector: ONE `dyn_step!` per substep, with the
-    # β-mixing applied to the advective tendency `dHidt_dyn` only (full
-    # MB cascade runs in both predictor and corrector blocks). When
-    # `false` (default for now), uses the legacy Yelmo.jl path that
-    # runs two full `_step_fe!` cascades per substep (predictor and
-    # lookahead corrector) and mixes the *full*-cascade tendency.
-    # See `src/timestepping.jl` and memory `pc_refactor_design.md`.
-    # Default will flip to `true` once the reject-path symmetry
-    # regression at large `dt_outer` is understood.
-    pc_advective     ::Bool    = false
-    pc_n_redo        ::Int     = 5
-    pc_tol           ::Float64 = 5.0
-    pc_eps           ::Float64 = 1.0
-    # Whether to mask out ice-margin / grounding-line / floating /
-    # thin-ice / isolated-outlier cells from the PC truncation-error
-    # `eta` (matches Fortran `set_pc_mask` + `calc_pc_eta`). With
-    # masking off, `eta` is the global `max(|H_corr − H_pred|) · factor / dt`
-    # over every cell — Yelmo.jl's pre-2026-05-10 behaviour. Keep on
-    # by default so the PI42 controller responds to interior smooth-ice
-    # truncation only, mirroring Fortran.
-    pc_eta_masked    ::Bool    = true
-    # Per-section wall-clock timing scaffold (`y.timer`). Off by
-    # default; turning it on populates `y.timer` via `@timed_section`
-    # call sites at a small per-call overhead. See `src/timing.jl`
-    # and `docs/src/usage/timing.md`.
-    timing           ::Bool    = false
+    domain              ::String  = "None"      # User par file must override this
+    grid_name           ::String  = "None"      # User par file must override this
+    grid_path           ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
+    phys_const          ::String  = "Earth"
+    experiment          ::String  = "None"      # "None"/"EISMINT", "MISMIP3D", "MISMIP+", "TROUGH-F17", "SLAB", "ISMIPHOM", "periodic", ...
+    mask_border         ::String  = "auto"      # Ice mask on the domain border: "auto", "none", "fixed", "dynamic"
+    nml_ytopo           ::String  = "ytopo"
+    nml_ycalv           ::String  = "ycalv"
+    nml_ydyn            ::String  = "ydyn"
+    nml_ytill           ::String  = "ytill"
+    nml_ymat            ::String  = "ymat"
+    nml_ytrc            ::String  = "ytrc"
+    nml_ytherm          ::String  = "ytherm"
+    nml_yhyd            ::String  = "yhyd"
+    nml_masks           ::String  = "yelmo_masks"
+    nml_init_topo       ::String  = "yelmo_init_topo"
+    nml_data            ::String  = "yelmo_data"
+    restart             ::String  = "None"
+    restart_z_bed       ::Bool    = false       # Take z_bed (and z_bed_sd) from restart file
+    restart_H_ice       ::Bool    = false       # Take H_ice from restart file
+    restart_relax       ::Float64 = 1000.0      # [yrs] Years to relax from restart=>input topography
+    log_timestep        ::Bool    = false
+    log_mb_check        ::Bool    = false       # Print global mass-budget check (residual) every timestep
+    disable_kill        ::Bool    = false       # Disable automatic kill if unstable
+    zeta_scale          ::String  = "exp"       # "linear", "exp", "tanh"
+    zeta_exp            ::Float64 = 2.0
+    nz_aa               ::Int     = 10          # Vertical resolution in ice
+    dt_method           ::Int     = 2           # 0: no internal timestep, 1: adaptive, cfl, 2: adaptive, pc
+    dt_min              ::Float64 = 0.1         # [a] Minimum timestep
+    cfl_max             ::Float64 = 0.1         # Maximum value is 1.0, lower will be more stable
+    pc_method           ::String  = "AB-SAM"    # "FE-SBE", "AB-SAM", "HEUN"
+    pc_controller       ::String  = "PI42"      # PI42, H312b, H312PID, H321PID, PID1
+    pc_use_H_pred       ::Bool    = true        # Use predicted H_ice instead of corrected H_ice
+    pc_filter_vel       ::Bool    = true        # Advect H_ice with mean of current and previous vel. solutions
+    pc_n_redo           ::Int     = 5           # How many times can the same iteration be repeated (when high error exists)
+    pc_tol              ::Float64 = 1.0         # [1/a] Redo the timestep when pc_eta > pc_tol
+    pc_eps              ::Float64 = 0.02        # [1/a] Target pc_eta of the adaptive timestep (dt_method=2), <= pc_tol
+    pc_cfl_max          ::Float64 = 0.5         # Courant-number cap on the pc adaptive timestep (dt_method=2)
+    pc_rho_max          ::Float64 = 2.0         # Maximum growth factor dt_new/dt per step of the pc adaptive timestep
+    pc_eta_H_min        ::Float64 = 10.0        # [m] Thinner ice is not included in the pc error norm
+    pc_eta_u_min        ::Float64 = 0.0         # [m/yr] Slower ice is not included in the pc error norm
+    pc_eta_trim         ::Float64 = 0.0         # [--] Fraction of points with the largest errors left out of the pc error norm
+    write_metrics       ::Bool    = false       # Write numerics/speed metrics to yelmo_metrics.nc
+    write_metrics_dt    ::Float64 = 100.0       # [yr] Output cadence for yelmo_metrics.nc
+    # --- Julia-only (see JULIA_ONLY_KEYS) ---
+    # Fortran's advective-only predictor-corrector (one `dyn_step!` per
+    # substep, β-mixing on `dHidt_dyn`) when `true`; the legacy Yelmo.jl
+    # path (two full `_step_fe!` cascades per substep) when `false`. Kept
+    # until the reject-path symmetry regression at large `dt_outer` is
+    # understood. See `src/timestepping.jl`.
+    pc_advective        ::Bool    = false
+    # Mask ice-margin / grounding-line / floating / thin-ice cells out of
+    # the pc truncation error `eta` (Fortran `set_pc_mask` + `calc_pc_eta`).
+    # `false` gives the unmasked global error (pre-2026-05-10 Yelmo.jl).
+    pc_eta_masked       ::Bool    = true
+    # Per-section wall-clock timing (`y.timer`, `src/timing.jl`).
+    timing              ::Bool    = false
 end
 yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ytopo
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YtopoParams
-    solver              ::String  = "impl-lis"
-    surf_gl_method      ::Int     = 0
-    grad_lim            ::Float64 = 0.5
-    grad_lim_zb         ::Float64 = 0.5
-    dHdt_dyn_lim        ::Float64 = 100.0
-    H_min_grnd          ::Float64 = 0.0
-    H_min_flt           ::Float64 = 0.0
-    margin2nd           ::Bool    = false
-    margin_flt_subgrid  ::Bool    = false
-    # Mirror-only: selects Fortran's f_ice computation
-    # ("upstream" = H_ice/H_neighb, "lsf" = geometric LSF area fraction).
-    # Yelmo.jl's `calc_f_ice!` hardcodes the upstream method; this field
-    # exists solely so `to_mirror` can emit it in the generated nml
-    # (Fortran's `nml_read` errors if the parameter is missing).
-    f_ice_method        ::String  = "upstream"
-    use_bmb             ::Bool    = true
-    topo_fixed          ::Bool    = false
-    topo_rel            ::Int     = 0
-    topo_rel_tau        ::Float64 = 10.0
-    topo_rel_field      ::String  = "H_ref"
-    bmb_gl_method       ::String  = "pmp"
-    gl_sep              ::Int     = 1
-    gz_nx               ::Int     = 15
-    dist_grz            ::Float64 = 200.0
-    gz_Hg0              ::Float64 = 0.0
-    gz_Hg1              ::Float64 = 0.0
-    dmb_method          ::Int     = 0
-    dmb_alpha_max       ::Float64 = 60.0
-    dmb_tau             ::Float64 = 100.0
-    dmb_sigma_ref       ::Float64 = 300.0
-    dmb_m_d             ::Float64 = 3.0
-    dmb_m_r             ::Float64 = 1.0
-    fmb_method          ::Int     = 0
-    fmb_scale           ::Float64 = 1.0
-    # Periodic-wrap offsets for surface-gradient kernels. Used only for
-    # benchmarks with a known additively non-periodic axis (uniform-slope
-    # surface across a periodic axis), where finite-differencing across
-    # the wrap face would otherwise read the raw periodic image and
-    # produce a spurious gradient. Set to the *signed surface change*
-    # `Δz_srf` going one full periodic image distance in +x or +y, e.g.
-    # for HOM-C (`z_srf = -x · tan α`),
-    # `dzsdx_periodic_offset = -tan(α) · Lx_m`. Default 0.0 — production
-    # ice-sheet configs use Bounded lateral axes and the offset is a
-    # no-op there. Threaded through `_update_diagnostics!` to the
-    # `dzsdx`/`dzsdy`/`dzbdx`/`dzbdy` gradient calls (the `z_base`
-    # gradient sees the same offset since `z_base = z_srf - H_ice` and
-    # `H_ice` is periodic by construction in these benchmarks).
-    #
-    # IMPORTANT — *config-time constant*: this is set ONCE at
-    # `YelmoParameters` construction and is NOT recomputed during
-    # the simulation. The mechanism is correct for benchmarks where the
-    # uniform-slope component of the surface is static — typically those
-    # using `topo_fixed = true` (HOM-C, MISMIP3D Stnd, ISMIP-HOM family).
-    # For prognostic runs that simultaneously have (a) a periodic axis,
-    # (b) a uniform-slope surface component, AND (c) topographic evolution
-    # that changes that slope (e.g. a slab thinning under load), this
-    # mechanism would silently desynchronise from the true surface slope.
-    # Such configurations are rare in practice (real ice sheets are
-    # Bounded, and benchmarks with periodic geometry are typically
-    # diagnostic / fixed-geometry). If a future use case requires a
-    # dynamically-evolving slope under periodic BC, the offset should be
-    # promoted to a per-step recomputed quantity (e.g. derived from a
-    # least-squares fit of the slope component of `z_srf` each step).
+    solver              ::String  = "impl-lis"  # "none","expl","expl-upwind","impl-upwind","impl-lis", ...
+    grad_lim            ::Float64 = 0.5         # [m/m] Maximum allowed slope in gradient calculations (dz/dx,dH/dx)
+    grad_lim_zb         ::Float64 = 0.5         # [m/m] Maximum allowed slope in bed gradient (dzb/dx)
+    slope_bg_x          ::Float64 = 0.0         # [m/m] Uniform background slope in x added to dzs/dx and dzb/dx
+    slope_bg_y          ::Float64 = 0.0         # [m/m] Uniform background slope in y added to dzs/dy and dzb/dy
+    front_subgrid       ::String  = "marine"    # Subgrid ice fronts: "none" (binary f_ice), "floating", "marine"
+    front_H_eff_min     ::Float64 = 50.0        # [m] Minimum effective thickness of front cells (front_subgrid)
+    front_dHdx          ::Float64 = 0.0         # [m/m] Thickness gradient assumed at a full front (front_subgrid)
+    use_bmb             ::Bool    = true        # Use basal mass balance in mass conservation equation
+    topo_fixed          ::Bool    = false       # Keep ice thickness fixed, perform other ytopo calculations
+    topo_rel            ::Int     = 0           # 0: No relaxation; 1: relax shelf; 2: relax shelf + gl; 3: all points
+    topo_rel_tau        ::Float64 = 10.0        # [a] Time scale for relaxation
+    topo_rel_field      ::String  = "H_ref"     # "H_ref" or "H_ice_n"
+    bmb_gl_method       ::String  = "pmp"       # "fcmp", "fmp", "pmp", "pmpt", "nmp"
+    gl_sep              ::Int     = 1           # 1: Linear f_grnd_acx/acy and binary f_grnd, 2: area f_grnd
+    gz_nx               ::Int     = 15          # [-] Number of interpolation points (nx*nx) for grounded area at the gl
+    dist_grz            ::Float64 = 200.0       # [km] Radius of the "grounding-line zone" (grz)
+    gz_Hg0              ::Float64 = 0.0         # Grounding zone, limit of penetration of bmb_grnd
+    gz_Hg1              ::Float64 = 0.0         # Grounding zone, limit of penetration of bmb_shlf
+    dmb_method          ::Int     = 0           # 0: no subgrid discharge, 1: subgrid discharge on
+    dmb_alpha_max       ::Float64 = 60.0        # [deg] Maximum angle of slope from coast at which to allow discharge
+    dmb_tau             ::Float64 = 100.0       # [yr]  Discharge timescale
+    dmb_sigma_ref       ::Float64 = 300.0       # [m]   Reference bed roughness
+    dmb_m_d             ::Float64 = 3.0         # [-]   Discharge distance scaling exponent
+    dmb_m_r             ::Float64 = 1.0         # [-]   Discharge resolution scaling exponent
+    fmb_method          ::Int     = 0           # 0: fmb_shlf; 1: fmb~bmb_shlf; 2: scaled by submerged front area; 3: Rignot et al. (2016)
+    fmb_scale           ::Float64 = 1.0         # Scaling of fmb ~ scale*bmb
+    fmb_lambda          ::Float64 = 1.0         # fmb_method=3: scaling of the Rignot et al. (2016) frontal melt
+    # --- Julia-only (see JULIA_ONLY_KEYS) ---
+    # Signed surface change `Δz_srf` across one periodic image in +x / +y,
+    # added at the wrap face of the surface-gradient kernels, for periodic
+    # benchmarks whose z_srf contains a uniform tilt (HOM-C:
+    # `-tan(α) · Lx_m`). Config-time constant. Fortran dev instead keeps the
+    # tilt out of z_srf/z_bed and adds `slope_bg_x/y` to the gradients;
+    # this offset goes once the benchmarks are moved to slope_bg.
     dzsdx_periodic_offset ::Float64 = 0.0
     dzsdy_periodic_offset ::Float64 = 0.0
 end
@@ -207,30 +165,37 @@ but are not yet ported to Yelmo.jl. Listed separately so the validator
 can produce a "known but unported" error message — distinct from the
 "unrecognised method" error, which signals a typo or namelist drift.
 """
-const KNOWN_UNPORTED_CALV_METHODS = ("vm-l19", "simple", "flux", "kill", "kill-pos")
+const KNOWN_UNPORTED_CALV_METHODS = ("vm-l19", "eigen", "simple", "flux", "kill", "kill-pos",
+                                     "stress-b12", "ismip7", "exp1", "exp2", "exp3", "exp4", "exp5")
 
 Base.@kwdef struct YcalvParams
-    use_lsf         ::Bool    = false
-    dt_lsf          ::Float64 = -1.0
-    calv_flt_method ::String  = "vm-l19"
-    calv_grnd_method::String  = "zero"
-    sd_min          ::Float64 = 100.0
-    sd_max          ::Float64 = 500.0
-    calv_grnd_max   ::Float64 = 0.0
-    calv_tau        ::Float64 = 1.0
-    calv_thin       ::Float64 = 30.0
-    k2              ::Float64 = 3.2e9
-    w2              ::Float64 = 0.0
-    kt_ref          ::Float64 = 0.0025
-    kt_deep         ::Float64 = 0.1
-    tau_ice         ::Float64 = 250.0e3
-    Hc_ref_flt      ::Float64 = 200.0
-    Hc_ref_grnd     ::Float64 = 200.0
-    Hc_ref_thin     ::Float64 = 50.0
-    Hc_deep         ::Float64 = 500.0
-    zb_deep_0       ::Float64 = -1000.0
-    zb_deep_1       ::Float64 = -1500.0
-    zb_sigma        ::Float64 = 0.0
+    use_lsf             ::Bool    = true        # use level-set method
+    lsf_method          ::String  = "snap"      # "snap" (neighbour-snap) or "redist" (Sussman/Osher)
+    dt_lsf              ::Float64 = -1.0        # [yr] periodic LSF reflag interval; <= 0 disables ("snap" only)
+    lsf_redist_n_iter   ::Int     = 5           # Sussman/Osher LSF redistancing iterations ("redist" only)
+    calv_flt_method     ::String  = "vm-m16"    # use_lsf=T: "zero"/"none","equil","threshold","vm-m16","exp1"-"exp5"
+    calv_grnd_method    ::String  = "vm-m16"    # use_lsf=T: "zero"/"none","equil","threshold","vm-m16","ismip7"
+    H_min_grnd          ::Float64 = 5.0         # [m] Minimum ice thickness at grounded margin (thinner ice is ablated)
+    H_min_flt           ::Float64 = 10.0        # [m] Minimum ice thickness at floating margin (thinner ice is ablated)
+    H_min_tau           ::Float64 = 10.0        # [yr] Timescale for removing margin ice thinner than H_min_* and isolated partial cells
+    sd_min              ::Float64 = 100.0       # [m] calv_grnd(z_bed_sd <= sd_min) = 0.0
+    sd_max              ::Float64 = 500.0       # [m] calv_grnd(z_bed_sd >= sd_max) = calv_max
+    calv_grnd_max       ::Float64 = 0.0         # [m/a] Maximum grounded calving rate from high stdev(z_bed)
+    calv_tau            ::Float64 = 1.0         # [a] Characteristic calving time
+    calv_thin           ::Float64 = 30.0        # [m/yr] Calving rate for very thin ice (use_lsf=False, vm-l19/eigen)
+    k2                  ::Float64 = 3.2e9       # [m yr] eigen calving scaling factor
+    w2                  ::Float64 = 0.0         # Weighting coefficient of 2nd principal strain/stress
+    kt_ref              ::Float64 = 0.0025      # [m yr-1 Pa-1] vm-l19 calving scaling parameter
+    kt_deep             ::Float64 = 0.1         # [m yr-1 Pa-1] vm-l19 calving scaling parameter for deep ocean
+    tau_ice_flt         ::Float64 = 250.0e3     # [Pa] Ice strength failure, floating fronts (vm-m16)
+    tau_ice_grnd        ::Float64 = 1.0e6       # [Pa] Ice strength failure, marine-grounded fronts (vm-m16)
+    Hc_ref_flt          ::Float64 = 200.0       # [m] Calving limit in ice thickness - floating
+    Hc_ref_grnd         ::Float64 = 200.0       # [m] Calving limit in ice thickness - marine-terminating
+    Hc_ref_thin         ::Float64 = 50.0        # [m] Reference ice thickness for thin ice calving
+    Hc_deep             ::Float64 = 500.0       # [m] Calving limit in ice thickness (thinner ice calves)
+    zb_deep_0           ::Float64 = -1000.0     # [m] Bedrock elevation to begin transition to deep ocean
+    zb_deep_1           ::Float64 = -1500.0     # [m] Bedrock elevation to end transition to deep ocean
+    zb_sigma            ::Float64 = 0.0         # [m] Gaussian filtering of bedrock for calving transition to deep ocean
 end
 """
     _validate_calv_method(method, label)
@@ -260,8 +225,7 @@ end
 
 # Factory function: validates calving method names before returning the
 # struct. Validation only fires when `use_lsf = true` — otherwise the
-# calving methods are dormant (the default `vm-l19` is the Fortran
-# default and is harmless when `use_lsf = false`).
+# calving methods are dormant.
 function ycalv_params(; kwargs...)
     p = YcalvParams(; kwargs...)
     if p.use_lsf
@@ -274,185 +238,298 @@ end
 # &ydyn
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YdynParams
-    solver          ::String  = "diva"
-    uz_method       ::Int     = 3
-    visc_method     ::Int     = 1
-    visc_const      ::Float64 = 1e7
-    beta_method     ::Int     = 1
-    beta_const      ::Float64 = 1e3
-    beta_q          ::Float64 = 1.0
-    beta_u0         ::Float64 = 100.0
-    beta_gl_scale   ::Int     = 0
-    beta_gl_stag    ::Int     = 1
-    beta_gl_f       ::Float64 = 1.0
-    taud_gl_method  ::Int     = 0
-    H_grnd_lim      ::Float64 = 500.0
-    beta_min        ::Float64 = 100.0
-    eps_0           ::Float64 = 1e-6
-    scale_T         ::Int     = 1
-    T_frz           ::Float64 = -3.0
-    ssa_solver      ::SSASolver = SSASolver()
-    ssa_lat_bc      ::String  = "floating"
-    ssa_beta_max    ::Float64 = 1e20
-    ssa_vel_max     ::Float64 = 5000.0
-    ssa_iter_max    ::Int     = 20
-    ssa_iter_rel    ::Float64 = 0.7
-    ssa_iter_conv   ::Float64 = 1e-2
-    taud_lim        ::Float64 = 2e5
-    cb_sia          ::Float64 = 0.0
-    # DIVA no-slip flag: when `true`, DIVA's `calc_beta_eff` uses the
-    # no-slip formula `beta_eff = 1 / F2` (Goldberg 2011 Eq. 42) and
-    # forces basal velocity to zero in `calc_vel_basal_diva!`. When
-    # `false` (default), the standard sliding formulation
-    # `beta_eff = beta / (1 + beta·F2)` is used (Goldberg 2011 Eq. 41).
-    # Mirrors Fortran's `par%no_slip` in `&ydyn`.
-    no_slip         ::Bool    = false
+    solver              ::String  = "diva"      # "fixed", "sia", "ssa", "hybrid", "diva", "diva-noslip"
+    uz_method           ::Int     = 3           # 1: aa-staggering, 2: strain-rate-on-nodes, 3: jacobian, 4: flux-consistent
+    visc_method         ::Int     = 1           # 0: constant visc=visc_const, 1: dynamic (quadrature points), 2: dynamic (aa-nodes)
+    visc_const          ::Float64 = 1e7         # [Pa a] Constant value for viscosity (if visc_method=0)
+    beta_method         ::Int     = 1           # -1: external; 0: constant; 1: linear; 2: pseudo-plastic; 3: reg. Coulomb; 4, 5: as 2, 3 at cell centre
+    beta_const          ::Float64 = 1e3         # [Pa a m-1] Constant value of basal friction coefficient
+    beta_q              ::Float64 = 1.0         # Dragging law exponent
+    beta_u0             ::Float64 = 100.0       # [m/a] Speed scale of the friction law (beta_method=1-5)
+    beta_gl_scale       ::Int     = 0           # 0: beta*beta_gl_f, 1: H_grnd linear, 2: Zstar, 3: beta*f_grnd on aa-nodes
+    beta_gl_stag        ::Int     = 1           # -1: external; 0: simple; 1: upstream; 2: downstream; 3: f_grnd_ac; 4: Gladstone B2
+    beta_gl_f           ::Float64 = 1.0         # [-] Scaling of beta at the grounding line (for beta_gl_scale=0)
+    taud_gl_method      ::Int     = 0           # 0: binary; 1: f_grnd-weighted; 2: one-sided (Feldmann 2014); 3: linear (Gladstone 2010)
+    H_grnd_lim          ::Float64 = 500.0       # [m] For beta_gl_scale=1, reduce beta linearly between H_grnd=0 and H_grnd_lim
+    beta_min            ::Float64 = 100.0       # [Pa a m-1] Minimum value of beta allowed for grounded ice
+    eps_0               ::Float64 = 1e-6        # [1/a] Regularization term for effective viscosity - minimum strain rate
+    frz_scale           ::Bool    = true        # Reduce sliding where the bed is below the pmp: beta*f**(-q)
+    frz_efold           ::Float64 = 3.0         # [K] e-folding temperature of the sliding speed
+    frz_min             ::Float64 = 1e-3        # [-] Minimum sliding-speed factor for frozen beds
+    # Fortran key `ssa_solver` ("residual" | "energy"), held as the
+    # Julia-native `SSASolver`: `method` is the Fortran choice ("energy" ↔
+    # `:energy_quadratic`), the other fields configure the Krylov/AMG
+    # linear solve that replaces Lis. Written to the namelist as
+    # `ssa_solver` plus the Julia-only `ssa_solver_*` keys (see
+    # `_nml_entries(::SSASolver)`). The Picard iteration is set by the
+    # Fortran keys `ssa_iter_*` below.
+    ssa_solver          ::SSASolver = SSASolver()
+    ssa_lis_opt_residual::String  = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"  # Lis options (Fortran only)
+    ssa_lis_opt_energy  ::String  = "-i cg -p jacobi -maxiter 200 -tol 1.0e-2 -initx_zeros false"      # Lis options (Fortran only)
+    ssa_lat_bc          ::String  = "marine"    # "all","marine","floating","float","none"
+    ssa_vel_lim_method  ::String  = "drag"      # "clip": clip each component at ssa_vel_max; "drag": smooth speed-limit drag
+    ssa_vel_max         ::Float64 = 1e4         # [m a-1] Velocity limit
+    ssa_vel_lim_tau     ::Float64 = 1e5         # [Pa] Speed-limit drag at ssa_vel_max (ssa_vel_lim_method="drag")
+    ssa_iter_max        ::Int     = 20          # Maximum Picard iterations of the velocity solution
+    ssa_iter_rel        ::Float64 = 0.7         # [--] Picard relaxation fraction [0:1]
+    ssa_iter_conv       ::Float64 = 1e-2        # [--] L2 relative error convergence limit of the Picard iteration
+    taud_lim            ::Float64 = 2e5         # [Pa] Maximum allowed driving stress
+    neff_nxi            ::Int     = 0           # Subgrid interpolation of hyd%N onto dyn%N_eff. 0: none, 1: Gaussian quadrature, >1: nxi x nxi
 end
 ydyn_params(; kwargs...) = YdynParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ytill
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YtillParams
-    method    ::Int     = 1
-    scale_zb  ::Int     = 1
-    scale_sed ::Int     = 0
-    is_angle  ::Bool    = false
-    n_sd      ::Int     = 10
-    f_sed     ::Float64 = 0.01
-    sed_min   ::Float64 = 5.0
-    sed_max   ::Float64 = 15.0
-    z0        ::Float64 = -300.0
-    z1        ::Float64 = 200.0
-    cf_min    ::Float64 = 0.1
-    cf_ref    ::Float64 = 0.8
+    method              ::Int     = 1           # -1: set externally; 1: calculate cb_ref online
+    scale_zb            ::Int     = 1           # 0: none, 1: lin, 2: exp : scaling with elevation
+    scale_sed           ::Int     = 0           # 0: none, 1: min(cb_zb,cb_sed), 2: cb_zb*(lambda_sed*f_sed), 3: 2 but no lower limit
+    is_angle            ::Bool    = false       # cf_ref/cf_min are till strength angle?
+    n_sd                ::Int     = 10          # Number of samples over z_bed_sd field
+    f_sed               ::Float64 = 0.01        # Scaling reduction for thick sediments
+    sed_min             ::Float64 = 5.0         # [m] Sediment thickness for no reduction in friction
+    sed_max             ::Float64 = 15.0        # [m] Sediment thickness for maximum reduction in friction
+    z0                  ::Float64 = -300.0      # [m] Bedrock rel. to sea level, lower limit
+    z1                  ::Float64 = 200.0       # [m] Bedrock rel. to sea level, upper limit
+    cf_min              ::Float64 = 0.1         # [-- or deg] Minimum value of cf
+    cf_ref              ::Float64 = 0.8         # [-- or deg] Reference/const/max value of cf
 end
 ytill_params(; kwargs...) = YtillParams(; kwargs...)
 # ---------------------------------------------------------------------------
-# &yneff
+# &yhyd  (basal hydrology; Fortran: FastHydrology)
+#
+# YelmoModel runs the till-water bucket (`method_til = 1`) with the N
+# closures below; the K24 transport model (`method_transport = 1`,
+# `k24_*`) is not ported (FastHydrology.jl will provide it).
 # ---------------------------------------------------------------------------
-Base.@kwdef struct YneffParams
-    method  ::Int     = 3
-    nxi     ::Int     = 0
-    const_  ::Float64 = 1e7          # note: 'const' is a Julia keyword, stored as const_
-    p       ::Float64 = 0.0
-    H_w_max ::Float64 = -1.0
-    N0      ::Float64 = 1000.0
-    delta   ::Float64 = 0.04
-    e0      ::Float64 = 0.69
-    Cc      ::Float64 = 0.12
-    s_const ::Float64 = 0.5
+Base.@kwdef struct YhydParams
+    method_til          ::Int     = 1           # 0=NONE 1=BUCKET
+    method_transport    ::Int     = 0           # 0=NONE 1=K24
+    W_til_max           ::Float64 = 2.0         # [m] Maximum till water thickness (bucket capacity)
+    mask_bc             ::Int     = 2           # 0=ZERO 1=IMPOSED 2=MIRROR
+    W_til_bc            ::Float64 = 0.0         # [m]
+    bkt_N_closure       ::Int     = 3           # -1=EXTERNAL 0=CONST 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
+    bkt_till_rate       ::Float64 = 1e-3        # [m/a] Till water drainage rate
+    bkt_floating_mode   ::Int     = 0           # 0=ZERO 1=MARGIN_FILL (saturate floating + margin ring)
+    const_N             ::Float64 = 1e7         # [Pa] N for bkt_N_closure=0
+    marine_p            ::Float64 = 1.0         # Marine closure (Leguy 2014) exponent p
+    marine_rho_sw       ::Float64 = 1028.0      # [kg/m3] ignored: the closure uses the model's rho_sw (YelmoConstants)
+    till_N0             ::Float64 = 1000.0      # [Pa] Till closure (van Pelt & Bueler 2015) reference N
+    till_delta          ::Float64 = 0.04        # [-] Till closure minimum N fraction of overburden
+    till_e0             ::Float64 = 0.69        # [-] Till closure reference void ratio
+    till_Cc             ::Float64 = 0.12        # [-] Till closure compressibility
+    two_value_delta     ::Float64 = 0.02        # [-] Two-value closure: N fraction of overburden at temperate beds
+    k24_substrate_type  ::Int     = 2           # 0=HARD 1=SOFT 2=MIXED
+    k24_flux_solver     ::Int     = 3           # 0=RECURSIVE 1=ITERATIVE 2=TOPOSORT 3=TAPED
+    k24_routing_scheme  ::Int     = 0           # 0=WARNER 1=GDS_WARNER 2=QUINN 3=TARBOTON 4=MODIFIED_TARBOTON 5=GDS_TARBOTON
+    k24_quinn_original  ::Bool    = false       # QUINN only: Quinn et al.'s own slope x contour-length weights
+    k24_fill_algorithm  ::Int     = -1          # -1=AUTO 0=JACOBI 1=LOWEST_NEIGHBOUR 2=PRIORITY_FLOOD
+    k24_priority_flood_epsilon ::Float64 = 1.0  # [Pa] potential step across a filled pit/flat
+    k24_q_conversion    ::Int     = -1          # -1=AUTO 0=OUTFLOW 1=FACE_AVERAGE
+    k24_dissipation_discretization ::Int = -1   # -1=AUTO 0=CELL 1=FACE
+    k24_friction_discretization ::Int = 0       # 0=CELL 1=STAGGERED
+    k24_friction_quadrature ::Bool = false      # STAGGERED only: Gauss-point heat
+    k24_friction_u_floor ::Float64 = 3.168808781402895e-11  # [m/s] STAGGERED beta floor
+    k24_toposort_allow_cycles ::Bool = false
+    k24_ub_hook         ::Bool    = true        # DIVA velocity iteration re-evaluates K24 N from u_b
+    k24_drainage_mode   ::Int     = 0           # 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
+    k24_water_thickness_algorithm ::Int = 0     # 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
+    k24_gradient_convention ::Int = 0           # 0=MEAN 1=LOCAL
+    k24_sliding_law     ::Int     = 0           # 0=NO_FRICTION 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB 4=PRESCRIBED_FIELD 5=REG_COULOMB_FIELD 6=SHAKTI_REG_COULOMB
+    k24_manning_exponent ::Float64 = 3.0
+    k24_latent_heat_water ::Float64 = 3.335e5   # [J/kg]
+    k24_bed_thickness   ::Float64 = 0.1         # [m]
+    k24_manning_coefficient_exponent ::Float64 = 1.25
+    k24_bed_friction_exponent ::Float64 = 1.5
+    k24_friction_factor ::Float64 = 0.1
+    k24_till_factor     ::Float64 = 1.1
+    k24_critical_discharge ::Float64 = 1.0      # [m3/s]
+    k24_initial_cavity_height ::Float64 = 0.1   # [m]
+    k24_coupling_length ::Float64 = 1e4         # [m]
+    k24_coupling_length_kamb86 ::Float64 = 10.0
+    k24_eta_w           ::Float64 = 5.703855806525211e-11  # [Pa s]
+    k24_min_pressure_fraction ::Float64 = 0.0
+    k24_W_min           ::Float64 = 0.0         # [m]
+    k24_W_max           ::Float64 = 1e30        # [m]
+    k24_q_min           ::Float64 = 0.0         # [m2/s]
+    k24_q_max           ::Float64 = 1e30        # [m2/s]
+    k24_fill_iters      ::Int     = 10
+    k24_max_psi_out_calls ::Int   = 100000
+    k24_dissipation_melt ::Bool   = true
+    k24_max_dissipation_iters ::Int = 20
+    k24_dissipation_rtol ::Float64 = 1e-12
+    k24_dissipation_verbose ::Bool = true
+    k24_max_coupling_iters ::Int = 20
+    k24_coupling_rtol   ::Float64 = 1e-8
+    k24_coupling_verbose ::Bool   = true
+    k24_weertman_C      ::Float64 = 0.0
+    k24_weertman_q      ::Float64 = 1/3
+    k24_power_plastic_c_till ::Float64 = 0.0
+    k24_power_plastic_q ::Float64 = 1.0
+    k24_power_plastic_u0 ::Float64 = 3.168808781402895e-6  # [m/s]
+    k24_reg_coulomb_c_till ::Float64 = 0.0
+    k24_reg_coulomb_q   ::Float64 = 1/3
+    k24_reg_coulomb_u0  ::Float64 = 3.168808781402895e-6  # [m/s]
+    k24_shakti_C        ::Float64 = 0.0
+    k24_shakti_n        ::Float64 = 3.0
+    k24_shakti_lambda_coeff ::Float64 = 1.5
 end
-yneff_params(; kwargs...) = YneffParams(; kwargs...)
+yhyd_params(; kwargs...) = YhydParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ymat
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YmatParams
-    flow_law            ::String  = "glen"
-    # `rf_method = -1` ("external") is the Yelmo.jl default while therm
-    # is unported: `mat_step!` leaves `mat.ATT` at its loaded /
-    # externally-filled value. Switch to `0` (constant `rf_const`) or
-    # `1` (Arrhenius — needs therm) explicitly per simulation. Common
-    # Fortran namelist values are 0 (EISMINT-moving) and 1 (production
-    # runs).
-    rf_method           ::Int     = -1
-    rf_const            ::Float64 = 1e-18
-    rf_use_eismint2     ::Bool    = false
-    rf_with_water       ::Bool    = false
-    n_glen              ::Float64 = 3.0
-    visc_min            ::Float64 = 1e3
-    de_max              ::Float64 = 2.0
-    enh_method          ::String  = "shear3D"
+    flow_law            ::String  = "glen"      # Only "glen" is possible right now
+    rf_method           ::Int     = 1           # -1: set externally; 0: rf_const everywhere; 1: standard function
+    rf_const            ::Float64 = 1e-18       # [Pa^-3 a^-1]
+    rf_use_eismint2     ::Bool    = false       # Only applied for rf_method=1
+    rf_with_water       ::Bool    = false       # Only applied for rf_method=1, scale rf by water content?
+    n_glen              ::Float64 = 3.0         # Glen flow law exponent
+    visc_min            ::Float64 = 1e3         # [Pa a] Minimum allowed viscosity
+    de_max              ::Float64 = 100.0       # [a-1] Maximum allowed effective strain rate (strain heating, mat viscosity)
+    enh_method          ::String  = "shear3D"   # "simple","shear2D","shear3D" (+ "-tracer" variants)
     enh_shear           ::Float64 = 3.0
     enh_stream          ::Float64 = 3.0
     enh_shlf            ::Float64 = 0.7
-    enh_umin            ::Float64 = 50.0
-    enh_umax            ::Float64 = 500.0
-    calc_age            ::Bool    = false
-    age_iso             ::Vector{Float64} = [11.7, 29.0, 57.0, 115.0]
-    tracer_method       ::String  = "expl"
-    tracer_impl_kappa   ::Float64 = 1.5
+    enh_umin            ::Float64 = 50.0        # [m/yr] Minimum transition velocity to enh_stream ('*-tracer' enh methods)
+    enh_umax            ::Float64 = 500.0       # [m/yr] Maximum transition velocity to enh_stream ('*-tracer' enh methods)
+    tracer_method       ::String  = "expl"      # "expl", "impl": Eulerian solver for the '*-tracer' enh_bnd field
+    tracer_impl_kappa   ::Float64 = 1.5         # [m2 a-1] Artificial diffusion for implicit enh_bnd solving
 end
 ymat_params(; kwargs...) = YmatParams(; kwargs...)
+# ---------------------------------------------------------------------------
+# &ytrc  (age / deposition-time tracers)
+# ---------------------------------------------------------------------------
+Base.@kwdef struct YtrcParams
+    use_euler           ::Bool    = false       # Run the in-tree Eulerian age tracer?
+    use_tracer          ::Bool    = false       # Run the Lagrangian particle backend (tracer)?
+    use_elsa            ::Bool    = false       # Run the Lagrangian layer backend (elsa)?
+    elsa_restart        ::Bool    = true        # On a restart, restore elsa's layers
+    t_dep_source        ::String  = "euler"     # "euler", "trc", "elsa": authoritative deposition-time source
+    time_end            ::Float64 = 0.0         # [yr] simulation end time for use_elsa
+    calc_age            ::Bool    = false       # Calculate the Eulerian age tracer field?
+    time_iso            ::Vector{Float64} = [-11.7, -29.0, -57.0, -115.0]  # [ka] isochrone deposition times
+    tracer_method       ::String  = "expl"      # "expl", "impl": Eulerian age solver
+    tracer_impl_kappa   ::Float64 = 1.5         # [m2 a-1] Artificial diffusion for implicit age solving
+    elsa_nml            ::String  = "None"      # Path to elsa namelist file
+    elsa_group          ::String  = "None"      # Group name within elsa_nml
+    tracer_nml          ::String  = "None"      # Path to tracer namelist file (group "trc")
+end
+ytrc_params(; kwargs...) = YtrcParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ytherm
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YthermParams
-    method          ::String  = "temp"
-    qb_method       ::Int     = 2
-    dt_method       ::String  = "FE"
-    solver_advec    ::String  = "impl-upwind"
-    gamma           ::Float64 = 1.0
-    use_strain_sia  ::Bool    = false
-    use_const_cp    ::Bool    = false
-    const_cp        ::Float64 = 2009.0
-    use_const_kt    ::Bool    = false
-    const_kt        ::Float64 = 6.62e7
-    enth_cr         ::Float64 = 1e-3
-    omega_max       ::Float64 = 0.01
-    till_rate       ::Float64 = 0.001
-    H_w_max         ::Float64 = 2.0
-    rock_method     ::String  = "equil"
-    nzr_aa          ::Int     = 5
-    zeta_scale_rock ::String  = "exp-inv"
-    zeta_exp_rock   ::Float64 = 2.0
-    H_rock          ::Float64 = 2000.0
-    cp_rock         ::Float64 = 1000.0
-    kt_rock         ::Float64 = 6.3e7
+    method              ::String  = "enth"      # "enth","temp","robin","robin-cold","linear","fixed"
+    qb_method           ::Int     = 2           # 1: faces, 2: faces to quadrature nodes, 3: simple-stagger, 4: quadrature
+    dt_method           ::String  = "FE"        # "FE", "AB", "SAM"
+    solver_advec        ::String  = "impl-upwind"  # "expl", "impl-upwind"
+    advecxy_order       ::Int     = 2           # Horizontal advection order: 1=upwind, 2=flux-limited 2nd-order upwind
+    advecxy_cfl         ::Float64 = 0.5         # [--] Target Courant number per horizontal-advection sub-step
+    advecxy_nmax        ::Int     = 10          # [--] Max horizontal-advection sub-steps
+    gamma               ::Float64 = 1.0         # [K] Scalar for the pressure melting point decay function
+    strain_heating      ::String  = "full"      # "full": 3D viscosity and strain rate, "sia": SIA approx., "none"
+    use_const_cp        ::Bool    = false       # Use specified constant value of heat capacity?
+    const_cp            ::Float64 = 2009.0      # [J kg-1 K-1] Specific heat capacity
+    use_const_kt        ::Bool    = false       # Use specified constant value of heat conductivity?
+    const_kt            ::Float64 = 6.62e7      # [J a-1 m-1 K-1] Thermal conductivity
+    enth_cr             ::Float64 = 1e-3        # [--] Conductivity ratio for temperate ice
+    omega_max           ::Float64 = 0.01        # [--] Maximum allowed water content fraction
+    H_ice_thin          ::Float64 = 10.0        # [m] Skip column solver below this thickness (linear profile imposed)
+    enth_cp_method      ::String  = "integral"  # Enthalpy heat capacity: "const" (cp_ref) or "integral" (int cp(T) dT)
+    basal_bc_method     ::String  = "capacity"  # Grounded basal BC: "capacity" or "wtil" (till-water predictor, deprecated)
+    cap_source          ::String  = "auto"      # [capacity] C from: "auto", "hyd", "till", "water", "none"
+    cap_W_floor         ::Float64 = 0.0         # [m] [capacity, "till"/"water"] floor subtracted from the water thickness
+    cap_eps             ::Float64 = 1e-4        # [m/a ice equiv.] [capacity] C below this counts as a dry bed
+    gl_temperate        ::Bool    = true        # Hold grounded bases next to floating ice or open ocean at the pmp
+    rock_method         ::String  = "equil"     # "equil" (not active bedrock), "active", or "fixed"
+    nzr_aa              ::Int     = 5           # Number of vertical points in bedrock
+    zeta_scale_rock     ::String  = "exp-inv"   # "linear", "exp-inv"
+    zeta_exp_rock       ::Float64 = 2.0
+    H_rock              ::Float64 = 2000.0      # [m] Lithosphere thickness
+    rhoc_rock           ::Float64 = 2.0e6       # [J m-3 K-1] Volumetric heat capacity of bedrock (rho*cp)
+    kt_rock             ::Float64 = 6.3e7       # [J a-1 m-1 K-1] Thermal conductivity of bedrock
 end
 ytherm_params(; kwargs...) = YthermParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &yelmo_masks
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YelmoMasksParams
-    basins_load   ::Bool   = true
-    basins_path   ::String = "ice_data/{domain}/{grid_name}/{grid_name}_BASINS-nasa.nc"
-    basins_nms    ::Vector{String} = ["basin", "basin_mask"]
-    regions_load  ::Bool   = true
-    regions_path  ::String = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
-    regions_nms   ::Vector{String} = ["mask", "None"]
+    basins_load         ::Bool    = true
+    basins_path         ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_BASINS-nasa.nc"
+    basins_nms          ::Vector{String} = ["basin", "basin_mask"]
+    regions_load        ::Bool    = true
+    regions_path        ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
+    regions_nms         ::Vector{String} = ["mask", "None"]
 end
 yelmo_masks_params(; kwargs...) = YelmoMasksParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &yelmo_init_topo
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YelmoInitTopoParams
-    init_topo_load  ::Bool    = true
-    init_topo_path  ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
-    init_topo_names ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
-    init_topo_state ::Int     = 0
-    z_bed_f_sd      ::Float64 = -1.0
-    smooth_H_ice    ::Float64 = 0.0
-    smooth_z_bed    ::Float64 = 0.0
+    init_topo_load      ::Bool    = true
+    init_topo_path      ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
+    init_topo_names     ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
+    init_topo_state     ::Int     = 0           # 0: from file, 1: ice-free, 2: ice-free, rebounded
+    z_bed_f_sd          ::Float64 = -1.0        # Scaling fraction to modify z_bed = z_bed + f_sd*z_bed_sd
+    smooth_H_ice        ::Float64 = 0.0         # Smooth ice thickness field at loading time, with sigma=N*dx
+    smooth_z_bed        ::Float64 = 0.0         # Smooth bedrock field at loading time, with sigma=N*dx
 end
 yelmo_init_topo_params(; kwargs...) = YelmoInitTopoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &yelmo_data
 # ---------------------------------------------------------------------------
 Base.@kwdef struct YelmoDataParams
-    pd_topo_load    ::Bool   = true
-    pd_topo_path    ::String = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
-    pd_topo_names   ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
-    pd_tsrf_load    ::Bool   = true
-    pd_tsrf_path    ::String = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
-    pd_tsrf_name    ::String = "T_srf"
-    pd_tsrf_monthly ::Bool   = false
-    pd_smb_load     ::Bool   = true
-    pd_smb_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
-    pd_smb_name     ::String = "smb"
-    pd_smb_monthly  ::Bool   = false
-    pd_vel_load     ::Bool   = true
-    pd_vel_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_VEL-J18.nc"
-    pd_vel_names    ::Vector{String} = ["ux_srf", "uy_srf"]
-    pd_age_load     ::Bool   = false
-    pd_age_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_STRAT-M15.nc"
-    pd_age_names    ::Vector{String} = ["age_iso", "depth_iso"]
+    pd_topo_load        ::Bool    = true
+    pd_topo_path        ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
+    pd_topo_names       ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
+    pd_tsrf_load        ::Bool    = true
+    pd_tsrf_path        ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
+    pd_tsrf_name        ::String  = "T_srf"     # Surface temperature (or near-surface temperature)
+    pd_tsrf_monthly     ::Bool    = false
+    pd_smb_load         ::Bool    = true
+    pd_smb_path         ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
+    pd_smb_name         ::String  = "smb"       # Surface mass balance
+    pd_smb_monthly      ::Bool    = false
+    pd_vel_load         ::Bool    = true
+    pd_vel_path         ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_VEL-J18.nc"
+    pd_vel_names        ::Vector{String} = ["ux_srf", "uy_srf"]
+    pd_age_load         ::Bool    = false
+    pd_age_path         ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_STRAT-M15.nc"
+    pd_age_names        ::Vector{String} = ["age_iso", "depth_iso"]
+    pd_age_to_time      ::Bool    = true        # Convert loaded isochrone ages [ka] to deposition times (t_dep = -age)
 end
 yelmo_data_params(; kwargs...) = YelmoDataParams(; kwargs...)
-# Note: physical constants (rho_ice, rho_sw, g, ...) used to live here as
-# `PhysParams` / `phys_params(...)`. They've moved to the `YelmoConst` module
-# (`YelmoConstants`), which lives separately so a single instance can be
-# shared across multi-domain runs without going through model parameters.
-# Read them from `y.c` on a constructed `YelmoModel`.
+# Note: physical constants (rho_ice, rho_sw, g, ...) live in the `YelmoConst`
+# module (`YelmoConstants`), shared across multi-domain runs. Read them from
+# `y.c` on a constructed `YelmoModel`.
+
+# ---------------------------------------------------------------------------
+# Julia-only keys
+# ---------------------------------------------------------------------------
+"""
+    JULIA_ONLY_KEYS
+
+Parameters of `YelmoParameters` that have no key in Fortran's
+`yelmo_defaults.nml`, by group, with the reason. `ssa_solver_*` are the
+Julia-native linear-solver settings of `ydyn.ssa_solver` (written as extra
+keys next to the Fortran `ssa_solver` choice).
+"""
+const JULIA_ONLY_KEYS = Dict(
+    "yelmo" => Dict(
+        "pc_advective"  => "Fortran's advective-only PC vs. the legacy two-cascade Yelmo.jl PC (until the reject-path regression is understood)",
+        "pc_eta_masked" => "switch off the Fortran pc error mask (diagnostics)",
+        "timing"        => "per-section wall-clock timing of YelmoModel"),
+    "ytopo" => Dict(
+        "dzsdx_periodic_offset" => "periodic-wrap correction for tilted z_srf; replaced by slope_bg_x once the benchmarks move to it",
+        "dzsdy_periodic_offset" => "periodic-wrap correction for tilted z_srf; replaced by slope_bg_y once the benchmarks move to it"),
+    "ydyn" => Dict(
+        "ssa_solver_linear_method" => "Krylov method of the SSA linear solve (Fortran: Lis options)",
+        "ssa_solver_precond"       => "preconditioner of the SSA linear solve (Fortran: Lis options)",
+        "ssa_solver_smoother"      => "AMG smoother of the SSA linear solve",
+        "ssa_solver_rtol"          => "relative tolerance of the SSA linear solve (Fortran: Lis options)",
+        "ssa_solver_itmax"         => "maximum iterations of the SSA linear solve (Fortran: Lis options)"),
+)
 
 # ---------------------------------------------------------------------------
 # Top-level container
@@ -469,13 +546,19 @@ struct YelmoParameters
     ycalv           ::YcalvParams
     ydyn            ::YdynParams
     ytill           ::YtillParams
-    yneff           ::YneffParams
+    yhyd            ::YhydParams
     ymat            ::YmatParams
+    ytrc            ::YtrcParams
     ytherm          ::YthermParams
     yelmo_masks     ::YelmoMasksParams
     yelmo_init_topo ::YelmoInitTopoParams
     yelmo_data      ::YelmoDataParams
 end
+
+# Namelist group order (= Fortran yelmo_defaults.nml).
+const GROUPS = (:yelmo, :ytopo, :ycalv, :ydyn, :ytill, :yhyd, :ymat, :ytrc, :ytherm,
+                :yelmo_masks, :yelmo_init_topo, :yelmo_data)
+
 """
     YelmoParameters(name; yelmo, ytopo, ...) -> YelmoParameters
 Construct a `YelmoParameters` object. Any group can be supplied as a keyword
@@ -495,25 +578,23 @@ function YelmoParameters(name;
     ycalv           = ycalv_params(),
     ydyn            = ydyn_params(),
     ytill           = ytill_params(),
-    yneff           = yneff_params(),
+    yhyd            = yhyd_params(),
     ymat            = ymat_params(),
+    ytrc            = ytrc_params(),
     ytherm          = ytherm_params(),
     yelmo_masks     = yelmo_masks_params(),
     yelmo_init_topo = yelmo_init_topo_params(),
     yelmo_data      = yelmo_data_params(),
 )
     return YelmoParameters(
-        name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, ymat, ytherm,
+        name, yelmo, ytopo, ycalv, ydyn, ytill, yhyd, ymat, ytrc, ytherm,
         yelmo_masks, yelmo_init_topo, yelmo_data,
     )
 end
 
 function YelmoParameters(filename, name)
     p = read_nml(filename)
-    return YelmoParameters(
-        name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff,
-        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data,
-    )
+    return YelmoParameters(name, (getfield(p, g) for g in GROUPS)...)
 end
 
 # ---------------------------------------------------------------------------
@@ -525,83 +606,82 @@ Format a Julia value for Fortran namelist syntax.
 """
 format_value(v::Bool)              = v ? "True" : "False"
 format_value(v::AbstractString)    = "\"$(v)\""
+format_value(v::Symbol)            = "\"$(v)\""
 format_value(v::Int)               = string(v)
 format_value(v::Float64)           = _fmt_float(v)
 format_value(v::AbstractVector{<:AbstractString}) = join(["\"$s\"" for s in v], " ")
 format_value(v::AbstractVector{<:Real})            = join(format_value.(v), ", ")
 """
     _fmt_float(x) -> String
-Produce a clean, compact float representation. Uses exponential notation
-when the magnitude is very large or very small, otherwise decimal.
+Shortest representation that reads back to exactly `x` (Julia's `repr`,
+e.g. `0.1`, `1.0e7`, `3.168808781402895e-11`); Fortran reads all of these.
 """
-function _fmt_float(x::Float64)
-    x == 0.0 && return "0.0"
-    a = abs(x)
-    if a >= 1e5 || (a < 1e-3 && a > 0.0)
-        s = @sprintf("%.6e", x)
-        m = match(r"^(-?)(\d+\.\d*?)0*(e[+-]?)0*(\d+)$", s)
-        if m !== nothing
-            mantissa = endswith(m[2], ".") ? m[2] * "0" : m[2]
-            exp_sign = replace(m[3], "e+" => "e", "e-" => "e-")
-            exp_dig  = m[4]
-            return "$(m[1])$(mantissa)$(exp_sign)$(exp_dig)"
-        end
-        return s
-    else
-        s = @sprintf("%.10g", x)
-        occursin('.', s) || (s *= ".0")
-        return s
+_fmt_float(x::Float64) = repr(x)
+
+# ---------------------------------------------------------------------------
+# Namelist entries of a field: `name => value` pairs. Plain values give one
+# entry; Julia-native config objects (`SSASolver`) give the Fortran key plus
+# their Julia-only `<name>_<field>` keys.
+# ---------------------------------------------------------------------------
+
+# Fortran `ssa_solver` choice ↔ `SSASolver.method`.
+const SSA_METHOD_NML = Dict(:residual => "residual", :energy_quadratic => "energy",
+                            :energy_nonlinear => "energy_nonlinear")
+const SSA_METHOD_JL  = Dict(v => k for (k, v) in SSA_METHOD_NML)
+const SSA_NML_FIELDS = (:linear_method, :precond, :smoother, :rtol, :itmax)
+
+_nml_entries(name::Symbol, v) = (string(name) => v,)
+_nml_entries(name::Symbol, v::SSASolver) =
+    (string(name) => SSA_METHOD_NML[v.method],
+     (string(name, "_", f) => getfield(v, f) for f in SSA_NML_FIELDS)...)
+
+_from_nml(::Type{T}, name::Symbol, d::Dict{String,String}, default) where {T} =
+    haskey(d, string(name)) ? parse_nml_value(T, d[string(name)]) : default
+
+function _from_nml(::Type{SSASolver}, name::Symbol, d::Dict{String,String}, default::SSASolver)
+    kw = Dict{Symbol,Any}()
+    key = string(name)
+    if haskey(d, key)
+        s = parse_nml_value(String, d[key])
+        haskey(SSA_METHOD_JL, s) || error("read_nml: ydyn.$key = \"$s\"; expected one of " *
+                                          "$(sort(collect(keys(SSA_METHOD_JL)))).")
+        kw[:method] = SSA_METHOD_JL[s]
     end
+    for f in SSA_NML_FIELDS
+        k = string(name, "_", f)
+        haskey(d, k) || continue
+        T = fieldtype(SSASolver, f)
+        kw[f] = T === Symbol ? Symbol(parse_nml_value(String, d[k])) : parse_nml_value(T, d[k])
+    end
+    return SSASolver(; (f => getfield(default, f) for f in fieldnames(SSASolver))..., kw...)
 end
+
 """
     write_group(io, group_name, s)
 Write one namelist group to `io` from struct `s`.
-The field named `const_` is written as `const` (Julia keyword workaround).
-Fields whose type is not a Fortran-namelist primitive (e.g. nested
-struct configs like `SSASolver`) are skipped — those are Julia-native
-configuration objects that have no namelist representation.
 """
 function write_group(io::IO, group_name::AbstractString, s)
     println(io, "&$(group_name)")
     for fname in fieldnames(typeof(s))
-        nml_name = fname == :const_ ? "const" : string(fname)
-        val = getfield(s, fname)
-        # Skip nested-struct fields (no Fortran namelist analogue).
-        _is_nml_primitive(val) || continue
-        println(io, "    $(rpad(nml_name, 20)) = $(format_value(val))")
+        for (k, v) in _nml_entries(fname, getfield(s, fname))
+            println(io, "    $(rpad(k, 24)) = $(format_value(v))")
+        end
     end
     println(io, "/\n")
 end
-
-# Predicate: is `v` a Fortran namelist primitive (or vector of primitives)?
-# Used by `write_group` to skip nested-struct fields like `SSASolver`.
-_is_nml_primitive(v::Bool)              = true
-_is_nml_primitive(v::AbstractString)    = true
-_is_nml_primitive(v::Integer)           = true
-_is_nml_primitive(v::AbstractFloat)     = true
-_is_nml_primitive(v::AbstractVector{<:AbstractString}) = true
-_is_nml_primitive(v::AbstractVector{<:Real})           = true
-_is_nml_primitive(v)                    = false
 """
     write_nml(filename, p::YelmoParameters)
-Write a complete Yelmo namelist file from `p`.
+Write the complete Yelmo namelist of `p` (every Fortran key and the Julia-only
+keys of `JULIA_ONLY_KEYS`).
 """
 function write_nml(filename::AbstractString, p::YelmoParameters; overwrite::Bool=false)
     if isfile(filename) && !overwrite
         error("File already exists: $(filename). Use overwrite=true to overwrite.")
     end
     open(filename, "w") do io
-        write_group(io, "yelmo",           p.yelmo)
-        write_group(io, "ytopo",           p.ytopo)
-        write_group(io, "ycalv",           p.ycalv)
-        write_group(io, "ydyn",            p.ydyn)
-        write_group(io, "ytill",           p.ytill)
-        write_group(io, "yneff",           p.yneff)
-        write_group(io, "ymat",            p.ymat)
-        write_group(io, "ytherm",          p.ytherm)
-        write_group(io, "yelmo_masks",     p.yelmo_masks)
-        write_group(io, "yelmo_init_topo", p.yelmo_init_topo)
-        write_group(io, "yelmo_data",      p.yelmo_data)
+        for g in GROUPS
+            write_group(io, string(g), getfield(p, g))
+        end
     end
     @info "Namelist written to $(filename)"
     return nothing
@@ -611,6 +691,15 @@ function write_nml(p::YelmoParameters; rundir::String="", overwrite::Bool=false)
     write_nml(filename, p; overwrite)
     return nothing
 end
+
+"""
+    write_defaults_nml(filename; overwrite=false)
+
+Write the default `YelmoParameters` as a complete namelist: the Julia
+counterpart of Fortran's `input/yelmo_defaults.nml`.
+"""
+write_defaults_nml(filename::AbstractString; overwrite::Bool=false) =
+    write_nml(filename, YelmoParameters("yelmo_defaults"); overwrite)
 
 ### READING NML FILES ###
 
@@ -719,7 +808,7 @@ parse_nml_value(::Type{Float64}, s::AbstractString) =
     parse(Float64, replace(strip(s), r"[dD]" => "e"))  # Fortran D-exponent
 
 parse_nml_value(::Type{String}, s::AbstractString) =
-    strip(s, [' ', '"', '\''])
+    String(strip(s, [' ', '"', '\'']))
 
 function parse_nml_value(::Type{Vector{Float64}}, s::AbstractString)
     parts = split(strip(s), r"[\s,]+"; keepempty=false)
@@ -741,27 +830,26 @@ parse_nml_value(::Type{T}, s::AbstractString) where {T} = parse(T, strip(s))
 # ---------------------------------------------------------------------------
 
 """
-    struct_from_dict(::Type{S}, d) -> S
+    struct_from_dict(::Type{S}, d, group) -> S
 
 Reconstruct struct `S` from a `Dict{String,String}` of raw namelist values.
-Fields absent from `d` keep the default value from `S`'s `@kwdef` constructor.
-The Fortran field `const` is mapped back to Julia field `const_`.
+Fields absent from `d` keep their default. A key in `d` that is not a
+parameter of `S` is an error (as in Fortran's `nml_validate`).
 """
-function struct_from_dict(::Type{S}, d::Dict{String,String}) where {S}
-    kwargs = Dict{Symbol,Any}()
+function struct_from_dict(::Type{S}, d::Dict{String,String}, group::AbstractString) where {S}
     defaults = S()   # zero-arg @kwdef constructor gives us all defaults
+    known = Set{String}()
+    kwargs = Dict{Symbol,Any}()
     for fname in fieldnames(S)
-        nml_name = fname == :const_ ? "const" : string(fname)
-        FT = fieldtype(S, fname)
-        if haskey(d, nml_name) && _is_nml_primitive(getfield(defaults, fname))
-            kwargs[fname] = parse_nml_value(FT, d[nml_name])
-        else
-            # Either field absent from namelist, or field type is a
-            # nested Julia-native config struct (no namelist analogue).
-            # Fall back to the default value either way.
-            kwargs[fname] = getfield(defaults, fname)
+        def = getfield(defaults, fname)
+        for (k, _) in _nml_entries(fname, def)
+            push!(known, k)
         end
+        kwargs[fname] = _from_nml(fieldtype(S, fname), fname, d, def)
     end
+    unknown = setdiff(keys(d), known)
+    isempty(unknown) || error("read_nml: unknown parameter(s) in &$(group): " *
+                              join(sort(collect(unknown)), ", "))
     return S(; kwargs...)
 end
 
@@ -769,11 +857,18 @@ end
 # Public API
 # ---------------------------------------------------------------------------
 
+const GROUP_TYPES = (yelmo = YelmoParams, ytopo = YtopoParams, ycalv = YcalvParams,
+                     ydyn = YdynParams, ytill = YtillParams, yhyd = YhydParams,
+                     ymat = YmatParams, ytrc = YtrcParams, ytherm = YthermParams,
+                     yelmo_masks = YelmoMasksParams, yelmo_init_topo = YelmoInitTopoParams,
+                     yelmo_data = YelmoDataParams)
+
 """
     read_nml(filename) -> YelmoParameters
 
 Read a Yelmo namelist file and return a fully populated `YelmoParameters`.
-Groups or fields absent from the file fall back to the struct defaults.
+Groups or keys absent from the file take the defaults; unknown keys in a
+Yelmo group are an error. Other groups (a driver's `&ctrl`) are ignored.
 
 # Example
 ```julia
@@ -783,22 +878,9 @@ println(p.ydyn.solver)   # "diva"
 """
 function read_nml(filename::AbstractString)
     raw = parse_nml_file(filename)
-    get_group(name) = get(raw, name, Dict{String,String}())
-
-    return YelmoParameters(
-        splitext(basename(filename))[1];   # name = stem of filename
-        yelmo           = struct_from_dict(YelmoParams,          get_group("yelmo")),
-        ytopo           = struct_from_dict(YtopoParams,          get_group("ytopo")),
-        ycalv           = struct_from_dict(YcalvParams,          get_group("ycalv")),
-        ydyn            = struct_from_dict(YdynParams,           get_group("ydyn")),
-        ytill           = struct_from_dict(YtillParams,          get_group("ytill")),
-        yneff           = struct_from_dict(YneffParams,          get_group("yneff")),
-        ymat            = struct_from_dict(YmatParams,           get_group("ymat")),
-        ytherm          = struct_from_dict(YthermParams,         get_group("ytherm")),
-        yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
-        yelmo_init_topo = struct_from_dict(YelmoInitTopoParams,  get_group("yelmo_init_topo")),
-        yelmo_data      = struct_from_dict(YelmoDataParams,      get_group("yelmo_data")),
-    )
+    groups = (g => struct_from_dict(GROUP_TYPES[g], get(raw, string(g), Dict{String,String}()), string(g))
+              for g in GROUPS)
+    return YelmoParameters(splitext(basename(filename))[1]; groups...)   # name = stem of filename
 end
 
 
@@ -816,9 +898,7 @@ function Base.:(==)(a::YelmoParameters, b::YelmoParameters)
     return true
 end
 
-for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
-          YneffParams, YmatParams, YthermParams, YelmoMasksParams,
-          YelmoInitTopoParams, YelmoDataParams)
+for S in values(GROUP_TYPES)
     @eval function Base.:(==)(a::$S, b::$S)
         for fname in fieldnames($S)
             getfield(a, fname) == getfield(b, fname) || return false
@@ -827,45 +907,33 @@ for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
     end
 end
 
-# For each sub-struct, fall back to the auto-generated field-wise ==
-# (this works because all leaf types are Bool/Int/Float64/String/Vector,
-#  which already have == defined)
-
 # ---------------------------------------------------------------------------
 # Diff printing
 # ---------------------------------------------------------------------------
 
 """
-    diff_nml([io,] p1, p2; include_name=false)
+    compare([io,] p1, p2; include_name=false)
 
 Print all fields that differ between `p1` and `p2`, grouped by namelist group.
 Identical groups are skipped entirely.
 """
 function compare(io::IO, p1::YelmoParameters, p2::YelmoParameters; include_name=false)
     any_diff = false
-    for fname in fieldnames(YelmoParameters)
-        fname == :name && !include_name && continue
-        g1, g2 = getfield(p1, fname), getfield(p2, fname)
-        g1 == g2 && continue
-
-        # Group header
+    if include_name && p1.name != p2.name
         any_diff = true
-        println(io, "&$(fname)")
-
-        if fname == :name
-            println(io, "  $(rpad("name", 24))  \"$(g1)\"  =>  \"$(g2)\"")
-        else
-            for sfield in fieldnames(typeof(g1))
-                v1, v2 = getfield(g1, sfield), getfield(g2, sfield)
-                v1 == v2 && continue
-                label = sfield == :const_ ? "const" : string(sfield)
-                if _is_nml_primitive(v1) && _is_nml_primitive(v2)
-                    println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
-                else
-                    # Nested-struct field (e.g. SSASolver) — fall back to
-                    # repr() since format_value isn't defined for them.
-                    println(io, "  $(rpad(label, 24))  $(repr(v1))  =>  $(repr(v2))")
-                end
+        println(io, "  $(rpad("name", 24))  \"$(p1.name)\"  =>  \"$(p2.name)\"\n")
+    end
+    for g in GROUPS
+        g1, g2 = getfield(p1, g), getfield(p2, g)
+        g1 == g2 && continue
+        any_diff = true
+        println(io, "&$(g)")
+        for sfield in fieldnames(typeof(g1))
+            e1 = Dict(_nml_entries(sfield, getfield(g1, sfield)))
+            e2 = Dict(_nml_entries(sfield, getfield(g2, sfield)))
+            for (k, v1) in e1
+                v1 == e2[k] && continue
+                println(io, "  $(rpad(k, 24))  $(format_value(v1))  =>  $(format_value(e2[k]))")
             end
         end
         println(io, "/\n")
@@ -876,5 +944,6 @@ end
 
 compare(p1::YelmoParameters, p2::YelmoParameters; kw...) = compare(stdout, p1, p2; kw...)
 
-end # module YelmoMirrorPar
+include("YelmoParPort.jl")
 
+end # module YelmoPar

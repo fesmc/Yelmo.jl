@@ -15,7 +15,7 @@ using ..YelmoConst: YelmoConstants,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
-using ..YelmoPar: YelmoParameters
+using ..YelmoPar: YelmoParameters, check_ported
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 using ..YelmoHooks: YelmoHooks
@@ -98,8 +98,8 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 #     `yelmo_set_var3D!`): same glue/split when bridging Yelmo
 #     fields to the Fortran-side length-`Nz_file` buffers.
 #
-# Only ice-grid fields are registered. Bedrock fields (`T_rock`,
-# `enth_rock`) currently use the interior-extended grid convention.
+# Only ice-grid fields are registered. Bedrock fields (`T_rock`)
+# currently use the interior-extended grid convention.
 # `T_rock_b` is written as a diagnostic from the deepest bedrock
 # layer in `therm_step!`; when the bedrock grid switches to the
 # split layout, `T_rock_s` will be aliased to `T_ice_b` (encoded
@@ -1164,6 +1164,7 @@ function YelmoModel(restart_file::String, time::Float64;
         @warn "No parameters supplied to YelmoModel; constructing YelmoParameters(\"$(alias)\") with defaults."
         p = YelmoParameters(alias)
     end
+    check_ported(p)
 
     # Build grids: if a target_grid_file is provided, the model lives
     # on the target horizontal grid (vertical axis from restart) and
@@ -1249,6 +1250,8 @@ function YelmoModel(xc::AbstractVector, yc::AbstractVector,
                     rundir::String = "./",
                     c::YelmoConstants = YelmoConstants(),
                     boundaries = :bounded)
+
+    check_ported(p)
 
     # Ice and rock vertical axes recovered from the parameters.
     zeta_aa_ice, _ = calc_zeta(p.yelmo.nz_aa, p.yelmo.zeta_scale, p.yelmo.zeta_exp)

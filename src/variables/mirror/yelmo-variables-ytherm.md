@@ -21,9 +21,8 @@
 | 17 | H_cts             | xc, yc            | m            | Height of the CTS (cold-temperate surface)    |
 | 18 | advecxy           | xc, yc, zeta      | -            | Horizontal advection                          |
 | 19 | Q_rock            | xc, yc            | W m^-2       | Heat flux from bedrock                        |
-| 20 | enth_rock         | xc, yc, zeta_rock | J m^-3       | Bedrock enthalpy                              |
-| 21 | T_rock            | xc, yc, zeta_rock | K            | Bedrock temperature                           |
-| 22 | bmb_grnd_star     | xc, yc            | m/yr         | Grounded bmb of a base held at T_pmp (capacity rule) |
-| 23 | bc_b              | xc, yc            | -            | Basal BC used: 0 none, 1 held at T_pmp, 2 flux |
-| 24 | bmb_clamp         | xc, yc            | m/yr         | Freeze-on removed by the capacity clamp       |
-| 25 | melt_int          | xc, yc            | m/yr         | Englacial water drained to the bed            |
+| 20 | T_rock            | xc, yc, zeta_rock | K            | Bedrock temperature                           |
+| 21 | bmb_grnd_star     | xc, yc            | m/yr         | Grounded bmb of a base held at T_pmp (capacity rule) |
+| 22 | bc_b              | xc, yc            | -            | Basal BC used: 0 none, 1 held at T_pmp, 2 flux |
+| 23 | bmb_clamp         | xc, yc            | m/yr         | Freeze-on removed by the capacity clamp       |
+| 24 | melt_int          | xc, yc            | m/yr         | Englacial water drained to the bed            |

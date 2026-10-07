@@ -1,0 +1,84 @@
+# Port status of Fortran Yelmo options in YelmoModel (included in module YelmoPar).
+#
+# `YelmoParameters` carries the full Fortran schema with Fortran defaults
+# (yelmo dev, eda5462f). Options that YelmoModel does not implement yet are
+# listed here; `check_ported` runs when a YelmoModel is built and rejects
+# them, so a run never silently does something other than what its
+# parameters say. Remove an entry when the option is ported.
+
+"""
+    PORTED_CHOICES
+
+Fortran choice parameters whose options are only partly ported:
+`(group, key) => (supported values, condition)`. `condition(p)` says when the
+key is in effect (e.g. only with `use_lsf = true`); a value outside the
+supported set is an error then. The supported value is the one that matches
+what YelmoModel does today.
+"""
+const PORTED_CHOICES = Dict{Tuple{Symbol,Symbol}, Tuple{Tuple, Function}}(
+    (:yelmo,  :log_mb_check)       => ((false,),         p -> true),
+    (:yelmo,  :write_metrics)      => ((false,),         p -> true),
+    (:ytopo,  :front_subgrid)      => (("none",),        p -> true),
+    (:ytopo,  :slope_bg_x)         => ((0.0,),           p -> true),
+    (:ytopo,  :slope_bg_y)         => ((0.0,),           p -> true),
+    (:ytopo,  :fmb_method)         => ((0, 1, 2),        p -> true),
+    (:ycalv,  :lsf_method)         => (("redist",),      p -> p.ycalv.use_lsf),
+    (:ydyn,   :uz_method)          => ((1, 3),           p -> true),
+    (:ydyn,   :frz_scale)          => ((false,),         p -> true),
+    (:ydyn,   :ssa_vel_lim_method) => (("clip",),        p -> true),
+    (:ydyn,   :neff_nxi)           => ((0,),             p -> true),
+    (:yhyd,   :method_til)         => ((1,),             p -> true),
+    (:yhyd,   :method_transport)   => ((0,),             p -> true),
+    # The Julia bucket saturates floating cells and their grounded margin ring.
+    (:yhyd,   :bkt_floating_mode)  => ((1,),             p -> p.yhyd.method_til == 1),
+    (:ytrc,   :use_tracer)         => ((false,),         p -> true),
+    (:ytrc,   :use_elsa)           => ((false,),         p -> true),
+    (:ytrc,   :t_dep_source)       => (("euler",),       p -> true),
+    (:ytherm, :qb_method)          => ((3, 4),           p -> true),
+    (:ytherm, :advecxy_order)      => ((1,),             p -> p.ytherm.method in ("enth", "temp")),
+    (:ytherm, :basal_bc_method)    => (("wtil",),        p -> p.ytherm.method in ("enth", "temp")),
+    (:ytherm, :gl_temperate)       => ((false,),         p -> p.ytherm.method in ("enth", "temp")),
+)
+
+"""
+    NOT_PORTED_KNOBS
+
+Fortran parameters that YelmoModel does not use yet and that have no setting
+reproducing the current Julia behaviour (tuning of unported schemes).
+`check_ported` warns once that they are ignored.
+"""
+const NOT_PORTED_KNOBS = Dict{Tuple{Symbol,Symbol}, String}(
+    (:yelmo,  :mask_border)   => "border ice mask is set by the boundary conditions",
+    (:yelmo,  :pc_cfl_max)    => "no Courant cap on the pc timestep",
+    (:yelmo,  :pc_rho_max)    => "dt growth limited by the controller's (0.2, 10) clamp",
+    (:yelmo,  :pc_eta_H_min)  => "pc mask thickness threshold is hard-coded",
+    (:yelmo,  :pc_eta_u_min)  => "no speed threshold in the pc mask",
+    (:yelmo,  :pc_eta_trim)   => "no trimming of the pc error norm",
+    (:ycalv,  :H_min_tau)     => "margin ice below H_min_* is removed in one step",
+    (:ytherm, :advecxy_cfl)   => "no horizontal-advection sub-stepping",
+    (:ytherm, :advecxy_nmax)  => "no horizontal-advection sub-stepping",
+    (:ytherm, :enth_cp_method)=> "enthalpy uses cp(T)·T (neither \"const\" nor \"integral\")",
+)
+
+"""
+    check_ported(p::YelmoParameters)
+
+Error if `p` selects a Fortran option that YelmoModel does not implement
+(`PORTED_CHOICES`); warn once about ignored parameters (`NOT_PORTED_KNOBS`).
+Called when a `YelmoModel` is built.
+"""
+function check_ported(p::YelmoParameters)
+    bad = String[]
+    for ((g, k), (ok, active)) in PORTED_CHOICES
+        active(p) || continue
+        v = getfield(getfield(p, g), k)
+        v in ok || push!(bad, "$(g).$(k) = $(repr(v)) (supported: $(join(repr.(ok), ", ")))")
+    end
+    isempty(bad) || error("YelmoModel: these Fortran Yelmo options are not ported to " *
+                          "YelmoModel yet:\n  " * join(sort(bad), "\n  ") *
+                          "\nSet the supported values (see YelmoPar.PORTED_CHOICES).")
+    ignored = sort(["$(g).$(k): $(why)" for ((g, k), why) in NOT_PORTED_KNOBS])
+    @info "YelmoModel ignores these Fortran parameters (not ported):\n  " *
+          join(ignored, "\n  ") maxlog=1
+    return nothing
+end

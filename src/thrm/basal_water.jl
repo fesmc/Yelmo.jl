@@ -5,9 +5,10 @@
 # (`physics/thermodynamics.f90:1537`). Single-cell mass balance for
 # the basal water layer thickness `H_w`:
 #
-#     dH_w/dt = bmb_w - till_rate
+#     dH_w/dt = bmb_w - till_rate          (till_rate = yhyd.bkt_till_rate)
 #
-# clamped to `[0, H_w_max]`, with three boundary-conditional overrides:
+# clamped to `[0, H_w_max]` (H_w_max = yhyd.W_til_max), with three
+# boundary-conditional overrides (Fortran bkt_floating_mode = 1, MARGIN_FILL):
 #
 #   - Floating / ice-free ocean (`f_grnd == 0`)        → `H_w = H_w_max`.
 #   - Grounded, fully iced, with floating neighbour

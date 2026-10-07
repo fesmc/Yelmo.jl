@@ -24,9 +24,9 @@ Milestone scope (this PR — "mat 1"):
   - `enh_method ∈ {"simple", "shear2D"}`. `shear3D` and any
     `*-tracer` variant are deferred — the latter two require the
     tracer infrastructure (`calc_tracer_3D`, `calc_isochrones`).
-  - `calc_age = true` is supported (deposition-time tracer
-    `dep_time`) when `tracer_method = "impl"`. The explicit
-    branch (`tracer_method = "expl"`) and the isochrone diagnostic
+  - The Eulerian age tracer (`ytrc.use_euler && ytrc.calc_age`,
+    deposition time `dep_time`) is supported when
+    `ytrc.tracer_method = "impl"`. The explicit branch and the isochrone diagnostic
     (`depth_iso`) are deferred. Enhancement-via-tracer
     (`enh_method ∈ {simple-tracer, shear2D-tracer, shear3D-tracer}`)
     is also deferred — those paths still error in this commit.
@@ -93,9 +93,9 @@ Scope ("mat 1" PR):
     water-coupled Arrhenius) reads `y.thrm.{T_ice, T_pmp, omega}`,
     branches on `rf_use_eismint2`, and applies `scale_rate_factor_water!`
     when `rf_with_water = true`.
-  - `calc_age = true` runs the implicit-solver age-tracer port
-    (Step 0 of `mat_step!`). Only `tracer_method = "impl"` is
-    supported; the explicit branch and `calc_isochrones` (the
+  - `ytrc.use_euler && ytrc.calc_age` runs the implicit-solver
+    age-tracer port (Step 0 of `mat_step!`). Only
+    `ytrc.tracer_method = "impl"` is supported; the explicit branch and `calc_isochrones` (the
     `depth_iso` diagnostic) are deferred.
   - The 3D stress tensor `mat.strs` is left at allocation default
     (zero), matching Fortran which never fills it inside
@@ -115,17 +115,19 @@ function mat_step!(y::YelmoModel, dt::Float64)
     c       = y.c
     zeta_aa = znodes(y.gt, Center())
 
-    # 0. Age tracer (`dep_time`). Dispatched only when `calc_age = true`
-    #    AND `dt > 0` AND `tracer_method == "impl"` — the explicit
+    # 0. Age tracer (`dep_time`), Fortran `&ytrc` (yelmo_tracers.f90):
+    #    run when `use_euler && calc_age` AND `dt > 0`. Only
+    #    `tracer_method == "impl"` is ported — the explicit
     #    branch and isochrones (`depth_iso`) are out of scope for this
     #    port. `X_srf = y.time` matches Fortran (`yelmo_material.f90:64`):
     #    surface-deposited ice has deposition time equal to the current
     #    simulation time, so `age = current_time - dep_time` after
     #    advection. The 500 m/yr `uxy_bar` mask is Fortran's
     #    fast-flow exclusion (yelmo_material.f90:70).
-    if par.calc_age && dt > 0.0
-        if par.tracer_method != "impl"
-            error("mat_step!: tracer_method=\"$(par.tracer_method)\" not " *
+    trc = y.p.ytrc
+    if trc.use_euler && trc.calc_age && dt > 0.0
+        if trc.tracer_method != "impl"
+            error("mat_step!: ytrc.tracer_method=\"$(trc.tracer_method)\" not " *
                   "ported. Use \"impl\" (the explicit branch is deferred).")
         end
         zeta_ac = znodes(y.gt, Face())
@@ -138,7 +140,7 @@ function mat_step!(y::YelmoModel, dt::Float64)
                         y.dyn.ux, y.dyn.uy, y.dyn.uz,
                         y.tpo.H_ice, y.tpo.bmb,
                         zeta_aa, zeta_ac, dx_f, dt;
-                        kappa = par.tracer_impl_kappa,
+                        kappa = trc.tracer_impl_kappa,
                         mask  = mask)
     end
 
