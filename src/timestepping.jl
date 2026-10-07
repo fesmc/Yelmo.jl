@@ -255,7 +255,7 @@ end
 # (`set_inactive_margins!`, from the current f_ice). The level-set front
 # variant (`front_subgrid != "none"`) is not ported (`check_ported`).
 function _transport_velocity!(y, filter_vel::Bool)
-    ux_t, uy_t = y.tpo.pc.ux_t, y.tpo.pc.uy_t
+    ux_t, uy_t = y.tpo.scratch.pc.ux_t, y.tpo.scratch.pc.uy_t
     if filter_vel
         interior(ux_t) .= 0.5 .* (interior(y.dyn.ux_bar) .+ interior(y.dyn.ux_bar_prev))
         interior(uy_t) .= 0.5 .* (interior(y.dyn.uy_bar) .+ interior(y.dyn.uy_bar_prev))
@@ -281,8 +281,8 @@ end
 # Not yet as in Fortran dev: the norm (RMS of tau/(1 m + 0.01 H)),
 # `pc_eta_H_min`, `pc_eta_u_min`, `pc_eta_trim`, periodic neighbours.
 function _compute_pc_eta(factor::Float64, scratch::PCScratch, y, dt::Float64)
-    H_pred = y.tpo.pc.pred.H_ice
-    H_corr = y.tpo.pc.corr.H_ice
+    H_pred = y.tpo.scratch.pc.pred.H_ice
+    H_corr = y.tpo.scratch.pc.corr.H_ice
     pc_tau = scratch.pc_tau
     c = factor / dt
     @inbounds @simd for i in eachindex(pc_tau)

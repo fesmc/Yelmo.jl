@@ -77,14 +77,14 @@ include("dynamic_thickness.jl")
 #   topo_step!(y, dt, PCAdvance(); use_H_pred)  → H_{n+1}
 #
 # Transport: the predictor and corrector advect with the transport
-# velocity `y.tpo.pc.ux_t/uy_t` (filled by the time loop before each of
+# velocity `y.tpo.scratch.pc.ux_t/uy_t` (filled by the time loop before each of
 # them, Fortran `calc_transport_velocity`), mix the raw advective rates
 # with the β coefficients of the PC scheme,
 #
 #   predictor: dHidt_dyn = β1·f(H_n, u_n)   + β2·f_{n-1}
 #   corrector: dHidt_dyn = β3·f(H_pred, u*) + β4·f(H_n, u_n)
 #
-# (f(H_n, u_n) = `y.tpo.pc.dHidt_dyn_raw`, f_{n-1} = `dHidt_dyn_raw_n`) and
+# (f(H_n, u_n) = `y.tpo.scratch.pc.dHidt_dyn_raw`, f_{n-1} = `dHidt_dyn_raw_n`) and
 # apply the mixed rate to H_n. The clip of negative thickness is booked
 # in `mb_clip`, so `dHidt_dyn` is the applied transport rate. The mass
 # balance cascade (smb, bmb, fmb, dmb, calving, relaxation, residual)
@@ -113,15 +113,15 @@ Fortran `calc_ytopo_pc`):
   - `PCPredictor`: store `H_ice_n`, `z_srf_n`, `lsf_n`; transport with
     `β1·f_n + β2·f_{n-1}` (raw advective rates at `H_n` and of the previous
     step) and run the mass-balance cascade. The live state and
-    `y.tpo.pc.pred` hold `H_pred`, for the velocity solve that follows.
+    `y.tpo.scratch.pc.pred` hold `H_pred`, for the velocity solve that follows.
   - `PCCorrector`: transport `H_n` with `β3·f(H_pred) + β4·f_n` (`H_pred`
     advected with the velocity just solved), run the cascade and record
-    the result in `y.tpo.pc.corr`, then return the live state to `H_n`
+    the result in `y.tpo.scratch.pc.corr`, then return the live state to `H_n`
     (for `mat_step!` and `therm_step!`).
   - `PCAdvance`: load the predictor (`use_H_pred`) or corrector record and
     shift `f_n` to `dHidt_dyn_raw_n`.
 
-The predictor and corrector advect with `y.tpo.pc.ux_t/uy_t`, which the
+The predictor and corrector advect with `y.tpo.scratch.pc.ux_t/uy_t`, which the
 caller fills with the transport velocity. Nothing changes when
 `ytopo.topo_fixed` or `dt ≤ 0` (the records then hold the current state).
 Each transporting stage ends with `dHidt = (H_ice − H_ice_n)/dt`,
@@ -135,7 +135,7 @@ function topo_step!(y::YelmoModel, dt::Float64, ::PCPredictor;
     copyto!(interior(tpo.z_srf_n), interior(tpo.z_srf))
     copyto!(interior(tpo.lsf_n),   interior(tpo.lsf))
     if _topo_active(y, dt)
-        f_n = tpo.pc.dHidt_dyn_raw
+        f_n = tpo.scratch.pc.dHidt_dyn_raw
         _advection_rate!(f_n, y, dt)
         _mix_rates!(interior(tpo.dHidt_dyn), β1, f_n, β2, interior(tpo.dHidt_dyn_raw_n))
         _apply_transport!(y, dt)
@@ -143,7 +143,7 @@ function topo_step!(y::YelmoModel, dt::Float64, ::PCPredictor;
         _stage_rates!(y, dt)
     end
     update_diagnostics!(y)
-    _save_pc_stage!(tpo.pc.pred, y)
+    _save_pc_stage!(tpo.scratch.pc.pred, y)
     return y
 end
 
@@ -151,22 +151,22 @@ function topo_step!(y::YelmoModel, dt::Float64, ::PCCorrector;
                     β3::Float64, β4::Float64)
     tpo = y.tpo
     if _topo_active(y, dt)
-        copyto!(interior(tpo.H_ice), tpo.pc.pred.H_ice)
-        copyto!(interior(tpo.lsf),   tpo.pc.pred.lsf)
+        copyto!(interior(tpo.H_ice), tpo.scratch.pc.pred.H_ice)
+        copyto!(interior(tpo.lsf),   tpo.scratch.pc.pred.lsf)
         calc_f_ice!(y)
         D = interior(tpo.dHidt_dyn)
         _advection_rate!(D, y, dt)
-        _mix_rates!(D, β3, D, β4, tpo.pc.dHidt_dyn_raw)
+        _mix_rates!(D, β3, D, β4, tpo.scratch.pc.dHidt_dyn_raw)
         copyto!(interior(tpo.H_ice), interior(tpo.H_ice_n))
         copyto!(interior(tpo.lsf),   interior(tpo.lsf_n))
         _apply_transport!(y, dt)
         _topo_mb_cascade!(y, dt)
-        _save_pc_stage!(tpo.pc.corr, y)
+        _save_pc_stage!(tpo.scratch.pc.corr, y)
         copyto!(interior(tpo.H_ice), interior(tpo.H_ice_n))
         copyto!(interior(tpo.lsf),   interior(tpo.lsf_n))
         _stage_rates!(y, dt)
     else
-        _save_pc_stage!(tpo.pc.corr, y)
+        _save_pc_stage!(tpo.scratch.pc.corr, y)
     end
     update_diagnostics!(y)
     return y
@@ -175,8 +175,8 @@ end
 function topo_step!(y::YelmoModel, dt::Float64, ::PCAdvance; use_H_pred::Bool)
     tpo = y.tpo
     if _topo_active(y, dt)
-        _load_pc_stage!(y, use_H_pred ? tpo.pc.pred : tpo.pc.corr)
-        copyto!(interior(tpo.dHidt_dyn_raw_n), tpo.pc.dHidt_dyn_raw)
+        _load_pc_stage!(y, use_H_pred ? tpo.scratch.pc.pred : tpo.scratch.pc.corr)
+        copyto!(interior(tpo.dHidt_dyn_raw_n), tpo.scratch.pc.dHidt_dyn_raw)
         _stage_rates!(y, dt)
     end
     update_diagnostics!(y)
@@ -193,8 +193,8 @@ function _advection_rate!(dHdt::AbstractArray, y::YelmoModel, dt::Float64)
         fill!(dHdt, 0.0)
         return dHdt
     end
-    advection_tendency!(dHdt, y.tpo.H_ice, y.tpo.pc.ux_t, y.tpo.pc.uy_t, dt,
-                        y.tpo.pc.H_tmp;
+    advection_tendency!(dHdt, y.tpo.H_ice, y.tpo.scratch.pc.ux_t, y.tpo.scratch.pc.uy_t, dt,
+                        y.tpo.scratch.pc.H_tmp;
                         scheme     = scheme,
                         cache      = y.tpo.scratch.adv_cache,
                         cfl_safety = y.p.yelmo.cfl_max)

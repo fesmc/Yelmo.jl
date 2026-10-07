@@ -1148,22 +1148,22 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # eagerly typing it here. The same cache serves both schemes:
     # the implicit path uses the sparse operator + GMRES workspace,
     # the explicit path uses the preallocated `tend` buffer.
-    tpo_scratch = (adv_cache = Ref{Any}(nothing),)
-    tpo = merge(tpo, (scratch = tpo_scratch,))
-
-    # Predictor-corrector records (src/timestepping.jl, topo stages in
-    # src/topo/YelmoModelTopo.jl): the outputs of the predictor and
+    #
+    # `pc`: predictor-corrector records (src/timestepping.jl, topo stages
+    # in src/topo/YelmoModelTopo.jl): the outputs of the predictor and
     # corrector stages (Fortran `tpo%now%pred` / `tpo%now%corr`), the raw
     # advective rate of the current step `dHidt_dyn_raw` (f_n; the previous
-    # step's is the schema field `dHidt_dyn_raw_n`), and the transport
-    # velocity (Fortran `calc_transport_velocity`). `H_tmp` is the
-    # snapshot buffer of `advection_tendency!`.
-    tpo = merge(tpo, (pc = (pred          = _alloc_pc_stage(tpo, "pc_pred_"),
-                            corr          = _alloc_pc_stage(tpo, "pc_corr_"),
-                            dHidt_dyn_raw = zeros(Float64, size(interior(tpo.H_ice))),
-                            H_tmp         = zeros(Float64, size(interior(tpo.H_ice))),
-                            ux_t          = XFaceField(g),
-                            uy_t          = YFaceField(g)),))
+    # step's is the schema field `dHidt_dyn_raw_n`), the transport velocity
+    # (Fortran `calc_transport_velocity`) and `H_tmp`, the snapshot buffer
+    # of `advection_tendency!`.
+    pc = (pred          = _alloc_pc_stage(tpo, "pc_pred_"),
+          corr          = _alloc_pc_stage(tpo, "pc_corr_"),
+          dHidt_dyn_raw = zeros(Float64, size(interior(tpo.H_ice))),
+          H_tmp         = zeros(Float64, size(interior(tpo.H_ice))),
+          ux_t          = XFaceField(g),
+          uy_t          = YFaceField(g))
+    tpo_scratch = (adv_cache = Ref{Any}(nothing), pc = pc)
+    tpo = merge(tpo, (scratch = tpo_scratch,))
 
     # `dta.rmse`: scalar comparison metrics filled by `data_compare!`
     # (src/data/YelmoModelData.jl). Initialised to NaN so absence of a

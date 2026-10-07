@@ -6,8 +6,8 @@ loop (`src/timestepping.jl`), a port of Fortran `calc_ytopo_pc`
 
 | Stage | Call | Result |
 |---|---|---|
-| Predictor | `topo_step!(y, dt, PCPredictor(); β1, β2)` | `H_pred` (live state and `tpo.pc.pred`), for the velocity solve |
-| Corrector | `topo_step!(y, dt, PCCorrector(); β3, β4)` | `H_corr` (`tpo.pc.corr`); live state back to `H_n` |
+| Predictor | `topo_step!(y, dt, PCPredictor(); β1, β2)` | `H_pred` (live state and `tpo.scratch.pc.pred`), for the velocity solve |
+| Corrector | `topo_step!(y, dt, PCCorrector(); β3, β4)` | `H_corr` (`tpo.scratch.pc.corr`); live state back to `H_n` |
 | Advance | `topo_step!(y, dt, PCAdvance(); use_H_pred)` | `H_{n+1}` = predictor or corrector record |
 
 The predictor and corrector transport `H_n` with the transport velocity
@@ -17,7 +17,7 @@ into ice-free cells closed) and mixed advective rates
 - predictor: `dHidt_dyn = β1·f(H_n, u_n) + β2·f_{n-1}`
 - corrector: `dHidt_dyn = β3·f(H_pred, u*) + β4·f(H_n, u_n)`
 
-(`f(H_n, u_n)` is `tpo.pc.dHidt_dyn_raw`, `f_{n-1}` is `dHidt_dyn_raw_n`;
+(`f(H_n, u_n)` is `tpo.scratch.pc.dHidt_dyn_raw`, `f_{n-1}` is `dHidt_dyn_raw_n`;
 the β come from `yelmo.pc_method`), then run the mass-balance cascade below,
 one `apply_tendency!` per contribution so each is realised and recorded.
 
@@ -26,7 +26,7 @@ one `apply_tendency!` per contribution so each is realised and recorded.
 | # | Phase | Helper(s) | Output | Notes |
 |---|---|---|---|---|
 | 1 | Store `H_ice_n`, `z_srf_n`, `lsf_n` | — | `tpo.H_ice_n`, … | Predictor only. `H_ice_n` is also the `topo_rel_field == "H_ice_n"` relaxation target. |
-| 2 | Advective rate | `advection_tendency!` | `tpo.pc.dHidt_dyn_raw` / `tpo.dHidt_dyn` | Zero with `ytopo.solver = "none"`. |
+| 2 | Advective rate | `advection_tendency!` | `tpo.scratch.pc.dHidt_dyn_raw` / `tpo.dHidt_dyn` | Zero with `ytopo.solver = "none"`. |
 | 3 | Transport | `apply_tendency!(…; mb_clip)` | `tpo.H_ice`, `tpo.dHidt_dyn`, `tpo.mb_clip` | Mixed rate applied to `H_n`; the clip of negative thickness is booked in `mb_clip`. |
 | 4 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | Binary (`front_subgrid = "none"`). |
 | 5 | **SMB** | `mbal_tendency!`, `apply_tendency!` | `tpo.smb`, `tpo.H_ice` | Source: `bnd.smb_ref`. |
