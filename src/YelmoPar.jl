@@ -136,7 +136,8 @@ Base.@kwdef struct YtopoParams
     dmb_m_r             ::Float64 = 1.0         # [-]   Discharge resolution scaling exponent
     fmb_method          ::Int     = 0           # 0: fmb_shlf; 1: fmb~bmb_shlf; 2: scaled by submerged front area; 3: Rignot et al. (2016)
     fmb_scale           ::Float64 = 1.0         # Scaling of fmb ~ scale*bmb
-    fmb_lambda          ::Float64 = 1.0         # fmb_method=3: scaling of the Rignot et al. (2016) frontal meltend
+    fmb_lambda          ::Float64 = 1.0         # fmb_method=3: scaling of the Rignot et al. (2016) frontal melt
+end
 ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ycalv
