@@ -35,7 +35,7 @@ The exported group factories — all `Y<group>Params(; kwargs...)`
 shortcuts with the same name as the namelist group:
 
 - `yelmo_params`, `ytopo_params`, `ycalv_params`, `ydyn_params`,
-  `ytill_params`, `yneff_params`, `ymat_params`, `ytherm_params`,
+  `ytill_params`, `yhyd_params`, `ymat_params`, `ytrc_params`, `ytherm_params`,
   `yelmo_masks_params`, `yelmo_init_topo_params`,
   `yelmo_data_params`.
 
@@ -92,13 +92,32 @@ compare
 | `ycalv`           | Calving: master switch, front-velocity laws, redistancing cadence, threshold thicknesses. |
 | `ydyn`            | Dynamics: solver (`fixed`/`sia`; `ssa`/`hybrid`/`diva` deferred), driving-stress limits, basal sliding parameters. |
 | `ytill`           | Till hydrology / friction. |
-| `yneff`           | Effective-pressure scheme. |
+| `yhyd`            | Basal hydrology: till-water bucket and effective-pressure closures (Fortran: FastHydrology; the K24 transport model is not ported). |
 | `ymat`            | Material: rheology, anisotropy, enhancement factors. |
+| `ytrc`            | Age / deposition-time tracers. |
 | `ytherm`          | Thermodynamics: solver, vertical advection method. |
 | `yelmo_masks`     | Domain masks (which cells participate in dynamics, which act as boundary). |
 | `yelmo_init_topo` | Initial-state construction. |
 | `yelmo_data`      | Reference data layer for nudging / spinup. |
 
-For details on every individual field, see the corresponding struct's
-default values in `src/YelmoPar.jl` (the `Base.@kwdef struct
-Y<group>Params` blocks) or the upstream Yelmo Fortran documentation.
+The groups, keys and defaults are those of Fortran Yelmo's
+`input/yelmo_defaults.nml` (yelmo `dev`, `eda5462f`); `test/test_par_schema.jl`
+checks this. Julia-only keys are listed in `YelmoPar.JULIA_ONLY_KEYS` with
+the reason they exist. [`write_defaults_nml`](@ref) writes the complete
+default namelist from Julia.
+
+## Options not yet ported
+
+`YelmoParameters` carries every Fortran option, including some YelmoModel
+does not implement yet (e.g. `ytopo.front_subgrid = "marine"`,
+`ydyn.frz_scale = true`, `ytherm.basal_bc_method = "capacity"`). Building a
+`YelmoModel` runs [`check_ported`](@ref), which lists such options and stops;
+[`with_ported_options`](@ref) returns a copy with each of them set to the
+value matching the current YelmoModel behaviour (and logs the changes).
+`YelmoPar.PORTED_CHOICES` is the list; entries go as options are ported.
+
+```@docs
+check_ported
+with_ported_options
+write_defaults_nml
+```

@@ -56,7 +56,7 @@ function _build_model(; backend::Symbol, dt_method=nothing, outdir=nothing)
             fn === :yelmo && continue
             p_kwargs[fn] = getproperty(p, fn)
         end
-        p = YelmoParameters(p.name; yelmo = new_yelmo, p_kwargs...)
+        p = with_ported_options(YelmoParameters(p.name; yelmo = new_yelmo, p_kwargs...))
     end
     if backend === :mirror
         outdir === nothing && (outdir = joinpath(@__DIR__, "output-mirror"))

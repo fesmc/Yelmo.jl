@@ -68,8 +68,8 @@ contributors:
 - [ ] dt sensitivity (1 yr forward Euler vs Fortran's adaptive PC).
 - [ ] Missing physics in Yelmo.jl's SSA — the test still uses the
   `1000 - 0.9 z_bed` IC override because the literal Fortran 10 m
-  IC is rank-deficient under SSA. Once Yelmo.jl gets adaptive
-  dt + `dHdt_dyn_lim`, retest with the literal IC.
+  IC is rank-deficient under SSA. Retest with the literal IC under
+  adaptive dt (`dHdt_dyn_lim` no longer exists in yelmo dev).
 
 Investigation can wait — current trajectory is at least physically
 sane (no clamped velocities, GL moves correctly).

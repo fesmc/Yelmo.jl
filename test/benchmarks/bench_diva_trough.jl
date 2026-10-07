@@ -33,7 +33,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params
 using Yelmo.YelmoSolvers: SSASolver
 
@@ -57,7 +57,7 @@ const TROUGH = TroughBenchmark(:F17; dx_km = 8.0)
 function build_params(dt_method::Int; log_timestep::Bool = false)
     # Mirrors `test_trough_diva.jl::_trough_diva_params` plus
     # log_timestep + the adaptive PC machinery.
-    return YelmoParameters("trough_f17_$(dt_method)";
+    return with_ported_options(YelmoParameters("trough_f17_$(dt_method)";
         yelmo = yelmo_params(
             dt_method     = dt_method,
             pc_method     = "HEUN",
@@ -68,7 +68,9 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             dt_min        = 0.01,
             cfl_max       = 0.5,
             log_timestep  = log_timestep,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "diva",
             visc_method    = 1,
@@ -79,14 +81,10 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             beta_gl_stag   = 3,
             beta_min       = 0.0,
             ssa_lat_bc     = "floating",
-            no_slip        = false,
-            ssa_solver     = SSASolver(rtol            = 1e-4,
-                                       itmax           = 200,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7),
+            ssa_solver     = SSASolver(method = :residual, rtol            = 1e-4, itmax           = 200),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(
             method   = 1,  scale_zb = 0,  scale_sed = 0,
             is_angle = true, n_sd = 1,    f_sed = 1.0,
@@ -94,16 +92,18 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             z0       = -300.0, z1    = 200.0,
             cf_min   = 5.0, cf_ref   = 10.0,
         ),
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
         ymat = ymat_params(
             n_glen = 3.0, rf_const = 3.1536e-18,
             de_max = 0.5, enh_shear = 1.0, enh_stream = 1.0, enh_shlf = 1.0,
+            rf_method = -1
         ),
         # The TROUGH namelist runs `ytherm.method = "temp"`, which is
         # not yet ported to Yelmo.jl (lands in PR4). This benchmark is
         # dyn-side (DIVA) only — pin therm to "fixed" so `therm_step!`
         # is a no-op.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 function run_yelmo(label::String, dt_method::Int, dt_outer::Float64;

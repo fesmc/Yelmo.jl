@@ -94,7 +94,6 @@ gradient does not collapse to zero one cell upstream of the calving
 front.
 
 ```@docs
-extend_floating_slab!
 calc_dynamic_ice_fields!
 ```
 

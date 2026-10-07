@@ -45,7 +45,7 @@ test machinery uses the same workaround on production runs.
 
 ## Model configuration
 
-- Solver: SSA, Picard with `picard_iter_max = 20`, `picard_tol = 1e-3`,
+- Solver: SSA, Picard with `ssa_iter_max = 20`, `ssa_iter_conv = 1e-3`,
   Krylov `rtol = 1e-6`, `itmax = 500`.
 - `beta_method = 4` (regularized Coulomb, q-exponent), `beta_q = 1/3`,
   `beta_u0 = 1`, `beta_gl_stag = 3`, `ssa_lat_bc = "floating"`.
@@ -78,10 +78,10 @@ This is a longer reproduction of the regression test
 [test/benchmarks/test_mismip3d_stnd.jl](../../test/benchmarks/test_mismip3d_stnd.jl).
 `run.jl` calls `Yelmo.init_state!(y, 0.0; thrm_method = "robin")` after
 constructing the model — mirrors Fortran's `yelmo_init_state` call in
-`yelmo/tests/yelmo_mismip.f90`. Without that, default-zero `T_ice_b`
-collides with `calc_c_bed!`'s `scale_T = 1` thermal-scaling branch
-and collapses basal friction; the SSA solver then saturates at the
-5000 m/yr velocity clamp. See PR #66 for the bisect history.
+`yelmo/tests/yelmo_mismip.f90`. Without that, `T_ice_b` stays at zero
+and every temperature-dependent quantity sees a 272 K-cold base (with
+the v1.15 `scale_T = 1` friction blend this collapsed basal friction;
+see PR #66 for the bisect history).
 
 Next benchmarks: **mismip3d-stnd-att-ramp** (same setup with phased
 changes to the Glen rate factor — see

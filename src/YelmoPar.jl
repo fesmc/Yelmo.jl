@@ -40,7 +40,7 @@ export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
 export write_nml, write_defaults_nml
 export read_nml
 export compare
-export check_ported
+export check_ported, with_ported_options
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -830,13 +830,15 @@ parse_nml_value(::Type{T}, s::AbstractString) where {T} = parse(T, strip(s))
 # ---------------------------------------------------------------------------
 
 """
-    struct_from_dict(::Type{S}, d, group) -> S
+    struct_from_dict(::Type{S}, d, group; strict=true) -> S
 
 Reconstruct struct `S` from a `Dict{String,String}` of raw namelist values.
 Fields absent from `d` keep their default. A key in `d` that is not a
-parameter of `S` is an error (as in Fortran's `nml_validate`).
+parameter of `S` is an error (as in Fortran's `nml_validate`), or a
+warning with `strict = false`.
 """
-function struct_from_dict(::Type{S}, d::Dict{String,String}, group::AbstractString) where {S}
+function struct_from_dict(::Type{S}, d::Dict{String,String}, group::AbstractString;
+                          strict::Bool = true) where {S}
     defaults = S()   # zero-arg @kwdef constructor gives us all defaults
     known = Set{String}()
     kwargs = Dict{Symbol,Any}()
@@ -848,8 +850,10 @@ function struct_from_dict(::Type{S}, d::Dict{String,String}, group::AbstractStri
         kwargs[fname] = _from_nml(fieldtype(S, fname), fname, d, def)
     end
     unknown = setdiff(keys(d), known)
-    isempty(unknown) || error("read_nml: unknown parameter(s) in &$(group): " *
-                              join(sort(collect(unknown)), ", "))
+    if !isempty(unknown)
+        msg = "read_nml: unknown parameter(s) in &$(group): " * join(sort(collect(unknown)), ", ")
+        strict ? error(msg) : @warn(msg * " (ignored)")
+    end
     return S(; kwargs...)
 end
 
@@ -864,11 +868,14 @@ const GROUP_TYPES = (yelmo = YelmoParams, ytopo = YtopoParams, ycalv = YcalvPara
                      yelmo_data = YelmoDataParams)
 
 """
-    read_nml(filename) -> YelmoParameters
+    read_nml(filename; strict=true) -> YelmoParameters
 
 Read a Yelmo namelist file and return a fully populated `YelmoParameters`.
 Groups or keys absent from the file take the defaults; unknown keys in a
 Yelmo group are an error. Other groups (a driver's `&ctrl`) are ignored.
+`strict = false` drops unknown keys with a warning instead, to read
+namelists written for an older Yelmo: renamed keys then take their
+defaults, so check the warning.
 
 # Example
 ```julia
@@ -876,9 +883,10 @@ p = read_nml("run.nml")
 println(p.ydyn.solver)   # "diva"
 ```
 """
-function read_nml(filename::AbstractString)
+function read_nml(filename::AbstractString; strict::Bool = true)
     raw = parse_nml_file(filename)
-    groups = (g => struct_from_dict(GROUP_TYPES[g], get(raw, string(g), Dict{String,String}()), string(g))
+    groups = (g => struct_from_dict(GROUP_TYPES[g], get(raw, string(g), Dict{String,String}()),
+                                    string(g); strict)
               for g in GROUPS)
     return YelmoParameters(splitext(basename(filename))[1]; groups...)   # name = stem of filename
 end

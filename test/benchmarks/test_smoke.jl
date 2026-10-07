@@ -55,7 +55,10 @@ const _NX   = length(_SPEC.xc)   # 31
                         strict = false)
 
     # 2. In-memory load — skip NetCDF entirely.
-    y_mem = YelmoModel(_SPEC, 1000.0)
+    # The IceSheetBenchmarks constructor's default is plain
+    # YelmoParameters (Fortran defaults, not all ported): pass p.
+    y_mem = YelmoModel(_SPEC, 1000.0;
+                       p = with_ported_options(YelmoParameters("bueler_b_mem")))
 
     @test y_file isa AbstractYelmoModel
     @test y_mem  isa AbstractYelmoModel

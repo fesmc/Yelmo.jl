@@ -34,7 +34,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params
 
 const WITH_LOG    = "--with-log" in ARGS
@@ -47,7 +47,7 @@ const MIRROR_TS_LOG = joinpath(@__DIR__, "fixtures", "eismint_moving_timesteps.n
 const PLOT_PATH    = joinpath(RUNDIR_ROOT, "bench_sia_eismint.png")
 
 function build_params(dt_method::Int; log_timestep::Bool = false)
-    return YelmoParameters("eismint_moving_$(dt_method)";
+    return with_ported_options(YelmoParameters("eismint_moving_$(dt_method)";
         yelmo = yelmo_params(
             dt_method     = dt_method,
             pc_method     = "HEUN",
@@ -58,19 +58,24 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             dt_min        = 0.01,
             cfl_max       = 0.5,
             log_timestep  = log_timestep,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
-        ydyn  = ydyn_params(solver="sia", uz_method=3, visc_method=1,
-                            eps_0=1e-6, taud_lim=2e5),
         ytopo = ytopo_params(solver="expl", use_bmb=false),
-        yneff = yneff_params(method=0, const_=1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(solver="sia", uz_method=3, visc_method=1,
+                            eps_0=1e-6, taud_lim=2e5,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
         ytill = ytill_params(method=-1),
-        ymat  = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3, de_max=0.5,
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3, de_max=0.5,
                             enh_method="shear3D", enh_shear=1.0,
-                            enh_stream=1.0, enh_shlf=1.0),
+                            enh_stream=1.0, enh_shlf=1.0,
+            rf_method = -1),
         # Mirror Fortran's EISMINT-moving config: `ytherm.method = "fixed"`,
         # so `therm_step!` is a no-op for this benchmark.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 function run_yelmo(label::String, dt_method::Int, dt_outer::Float64;

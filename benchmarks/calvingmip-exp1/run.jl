@@ -41,7 +41,7 @@ const RESTART_FINAL  = joinpath(OUTPUT_DIR, "restart_final.nc")
 
 function _build()
     b = CalvingMIPBenchmark(:exp1; dx_km = DX_KM)
-    p = YelmoParameters(NAMELIST_PATH, "calvingmip_exp1")
+    p = with_ported_options(YelmoParameters(NAMELIST_PATH, "calvingmip_exp1"))
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
     # Attach the exp1 calving-rate hook (captures b's xc/yc).

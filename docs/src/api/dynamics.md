@@ -36,9 +36,9 @@ calc_lateral_bc_stress_2D!
 calc_ydyn_neff!
 ```
 
-The kernel dispatches on `y.p.yneff.method` ∈ `{-1, 0, 1, 2, 3, 4, 5}`
-— see the docstring for the per-method formulas. Subgrid sampling
-(`yneff.nxi > 0`) is not yet ported.
+The kernel dispatches on the N closure `y.p.yhyd.bkt_N_closure` ∈
+`{-1, 0, 1, 2, 3, 4}` — see the docstring for the per-closure formulas.
+Subgrid sampling (`ydyn.neff_nxi > 0`) is not yet ported.
 
 ## Basal-roughness chain
 

@@ -37,9 +37,13 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # 3c–3f. This test exercises the scaffolding round-trip, not the
     # physics — leaving the solver at its default `"diva"` would error
     # in `dyn_step!`.
-    p = YelmoParameters("ymodel-v0";
-                             ydyn   = ydyn_params(solver="fixed"),
-                             ytherm = ytherm_params(method="fixed"))
+    p = with_ported_options(YelmoParameters("ymodel-v0";
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                             ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                             ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                             ytherm = ytherm_params(method="fixed"),
+                         ))
 
     y = YelmoModel(
         RESTART_PATH, 0.0;
@@ -122,9 +126,13 @@ end
     rundir   = mktempdir(; prefix="yelmo_model_scratch_")
     out_path = joinpath(rundir, "yelmo_scratch.nc")
 
-    p = YelmoParameters("ymodel-scratch";
-                             ydyn   = ydyn_params(solver="fixed"),
-                             ytherm = ytherm_params(method="fixed"))
+    p = with_ported_options(YelmoParameters("ymodel-scratch";
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                             ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                             ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                             ytherm = ytherm_params(method="fixed"),
+                         ))
 
     y = YelmoModel(
         RESTART_PATH, 0.0;

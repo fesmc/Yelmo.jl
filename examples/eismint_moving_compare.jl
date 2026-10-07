@@ -43,7 +43,7 @@ include("../test/benchmarks/helpers.jl")
 using .YelmoBenchmarks
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params
 
 import CairoMakie as CM
@@ -70,7 +70,7 @@ const RERUN = "--rerun" in ARGS
 # Yelmo.jl 25-kyr trajectory: run + cache (or load cached)
 # ----------------------------------------------------------------------
 function _eismint_moving_params()
-    return YelmoParameters("eismint_moving_compare";
+    return with_ported_options(YelmoParameters("eismint_moving_compare";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",
@@ -80,18 +80,22 @@ function _eismint_moving_params()
             pc_n_redo     = 5,
             dt_min        = 0.01,
             cfl_max       = 0.5,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
+        ytopo = ytopo_params(solver = "expl", use_bmb = false),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver       = "sia",
             uz_method    = 3,
             visc_method  = 1,
             eps_0        = 1e-6,
             taud_lim     = 2e5,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50
         ),
-        ytopo = ytopo_params(solver = "expl", use_bmb = false),
-        yneff = yneff_params(method = 0, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 1e-16,
             visc_min   = 1e3,
@@ -100,8 +104,10 @@ function _eismint_moving_params()
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-    )
+        ytherm = ytherm_params(method = "temp"),
+    ))
 end
 
 function _run_yelmo_25kyr(b::EISMINT1MovingBenchmark)

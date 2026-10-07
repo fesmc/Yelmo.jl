@@ -122,7 +122,7 @@ Set in `build_params()`; everything else uses Yelmo.jl defaults.
 | Thermodynamics | `method = "temp"` | full temperature solver |
 | Flow law | Glen, `rf_method = 1` | temperature-dependent rate factor |
 | Calving | `vm-l19` | eigencalving (von Mises) |
-| Effective pressure | till pressure (`yneff.method = 3`) | |
+| Effective pressure | till pressure (`yhyd.bkt_N_closure = 3`) | |
 | Vertical layers | 10 ice + 5 bedrock | `nz_aa = 10`, `nzr_aa = 5` |
 | Timestep | adaptive PC (`dt_method = 2`) | HEUN (yelmo) / AB-SAM (mirror) |
 | Initialisation | `robin-cold` | from topography, no restart |
