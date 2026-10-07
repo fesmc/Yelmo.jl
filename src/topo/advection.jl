@@ -26,8 +26,8 @@
 # used by the explicit scheme to avoid per-call allocation of the
 # tendency array.
 #
-# Used in `topo_step!` for both ice thickness `H_ice` (advected at
-# the depth-averaged ice velocity `(ux_bar, uy_bar)`) and the
+# Used by the topography stages for both ice thickness `H_ice` (advected
+# at the transport velocity, `advection_tendency!`) and the
 # level-set function `lsf` (advected at `u_bar + cr` — see
 # `lsf_update!`).
 # ----------------------------------------------------------------------
@@ -62,7 +62,7 @@ the Fortran code path):
 
   - `"impl"`, `"impl-lis"` → `:upwind_implicit`
   - `"expl"`, `"expl-upwind"` → `:upwind_explicit`
-  - `"none"` → `:none` (advection skipped — see `topo_step!`)
+  - `"none"` → `:none` (no advection — see `_advection_rate!`)
 
 Other Fortran namelist values (`"expl"`, `"impl-upwind"`,
 `"expl-sico"`, `"impl-sico"`, `"impl-sico-lis"`) are recognised by
@@ -402,23 +402,19 @@ Compute the pure advective tendency `dHdt = (H_advected − H_ice) / dt`
 [m/yr] without permanently modifying `H_ice`. Mirrors Fortran
 `calc_G_advec_simple` (`yelmo/src/physics/mass_conservation.f90`).
 
-Implementation (snapshot-diff): copy `H_ice` into `H_scratch`, run
-`advect_tracer!` mutating `H_ice` in place, write the difference into
-`dHdt`, then restore `H_ice` from `H_scratch`. `H_scratch` must be a
-plain `Array` of the same `interior` size as `H_ice`; the caller owns
-it (typically a PC scratch buffer).
-
-Used by the advective-PC path (`pc_advective = true`) inside
-`topo_pc_step!`. The implicit-LIS solver path is supported because
-both `advect_tracer!` schemes mutate `H_ice` identically.
+`dHdt` and `H_scratch` are plain arrays of the `interior` size of
+`H_ice`; the caller owns them. Implementation (snapshot-diff): copy
+`H_ice` into `H_scratch`, run `advect_tracer!` mutating `H_ice` in
+place, write the difference into `dHdt`, then restore `H_ice`. Used by
+the predictor and corrector topography stages; both `advect_tracer!`
+schemes (explicit, implicit) are supported.
 """
-function advection_tendency!(dHdt, H_ice, ux_bar, uy_bar, dt::Real,
+function advection_tendency!(dHdt::AbstractArray, H_ice, ux_bar, uy_bar, dt::Real,
                              H_scratch::AbstractArray;
                              scheme::Symbol = :upwind_explicit,
                              cache = nothing,
                              cfl_safety::Real = 0.1)
-    H_int  = interior(H_ice)
-    dH_int = interior(dHdt)
+    H_int = interior(H_ice)
     copyto!(H_scratch, H_int)
 
     advect_tracer!(H_ice, ux_bar, uy_bar, dt;
@@ -427,8 +423,8 @@ function advection_tendency!(dHdt, H_ice, ux_bar, uy_bar, dt::Real,
                    cfl_safety = cfl_safety)
 
     inv_dt = 1.0 / dt
-    @inbounds @simd for i in eachindex(dH_int)
-        dH_int[i] = (H_int[i] - H_scratch[i]) * inv_dt
+    @inbounds @simd for i in eachindex(dHdt)
+        dHdt[i] = (H_int[i] - H_scratch[i]) * inv_dt
     end
     copyto!(H_int, H_scratch)
     return dHdt

@@ -15,7 +15,7 @@ using Yelmo
 using Yelmo.YelmoPar: YelmoParameters, yelmo_params
 
 p = YelmoParameters("my_run";
-    yelmo = yelmo_params(timing = true, dt_method = 2, pc_method = "HEUN", ...),
+    yelmo = yelmo_params(timing = true, dt_method = 2, pc_method = "AB-SAM", ...),
     # ...other groups...
 )
 
@@ -62,11 +62,12 @@ When `timing = true`, the model carries a `YelmoTimer` (accessible as
 
 | Section            | What it wraps                                                  |
 |--------------------|----------------------------------------------------------------|
-| `:topo`            | One full `topo_step!`                                          |
+| `:topo`            | One topography stage (`topo_step!(y, dt, ::PCStage)`)          |
+| `:topo_pred`       | The predictor stage (incl. the transport velocity)             |
+| `:topo_corr`       | The corrector stage (incl. the transport velocity)             |
+| `:topo_adv`        | The advance stage                                              |
 | `:dyn`             | One full `dyn_step!`                                           |
 | `:mat`             | One full `mat_step!`                                           |
-| `:pc_predictor`    | The HEUN predictor stage (one full FE pipeline)                |
-| `:pc_corrector`    | The HEUN corrector stage (one full FE pipeline)                |
 | `:dyn_sia`         | `calc_velocity_sia!` (SIA / hybrid solver branch)              |
 | `:dyn_jacobian_uxy`| `calc_jacobian_vel_3D_uxyterms!` (Jacobian Step 1)             |
 | `:dyn_uz`          | `calc_uz_3D_jac!` (vertical velocity from continuity)          |
@@ -97,11 +98,6 @@ A few subtleties:
   `dyn`'s "missing" % is unaccounted-for time inside `dyn` (e.g.
   driving stress, lateral BC, drag chain) — wrap those if you need
   to see them.
-- **`pc_predictor` and `pc_corrector` are wrappers**, not phases —
-  each one wraps a *whole* `_step_fe!` call. Their `%tot` is computed
-  against the same top-level total, so they will appear larger than
-  any single phase. They are listed separately at the bottom of the
-  table to make this visible.
 
 ## When to enable it
 

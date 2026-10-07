@@ -6,8 +6,8 @@ the [dynamics page](../physics/dynamics.md) for the narrative
 description of the SIA solver, basal-friction chain, and lateral
 boundary stress.
 
-The dynamics step is invoked from `step!(y::YelmoModel, dt)` after
-[`topo_step!`](@ref). Currently supports `solver = "fixed"` (no
+The dynamics step is invoked from `step!(y::YelmoModel, dt)` between
+the predictor and corrector topography stages ([`topo_step!`](@ref)). Currently supports `solver = "fixed"` (no
 velocity update) and `solver = "sia"` (Option C SIA wrapper); SSA /
 hybrid / DIVA solvers land in subsequent milestones.
 

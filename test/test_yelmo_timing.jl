@@ -106,7 +106,7 @@ end
 
         # All instrumented sections recorded.
         expected = [:topo, :dyn, :mat,
-                    :pc_predictor, :pc_corrector,
+                    :topo_pred, :topo_corr, :topo_adv,
                     :dyn_sia, :dyn_jacobian_uxy, :dyn_uz,
                     :dyn_jacobian_uz, :dyn_strain]
         for s in expected
@@ -121,8 +121,13 @@ end
         @test y_on.timer.counts[:dyn_jacobian_uxy] == y_on.timer.counts[:dyn]
         @test y_on.timer.counts[:dyn_sia]          == y_on.timer.counts[:dyn]
 
-        # Each PC outer step pairs one predictor and one corrector.
-        @test y_on.timer.counts[:pc_predictor] == y_on.timer.counts[:pc_corrector]
+        # Each attempt pairs one predictor and one corrector with one
+        # velocity solve; :topo wraps the three stages.
+        @test y_on.timer.counts[:topo_pred] == y_on.timer.counts[:topo_corr]
+        @test y_on.timer.counts[:topo_pred] == y_on.timer.counts[:dyn]
+        @test y_on.timer.counts[:topo] == y_on.timer.counts[:topo_pred] +
+                                          y_on.timer.counts[:topo_corr] +
+                                          y_on.timer.counts[:topo_adv]
 
         # `print_timings` produces non-empty output that mentions the
         # top-level sections.

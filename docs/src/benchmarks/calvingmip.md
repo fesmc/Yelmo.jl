@@ -38,8 +38,8 @@ y.hooks.calv_flt = (cx, cy, ux, uy, Hi, fi, lsf, t) ->
 ```
 
 This hook pattern is how experiment-specific calving laws are attached to
-`YelmoModel` without modifying the model core.  At each `topo_step!` call
-the model invokes `y.hooks.calv_flt` to populate `tpo.cr_acx` / `tpo.cr_acy`
+`YelmoModel` without modifying the model core.  In each predictor and corrector
+topography stage the model invokes `y.hooks.calv_flt` to populate `tpo.cr_acx` / `tpo.cr_acy`
 before the level-set advection phase.
 
 ## What it tests

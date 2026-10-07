@@ -74,7 +74,7 @@ the topography step (e.g. `bnd.smb_ref`, `bnd.z_bed`, `bnd.bmb_shlf`).
 
 ## Topography group (`tpo`)
 
-The state evolved by `topo_step!`. Holds the prognostic ice thickness
+The state evolved by the topography stages (`topo_step!`). Holds the prognostic ice thickness
 `H_ice`, all the diagnostic and bookkeeping fields (`H_grnd`,
 `f_grnd`, `f_ice`, `z_srf`, `z_base`, …), the seven mass-balance
 contributions (`smb`, `bmb`, `fmb`, `dmb`, `cmb`, `mb_relax`,

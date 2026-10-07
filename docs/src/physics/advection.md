@@ -2,10 +2,11 @@
 
 Yelmo.jl uses an **explicit first-order upwind** scheme for 2D tracer
 advection on a regular Arakawa C-staggered grid. The same kernel
-([`advect_tracer!`](@ref)) is used twice in a single `topo_step!`:
+([`advect_tracer!`](@ref)) is used twice in each predictor and corrector
+topography stage:
 
-- Phase 2 — to advect ice thickness `H_ice` at the depth-averaged
-  ice velocity `(ux_bar, uy_bar)`.
+- Transport — to advect ice thickness `H_ice` at the transport velocity
+  (the depth-averaged velocity, faces into ice-free cells closed).
 - Calving phase 6 — to advect the level-set function `lsf` at the
   calving-front velocity `(ux_bar + cr_acx, uy_bar + cr_acy)`.
 
@@ -121,7 +122,7 @@ yet on the milestone list.
 - Direct kernel-level unit tests on synthetic velocity fields
   (passive transport at uniform `u`, mass conservation under a
   closed flow, no advance with zero velocity).
-- Indirect coverage through `topo_step!` integration tests
+- Indirect coverage through the topography integration tests
   (slab conservation, Greenland 16km five-step smoke).
 - The level-set test inventory exercises advection again for the
   calving pipeline (see the [calving page](calving.md)).

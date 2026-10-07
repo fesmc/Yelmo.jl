@@ -957,6 +957,30 @@ function _load_yelmo_variable_meta()
     )
 end
 
+"""
+    PC_STAGE_FIELDS
+
+Topography fields recorded by the predictor and corrector stages
+(Fortran `tpo%now%pred` / `tpo%now%corr`, yelmo_topography.f90:381-433),
+as far as YelmoModel has them.
+"""
+const PC_STAGE_FIELDS = (:H_ice, :dHidt_dyn, :mb_net, :mb_relax, :mb_resid, :mb_clip,
+                         :smb, :bmb, :fmb, :dmb, :cmb, :cmb_flt, :cmb_grnd, :lsf,
+                         :cmb_flt_acx, :cmb_flt_acy, :cmb_grnd_acx, :cmb_grnd_acy,
+                         :cr_acx, :cr_acy)
+
+# One stage record: name => array. Where the topo schema has the output
+# field `<prefix><name>` (`pc_pred_H_ice`, …, as in Fortran's restart and
+# output files) the record is that field's interior; otherwise a plain array.
+function _alloc_pc_stage(tpo, prefix::String)
+    names = filter(k -> haskey(tpo, k), PC_STAGE_FIELDS)
+    arrays = map(names) do k
+        out = Symbol(prefix, k)
+        haskey(tpo, out) ? interior(tpo[out]) : zeros(Float64, size(interior(tpo[k])))
+    end
+    return NamedTuple{names}(arrays)
+end
+
 # Build the six component-group NamedTuples (`bnd`, `dta`, `dyn`, `mat`,
 # `thrm`, `tpo`) for a `YelmoModel`, including:
 #
@@ -1126,6 +1150,20 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     # the explicit path uses the preallocated `tend` buffer.
     tpo_scratch = (adv_cache = Ref{Any}(nothing),)
     tpo = merge(tpo, (scratch = tpo_scratch,))
+
+    # Predictor-corrector records (src/timestepping.jl, topo stages in
+    # src/topo/YelmoModelTopo.jl): the outputs of the predictor and
+    # corrector stages (Fortran `tpo%now%pred` / `tpo%now%corr`), the raw
+    # advective rate of the current step `dHidt_dyn_raw` (f_n; the previous
+    # step's is the schema field `dHidt_dyn_raw_n`), and the transport
+    # velocity (Fortran `calc_transport_velocity`). `H_tmp` is the
+    # snapshot buffer of `advection_tendency!`.
+    tpo = merge(tpo, (pc = (pred          = _alloc_pc_stage(tpo, "pc_pred_"),
+                            corr          = _alloc_pc_stage(tpo, "pc_corr_"),
+                            dHidt_dyn_raw = zeros(Float64, size(interior(tpo.H_ice))),
+                            H_tmp         = zeros(Float64, size(interior(tpo.H_ice))),
+                            ux_t          = XFaceField(g),
+                            uy_t          = YFaceField(g)),))
 
     # `dta.rmse`: scalar comparison metrics filled by `data_compare!`
     # (src/data/YelmoModelData.jl). Initialised to NaN so absence of a
@@ -1897,42 +1935,22 @@ function dyn_step!   end
 function mat_step!   end
 function therm_step! end
 
-# `step!(::YelmoModel, dt)` orchestrates the per-component physics chain in
-# a fixed phase order (tpo → dyn → mat → therm). Phase order matches the
-# Fortran per-step loop at `yelmo_ice.f90:268-286` (predictor topo →
-# `calc_ydyn` → `calc_ymat` → `calc_ytherm` → corrector topo). `dyn_step!`
-# reads the previous step's `mat.ATT`; `mat_step!` then computes a fresh
-# `ATT` (and viscosity, stress, ...) from the just-solved velocity field
-# for the next step. Methods for the `<comp>_step!` calls below are added
-# by the corresponding phase modules at load time. `YelmoMirror` overrides
-# `step!` in `YelmoMirrorCore` to call the C API instead of the per-phase
-# chain.
+# `step!(::YelmoModel, dt)` advances the model with the predictor-corrector
+# time loop of Fortran `yelmo_update` (src/timestepping.jl): per step,
+# predictor topography → `dyn_step!` → corrector topography → error check
+# (redo with a smaller dt if too large) → `mat_step!` → `therm_step!` →
+# advance topography. Methods for the `<comp>_step!` calls are added by the
+# phase modules at load time. `YelmoMirror` overrides `step!` in
+# `YelmoMirrorCore` to call the C API instead.
 function step!(y::YelmoModel, dt::Float64)
-    # Backend dispatch:
-    #
-    #   - `y.p === nothing` (parameter-less benchmark constructions):
-    #     fall through to a plain forward-Euler chain via `_step_fe!`,
-    #     so simple in-memory test setups work without parameters.
-    #   - Otherwise route through `_select_step!` (src/timestepping.jl)
-    #     which dispatches on `y.p.yelmo.dt_method`. Both `dt_method=0`
-    #     (fixed-dt Heun, no controller) and `dt_method=2` (adaptive
-    #     Heun + PI42) run the PC machinery so `eta` is always
-    #     available as a diagnostic.
-    if y.p === nothing
-        return _step_fe!(y, dt)
-    else
-        return _select_step!(y, dt)
-    end
+    y.p isa YelmoParameters ||
+        error("step!(::YelmoModel): stepping needs YelmoParameters (got $(typeof(y.p))).")
+    return _select_step!(y, dt)
 end
-
-# Forward declaration: body lives in src/timestepping.jl. Defining the
-# symbol here lets `step!` reference it before timestepping.jl is
-# included.
-function _step_fe! end
 
 # Forward declaration — body lives in src/timestepping.jl. Defining
 # the symbol here keeps `step!` self-contained even though the
-# adaptive backend is added by a later include.
+# time-stepping backend is added by a later include.
 function _select_step! end
 
 # ---------------------------------------------------------------------------

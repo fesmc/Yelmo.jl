@@ -90,6 +90,7 @@ order of likelihood:
    `(group, name)` pair; bisect by stepping one component at a time
    to localise the divergence.
 
-A useful pattern when bisecting is to run with `step!` replaced by
-the per-component function (`topo_step!(y, dt)` only) so each
+A useful pattern when bisecting is to call the per-component functions
+(`dyn_step!`, `mat_step!`, the topography stages
+`topo_step!(y, dt, ::PCStage)`) directly instead of `step!`, so each
 component's port can be validated in isolation.

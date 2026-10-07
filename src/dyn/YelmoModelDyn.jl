@@ -6,9 +6,9 @@ the horizontal velocity solution from the current `tpo`/`mat`/`thrm`/
 `bnd` state, plus all derived stress and velocity-magnitude
 diagnostics.
 
-Public surface: `dyn_step!(y::YelmoModel, dt)`, dispatched from
-`YelmoCore.step!(::YelmoModel, dt)` after `topo_step!` in the fixed
-phase order.
+Public surface: `dyn_step!(y::YelmoModel, dt)`, called by the time
+loop (src/timestepping.jl) between the predictor and corrector
+topography stages.
 
 Milestone 3d (current): scaffolding + pre-solver kinematics +
 post-solver diagnostics (3a) + bed-roughness chain (3b) + SIA
@@ -160,8 +160,8 @@ Fortran's `calc_ydyn` body (`yelmo_dynamics.f90:48`):
    basal velocity slices, basal-to-surface ratio `f_vbvs`, time
    derivative `duxydt` (milestone 3a, deferred).
 
-`dyn_step!` does NOT advance `y.time` — that is owned by `topo_step!`
-which runs first.
+`dyn_step!` does NOT advance `y.time` — that is owned by the time
+loop (src/timestepping.jl).
 """
 function dyn_step!(y::YelmoModel, dt::Float64)
     # 1. Snapshot prev depth-averaged velocity (used by topo PC and

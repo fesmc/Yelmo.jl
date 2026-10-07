@@ -1,48 +1,56 @@
-# `topo_step!` — phase-level reference
+# Topography stages — phase-level reference
 
-`topo_step!(y::YelmoModel, dt)` advances the topography component
-`y.tpo` by `dt` years. Phase order matches the Fortran reference
-`yelmo_topography.f90:calc_ytopo_pc` predictor/corrector body
-(line 172 onward), one phase per `apply_tendency!` call so each
-contribution to `mb_net` is realised and recorded individually.
+The topography is advanced in the stages of the predictor-corrector time
+loop (`src/timestepping.jl`), a port of Fortran `calc_ytopo_pc`
+(`yelmo_topography.f90`):
 
-## Phase pipeline
+| Stage | Call | Result |
+|---|---|---|
+| Predictor | `topo_step!(y, dt, PCPredictor(); β1, β2)` | `H_pred` (live state and `tpo.pc.pred`), for the velocity solve |
+| Corrector | `topo_step!(y, dt, PCCorrector(); β3, β4)` | `H_corr` (`tpo.pc.corr`); live state back to `H_n` |
+| Advance | `topo_step!(y, dt, PCAdvance(); use_H_pred)` | `H_{n+1}` = predictor or corrector record |
+
+The predictor and corrector transport `H_n` with the transport velocity
+(the depth-averaged velocity, filtered with `yelmo.pc_filter_vel`, faces
+into ice-free cells closed) and mixed advective rates
+
+- predictor: `dHidt_dyn = β1·f(H_n, u_n) + β2·f_{n-1}`
+- corrector: `dHidt_dyn = β3·f(H_pred, u*) + β4·f(H_n, u_n)`
+
+(`f(H_n, u_n)` is `tpo.pc.dHidt_dyn_raw`, `f_{n-1}` is `dHidt_dyn_raw_n`;
+the β come from `yelmo.pc_method`), then run the mass-balance cascade below,
+one `apply_tendency!` per contribution so each is realised and recorded.
+
+## Phase pipeline (predictor and corrector)
 
 | # | Phase | Helper(s) | Output | Notes |
 |---|---|---|---|---|
-| 1 | Snapshot `H_ice` | — | `H_prev`, `tpo.H_ice_n` | `H_ice_n` feeds the `topo_rel_field == "H_ice_n"` relaxation target. |
-| 2 | Advection | `advect_tracer!` | `tpo.H_ice` | Skipped if `ytopo.topo_fixed`. Generic 2D tracer advection; reused by `lsf_update!`. |
-| 3 | Mask post-step | `_apply_mask_ice_pass!` | `tpo.H_ice` | `bnd.mask_ice ∈ {NONE, FIXED, DYNAMIC}` per cell. |
-| 4 | Snapshot for `dHidt_dyn` | — | `H_after_dyn` | Captures the dynamic contribution before any tendency. |
-| 5 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | Binary stub for v1; fractional later. |
-| 6 | **SMB** | `mbal_tendency!`, `apply_tendency!` | `tpo.smb`, `tpo.H_ice` | Source: `bnd.smb_ref`. |
-| 7 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 8 | **BMB** | `calc_H_grnd!`, `determine_grounded_fractions!`, `calc_bmb_total!`, `mbal_tendency!`, `apply_tendency!` | `tpo.H_grnd`, `tpo.f_grnd_bmb`, `tpo.bmb_ref`, `tpo.bmb`, `tpo.H_ice` | Refreshes `H_grnd` and `f_grnd_bmb` from the *current* state. Combines `thrm.bmb_grnd` and `bnd.bmb_shlf` per `ytopo.bmb_gl_method`. Skipped if `ytopo.use_bmb == false`. |
-| 9 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 10 | **FMB** | `calc_fmb_total!`, `mbal_tendency!`, `apply_tendency!` | `tpo.fmb_ref`, `tpo.fmb`, `tpo.H_ice` | Submerged-front parameterisation. Same `use_bmb` gate as Fortran. |
-| 11 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 12 | **DMB** | `calc_mb_discharge!`, `mbal_tendency!`, `apply_tendency!` | `tpo.dmb_ref`, `tpo.dmb`, `tpo.H_ice` | v1 stub: only `dmb_method = 0` (no-op) is implemented. |
-| 13 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 14 | **Calving** | `calving_step!` | `tpo.cmb`, `tpo.lsf`, `tpo.cr_acx`, `tpo.cr_acy`, `tpo.dlsfdt`, `tpo.cmb_flt`, `tpo.cmb_grnd`, `tpo.H_ice` | Level-set flux method only (no aa/mb-form). Gated on `ycalv.use_lsf`. See [the calving page](calving.md). |
-| 15 | **Relaxation** (optional) | `set_tau_relax!`, `calc_G_relaxation!`, `apply_tendency!` | `tpo.tau_relax`, `tpo.mb_relax`, `tpo.H_ice` | Skipped when `ytopo.topo_rel == 0`. |
-| 16 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 17 | **Residual cleanup** | `resid_tendency!`, `apply_tendency!` | `tpo.mb_resid`, `tpo.H_ice` | Min-thickness margins, islands, neighbour cap. |
-| 18 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | |
-| 19 | Net mass balance | — | `tpo.mb_net` | `smb + bmb + fmb + dmb + mb_relax + mb_resid`. |
-| 20 | Diagnostics | `_update_diagnostics!` | `tpo.H_grnd`, `tpo.f_grnd*`, `tpo.f_grnd_pin`, `tpo.z_srf`, `tpo.z_base`, `tpo.dHidt`, `tpo.dHidt_dyn`, `tpo.dist_grline`, `tpo.dist_margin`, `tpo.mask_grz`, `tpo.mask_bed`, `tpo.mask_frnt`, `tpo.dzsdx/dy`, `tpo.dHidx/y`, `tpo.dzbdx/dy`, `tpo.H_ice_dyn`, `tpo.f_ice_dyn` | Final-state refresh. `f_grnd` dispatches on `ytopo.gl_sep` (linear / area / CISM). Distance fields, masks, gradients, and dynamic-thickness fields are computed here so `dyn_step!` can read them. |
-| 21 | `y.time += dt` | — | — | |
+| 1 | Store `H_ice_n`, `z_srf_n`, `lsf_n` | — | `tpo.H_ice_n`, … | Predictor only. `H_ice_n` is also the `topo_rel_field == "H_ice_n"` relaxation target. |
+| 2 | Advective rate | `advection_tendency!` | `tpo.pc.dHidt_dyn_raw` / `tpo.dHidt_dyn` | Zero with `ytopo.solver = "none"`. |
+| 3 | Transport | `apply_tendency!(…; mb_clip)` | `tpo.H_ice`, `tpo.dHidt_dyn`, `tpo.mb_clip` | Mixed rate applied to `H_n`; the clip of negative thickness is booked in `mb_clip`. |
+| 4 | `f_ice` refresh | `calc_f_ice!` | `tpo.f_ice` | Binary (`front_subgrid = "none"`). |
+| 5 | **SMB** | `mbal_tendency!`, `apply_tendency!` | `tpo.smb`, `tpo.H_ice` | Source: `bnd.smb_ref`. |
+| 6 | **BMB** | `calc_H_grnd!`, `determine_grounded_fractions!`, `calc_bmb_total!`, `mbal_tendency!`, `apply_tendency!` | `tpo.H_grnd`, `tpo.f_grnd_bmb`, `tpo.bmb_ref`, `tpo.bmb`, `tpo.H_ice` | Combines `thrm.bmb_grnd` and `bnd.bmb_shlf` per `ytopo.bmb_gl_method`. Skipped if `ytopo.use_bmb == false`. |
+| 7 | **FMB** | `calc_fmb_total!`, `mbal_tendency!`, `apply_tendency!` | `tpo.fmb_ref`, `tpo.fmb`, `tpo.H_ice` | Same `use_bmb` gate as Fortran. |
+| 8 | **DMB** | `calc_mb_discharge!`, `mbal_tendency!`, `apply_tendency!` | `tpo.dmb_ref`, `tpo.dmb`, `tpo.H_ice` | Only `dmb_method = 0` (no-op) is implemented. |
+| 9 | **Calving** | `calving_step!` | `tpo.cmb`, `tpo.lsf`, `tpo.cr_acx`, `tpo.cr_acy`, `tpo.cmb_flt`, `tpo.cmb_grnd`, `tpo.H_ice` | Level-set flux method only. Gated on `ycalv.use_lsf`. See [the calving page](calving.md). |
+| 10 | **Relaxation** (optional) | `set_tau_relax!`, `calc_G_relaxation!`, `apply_tendency!` | `tpo.tau_relax`, `tpo.mb_relax`, `tpo.H_ice` | Skipped when `ytopo.topo_rel == 0`. |
+| 11 | **Residual cleanup** | `resid_tendency!`, `apply_tendency!` | `tpo.mb_resid`, `tpo.H_ice` | `bnd.mask_ice` (no ice / fixed thickness), minimum-thickness margins, islands. |
+| 12 | Net mass balance | — | `tpo.mb_net` | `smb + bmb + fmb + dmb + mb_relax + mb_resid` (calving `cmb` is separate). |
+| 13 | Rates | `_stage_rates!` | `tpo.dHidt`, `tpo.dlsfdt`, `tpo.mb_err` | Relative to `H_ice_n`, `lsf_n`. |
+| 14 | Diagnostics | `update_diagnostics!` | `tpo.H_grnd`, `tpo.f_grnd*`, `tpo.f_grnd_pin`, `tpo.z_srf`, `tpo.z_base`, `tpo.dist_grline`, `tpo.dist_margin`, `tpo.mask_grz`, `tpo.mask_bed`, `tpo.mask_frnt`, `tpo.dzsdx/dy`, `tpo.dHidx/y`, `tpo.dzbdx/dy`, `tpo.H_ice_dyn`, `tpo.f_ice_dyn` | `f_ice` is refreshed after every phase that changes `H_ice`. |
 
-Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
-`apply_tendency!` clipping tolerance. Verified in the integration tests.
+Mass-conservation invariant: `dHidt = dHidt_dyn + mb_clip + mb_net + cmb`
+(`mb_err ≈ 0`). Verified in the integration tests.
 
 ## Implementation status (Milestone 2)
 
 **Done**
 
-- Phase 1 (advection): `advect_tracer!` — generic 2D tracer advection
-  (explicit upwind via Oceananigans operators), used both for `H_ice`
-  here and for `lsf` in calving.
-- Phases 2–6, 8–13, 15–18 (the per-cell mass-balance pipeline).
+- Advection: `advect_tracer!` — generic 2D tracer advection
+  (explicit upwind via Oceananigans operators, or implicit), used both
+  for `H_ice` here and for `lsf` in calving.
+- The predictor-corrector stages and the per-cell mass-balance pipeline.
 - Subgrid `f_grnd` via the full CISM bilinear-interpolation scheme,
   with a numerically stable `_calc_fraction_above_zero` kernel that
   improves on the Fortran reference. See
@@ -52,23 +60,21 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 **Done (milestone 2c — calving)**
 
-- Phase 14 — level-set flux calving via `calving_step!`. Three laws
+- Level-set flux calving via `calving_step!`. Three laws
   ported (`equil`, `threshold`, `vm-m16` stub). Sussman/Osher
   redistancing (Fortran `lsf_method = "redist"`). Full pipeline documented in [the calving page](calving.md).
 
 **Deferred to later milestones**
 
-- Phase 12 (DMB): the Calov+ 2015 kernel needs `dist_grline` and
+- DMB: the Calov+ 2015 kernel needs `dist_grline` and
   `dist_margin` distance-to-feature fields, which are not yet
   computed on the Julia side. The `calc_mb_discharge!` signature
   already mirrors Fortran for drop-in completion later.
-- Phase 8 (BMB) `bmb_gl_method = "pmpt"` (subgrid tidal-zone
+- BMB `bmb_gl_method = "pmpt"` (subgrid tidal-zone
   parameterisation) — needs `calc_subgrid_array`. The other four
   methods (`fcmp`, `fmp`, `pmp`, `nmp`) are wired through.
-- Phase 15 relaxation `topo_rel == 4` — needs `mask_grz` from the
+- Relaxation `topo_rel == 4` — needs `mask_grz` from the
   grounding-zone diagnostic.
-- Predictor-corrector wrapping (`pred`/`corr` substructs).
-- Implicit advection solver (`impl-lis`).
 
 ## Inputs and outputs
 

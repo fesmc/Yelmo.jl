@@ -16,25 +16,25 @@ thermodynamics from a Robin profile in the mirror) and sets
 
 ### `YelmoModel`
 
-`step!(y::YelmoModel, dt)` calls each component's per-step function
-in fixed phase order (currently only the topography component is
-ported):
+`step!(y::YelmoModel, dt)` runs the predictor-corrector time loop of
+Fortran `yelmo_update` (`src/timestepping.jl`). Each internal step:
 
 ```julia
-function step!(y::YelmoModel, dt::Float64)
-    topo_step!(y, dt)
-    # dyn_step!(y, dt)   — future milestone
-    # mat_step!(y, dt)   — future milestone
-    # therm_step!(y, dt) — future milestone
-    return y
-end
+topo_step!(y, dt_now, PCPredictor(); β1, β2)   # H_pred
+dyn_step!(y, dt_now)                           # velocity at H_pred
+topo_step!(y, dt_now, PCCorrector(); β3, β4)   # H_corr (state back to H_n)
+# truncation error from H_corr − H_pred; redo with a smaller dt if too large
+mat_step!(y, dt_now)
+therm_step!(y, dt_now)
+topo_step!(y, dt_now, PCAdvance(); use_H_pred) # H_{n+1}
 ```
 
-The topography step is described in detail on the
-[topography page](../physics/topography.md). It is a 21-phase
-predictor / corrector body that mirrors Fortran's `calc_ytopo_pc`,
-applying each contribution to `mb_net` individually so the per-phase
-realised tendency is recorded.
+The β coefficients come from `yelmo.pc_method` (`"AB-SAM"`, `"HEUN"`,
+`"FE-SBE"`). `yelmo.dt_method = 0` takes the whole `dt` as one step (more
+if a step is redone); `dt_method = 2` chooses the steps with the PI
+controller (`pc_controller`, `pc_eps`, `pc_tol`, `pc_n_redo`). The first
+step of a model is `dt_min`. The topography stages are described on the
+[topography page](../physics/topography.md).
 
 `init_state!(y::YelmoModel, time)` is currently a thin wrapper that
 sets `y.time = time`; per-component initialisation will land as
@@ -100,13 +100,15 @@ holds a complete record of the per-phase mass-balance contributions:
 | `tpo.cmb`      | Calving mass balance |
 | `tpo.mb_relax` | Relaxation tendency |
 | `tpo.mb_resid` | Residual / cleanup tendency |
-| `tpo.mb_net`   | Sum of the above |
+| `tpo.mb_net`   | Sum of the above except `cmb` |
 | `tpo.dHidt`    | Total `(H - H_prev) / dt` |
-| `tpo.dHidt_dyn`| Dynamic contribution (post-advection, pre-mass-balance) |
+| `tpo.dHidt_dyn`| Applied transport rate |
+| `tpo.mb_clip`  | Clip of negative thickness after transport |
+| `tpo.mb_err`   | Budget residual `dHidt − (dHidt_dyn + mb_clip + mb_net + cmb)` |
 
-The closure `dHidt = dHidt_dyn + mb_net` holds to within
-`apply_tendency!`'s tolerance and is verified in the integration
-tests (slab conservation tests in `test_yelmo_topo.jl`).
+As in Fortran, the budget closes to round-off (`mb_err ≈ 0`), since
+every tendency is applied with `apply_tendency!(…; adjust_mb = true)`;
+the slab conservation tests in `test_yelmo_topo.jl` check it.
 
 ## CFL and timestep choice
 
@@ -127,10 +129,6 @@ more sub-steps, so the stable per-step throughput scales as
 `1 / dt_outer`-cleared. There's no advantage to running with
 `dt = 0.01` years over `dt = 1.0`; the latter just performs the
 sub-stepping internally.
-
-The Yelmo Fortran predictor / corrector wrapping is **not** yet ported
-to the Julia side. Production runs that need PC adaptive time-stepping
-should currently use the [`YelmoMirror`](@ref) backend.
 
 ## Logging time progress
 

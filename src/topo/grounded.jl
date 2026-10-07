@@ -43,12 +43,17 @@ function calc_H_grnd!(H_grnd, H_ice, z_bed, z_sl,
     Zsl = interior(z_sl)
     rho_sw_ice = rho_sw / rho_ice
     @inbounds for j in axes(Hg, 2), i in axes(Hg, 1)
-        depth = Zsl[i, j, 1] - Zb[i, j, 1]
-        Hg[i, j, 1] = depth > 0.0 ?
-            H[i, j, 1] - rho_sw_ice * depth :
-            H[i, j, 1] + (Zb[i, j, 1] - Zsl[i, j, 1])
+        Hg[i, j, 1] = H_grnd_point(H[i, j, 1], Zb[i, j, 1], Zsl[i, j, 1], rho_sw_ice)
     end
     return H_grnd
+end
+
+# Thickness above flotation of one cell (`rho_sw_ice = rho_sw/rho_ice`):
+# below sea level H − (rho_sw/rho_ice)·depth, on land H + bed height.
+@inline function H_grnd_point(H::Float64, z_bed::Float64, z_sl::Float64,
+                              rho_sw_ice::Float64)
+    depth = z_sl - z_bed
+    return depth > 0.0 ? H - rho_sw_ice * depth : H + (z_bed - z_sl)
 end
 
 """

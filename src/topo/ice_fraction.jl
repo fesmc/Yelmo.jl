@@ -28,6 +28,6 @@ function calc_f_ice!(f_ice, H_ice)
 end
 
 # Convenience dispatch: refresh `tpo.f_ice` from a `YelmoModel`'s
-# current state. Used inside `topo_step!` / `calving_step!`.
+# current state. Used by the topography stages and `calving_step!`.
 calc_f_ice!(y::YelmoModel) = calc_f_ice!(y.tpo.f_ice, y.tpo.H_ice)
 

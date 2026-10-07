@@ -31,8 +31,9 @@ Fortran's `calc_ydyn` body (`yelmo_dynamics.f90:48`):
 | 8 | Velocity Jacobian + `uz` + strain rates | `calc_strain_rate_2D!`, `calc_uz_3D!`, `calc_jacobian!` | `dyn.eps_xx`, `dyn.eps_yy`, `dyn.eps_xy`, `dyn.eps_eff`, `dyn.uz`, `dyn.uz_star`, `dyn.jvel_dz*` |
 | 9 | Diagnostics                             | `calc_ice_flux!`, `calc_magnitude_from_staggered!`, `calc_vel_ratio!` | `dyn.qq*`, `dyn.uxy*`, `dyn.taud`, `dyn.taub`, `dyn.f_vbvs`, `dyn.duxydt` |
 
-`dyn_step!` does **not** advance `y.time` — that is owned by
-`topo_step!`, which runs first.
+`dyn_step!` does **not** advance `y.time` — that is owned by the
+time loop, which calls it between the predictor and corrector
+topography stages.
 
 ## 1. Driving stress
 

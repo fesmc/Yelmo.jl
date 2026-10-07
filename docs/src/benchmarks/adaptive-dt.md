@@ -2,41 +2,37 @@
 
 **Test file**: `test/benchmarks/test_adaptive_dt.jl`  
 **Solver tested**: Adaptive timestepping (HEUN, FE-SBE, AB-SAM)  
-**Validation**: Snapshot/restore round-trip + MISMIP3D Stnd 500-yr comparison
+**Validation**: Redo reference round-trip + MISMIP3D Stnd 500-yr comparison
 
 ## Overview
 
-Yelmo.jl supports three adaptive predictor-corrector (PC) schemes,
-selectable via `yelmo.pc_method`:
+`YelmoModel` steps with the predictor-corrector time loop of Fortran
+`yelmo_update` ([Stepping](../usage/stepping.md)). The scheme is
+`yelmo.pc_method`; each mixes the advective rates of the predictor and
+corrector topography stages with its β coefficients:
 
-| Scheme | Description |
-|---|---|
-| `"HEUN"` | Heun's method (explicit trapezoidal rule) — predictor step + corrector average |
-| `"FE-SBE"` | Forward Euler predictor + Semi-Backward Euler corrector |
-| `"AB-SAM"` | Adams-Bashforth predictor + Semi-Adams-Moulton corrector |
+| Scheme | β1, β2 (predictor) | β3, β4 (corrector) | Order | `tau` |
+|---|---|---|---|---|
+| `"FE-SBE"` | 1, 0 | 1, 0 | 1 | `(H_corr − H_pred)/(2·dt)` |
+| `"AB-SAM"` | 1 + ζ/2, −ζ/2 | ½, ½ | 2 | `ζ·(H_corr − H_pred)/((3ζ + 3)·dt)` |
+| `"HEUN"` | 1, 0 | ½, ½ | 2 | `(H_corr − H_pred)/(6·dt)` |
 
-All three share the same PI42 step-size controller (`pc_controller = "PI42"`)
-that adjusts `dt` based on the velocity change between predictor and corrector
-steps:
-
-```math
-\eta = \frac{\|\mathbf{u}_\mathrm{pred} - \mathbf{u}_\mathrm{corr}\|_\infty}{u_\mathrm{ref}}
-```
-
-The step is rejected and retried with a smaller `dt` if `η > pc_tol`;
-otherwise `dt` is grown for the next step.
+(ζ = dt/dt_prev; AB-SAM runs as FE-SBE on a cold start.) The step is
+redone with a smaller `dt` if the norm `η` of the truncation error `tau`
+exceeds `pc_tol`; with `dt_method = 2` the PI42 controller
+(`pc_controller = "PI42"`) chooses the next `dt` from the last values of
+`η`, aiming at `pc_eps`.
 
 ## What it tests
 
 Three test sets:
 
-### 1. Snapshot / restore round-trip
+### 1. Redo reference round-trip
 
-Takes a few fixed-dt steps (so velocities are non-trivial), snapshots the full
-model state, advances further, then calls `restore!`.  Asserts that every
-snapshotted field is recovered to < 10⁻¹² absolute error.  This is the deepest
-sanity check on the rollback machinery — the adaptive PC relies on `restore!`
-to roll back rejected steps.
+Takes a few fixed-dt steps (so velocities are non-trivial), stores the
+topography and dynamics in a `RedoRef`, advances further, then calls
+`restore!`. Asserts that the fields come back exactly — the time loop relies
+on this to redo rejected steps.
 
 ### 2. 500-yr MISMIP3D Stnd trajectory (all three schemes)
 
