@@ -121,7 +121,9 @@ function build_yelmo(p)
 end
 
 function build_mirror(p, outdir)
-    mp = to_mirror(p)   # divergent timestepping options stay Fortran-native
+    # Divergent timestepping options stay Fortran-native; Fortran's timestep
+    # log cannot run inside Julia (see `_check_log_timestep`).
+    mp = YelmoMirrorParameters(to_mirror(p); yelmo = (log_timestep = false,))
     y = YelmoMirror(mp, 0.0; rundir = outdir, overwrite = true)
     apply_forcing!(y, mp.phys.rho_ice, mp.phys.rho_w)
     init_state!(y, 0.0; thrm_method = "robin-cold")
