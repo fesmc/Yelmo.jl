@@ -1,22 +1,30 @@
 """
     YelmoMirrorPar
-Parameter module for the Fortran-backed `YelmoMirror`. Constructs and serializes
-the Yelmo namelist parameter files that the Fortran model consumes. Each namelist
-group is represented by a dedicated struct with constructor defaults matching the
-reference namelist.
+Parameter module for the Fortran-backed `YelmoMirror`.
+
+A `YelmoMirrorParameters` holds only the namelist values that differ from the
+Fortran defaults. The schema (groups, keys and default values) is Fortran's own
+`yelmo/input/yelmo_defaults.nml`, which Fortran `yelmo_init` reads anyway: every
+key not set here takes its value from that file. Keys are checked against the
+schema when parameters are built, so a removed or renamed key fails in Julia
+before Fortran is called.
+
+Groups that are not Yelmo groups (e.g. a driver's `&ctrl`) are kept verbatim when
+a namelist is read and written back unchanged.
 
 The generic `write_nml`/`compare` functions are owned by `YelmoPar` (the primary
 pure-Julia parameter module) and extended here with methods for
 `YelmoMirrorParameters`. `read_nml` stays module-local (same signature as
 `YelmoPar.read_nml` but returns `YelmoMirrorParameters`) — call as
-`YelmoMirrorPar.read_nml(...)`. The `*_params` constructors are likewise
-module-local; call as `YelmoMirrorPar.ydyn_params(...)`.
+`YelmoMirrorPar.read_nml(...)`.
 
 Usage:
     using .YelmoMirrorPar
     p = YelmoMirrorParameters("experiment1";
-        ydyn = YelmoMirrorPar.ydyn_params(solver="ssa"),
+        ydyn = (solver = "ssa", ssa_vel_max = 5e4),
     )
+    p.ydyn.solver        # "ssa"
+    p.ydyn.beta_method   # Fortran default
     YelmoMirrorPar.write_nml("run.nml", p)
 """
 module YelmoMirrorPar
@@ -32,405 +40,219 @@ export YelmoMirrorParameters
 export to_mirror, MIRROR_DIVERGENT_YELMO
 
 # ---------------------------------------------------------------------------
-# &yelmo  (top-level Yelmo group)
+# Fortran schema: yelmo/input/yelmo_defaults.nml and yelmo_phys_const.nml
 # ---------------------------------------------------------------------------
-Base.@kwdef struct YelmoParams
-    domain           ::String  = "Greenland"
-    grid_name        ::String  = "GRL-16KM"
-    grid_path        ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
-    phys_const       ::String  = "Earth"
-    experiment       ::String  = "None"
-    nml_ytopo        ::String  = "ytopo"
-    nml_ycalv        ::String  = "ycalv"
-    nml_ydyn         ::String  = "ydyn"
-    nml_ytill        ::String  = "ytill"
-    # Renamed from `nml_yneff = "yneff"`: Fortran-yelmo renamed this &yelmo-block key
-    # when it folded effective-pressure/hydrology into a FastHydrology-integrated &yhyd
-    # block, and its nml_validate now rejects `nml_yneff` outright. `YneffParams` below is
-    # kept for READING nml files that still carry a legacy &yneff block, but is no longer
-    # written back out -- its field set doesn't match current Fortran's &yhyd schema.
-    # `YhydParams` is the current-schema counterpart written under this name instead.
-    nml_yhyd         ::String  = "yhyd"
-    nml_ymat         ::String  = "ymat"
-    nml_ytherm       ::String  = "ytherm"
-    nml_masks        ::String  = "yelmo_masks"
-    nml_init_topo    ::String  = "yelmo_init_topo"
-    nml_data         ::String  = "yelmo_data"
-    restart          ::String  = "None"
-    restart_z_bed    ::Bool    = false
-    restart_H_ice    ::Bool    = false
-    restart_relax    ::Float64 = 1e3
-    log_timestep     ::Bool    = false
-    disable_kill     ::Bool    = false
-    zeta_scale       ::String  = "exp"
-    zeta_exp         ::Float64 = 2.0
-    nz_aa            ::Int     = 10
-    dt_method        ::Int     = 2
-    dt_min           ::Float64 = 0.1
-    cfl_max          ::Float64 = 0.1
-    # `YelmoMirrorParameters` describes the Mirror backend (Fortran via the
-    # C-API); its defaults intentionally match Fortran's native defaults,
-    # not Yelmo.jl's. Fortran ships with `pc_method = "AB-SAM"` —
-    # `YelmoParameters` (Julia native) defaults to `"HEUN"` for
-    # margin-heavy performance reasons; the two backends are configured
-    # independently. See memory `pc_advective_port_status.md`.
-    pc_method        ::String  = "AB-SAM"
-    pc_controller    ::String  = "PI42"
-    pc_use_H_pred    ::Bool    = true
-    pc_filter_vel    ::Bool    = true
-    pc_n_redo        ::Int     = 5
-    pc_tol           ::Float64 = 5.0
-    pc_eps           ::Float64 = 1.0
-end
-yelmo_params(; kwargs...) = YelmoParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ytopo
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YtopoParams
-    solver              ::String  = "impl-lis"
-    grad_lim            ::Float64 = 0.5
-    grad_lim_zb         ::Float64 = 0.5
-    use_bmb             ::Bool    = true
-    topo_fixed          ::Bool    = false
-    topo_rel            ::Int     = 0
-    topo_rel_tau        ::Float64 = 10.0
-    topo_rel_field      ::String  = "H_ref"
-    bmb_gl_method       ::String  = "pmp"
-    gl_sep              ::Int     = 1
-    gz_nx               ::Int     = 15
-    dist_grz            ::Float64 = 200.0
-    gz_Hg0              ::Float64 = 0.0
-    gz_Hg1              ::Float64 = 0.0
-    dmb_method          ::Int     = 0
-    dmb_alpha_max       ::Float64 = 60.0
-    dmb_tau             ::Float64 = 100.0
-    dmb_sigma_ref       ::Float64 = 300.0
-    dmb_m_d             ::Float64 = 3.0
-    dmb_m_r             ::Float64 = 1.0
-    fmb_method          ::Int     = 0
-    fmb_scale           ::Float64 = 1.0
-end
-ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ycalv
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YcalvParams
-    use_lsf         ::Bool    = false
-    dt_lsf          ::Float64 = -1.0
-    calv_flt_method ::String  = "vm-l19"
-    calv_grnd_method::String  = "zero"
-    H_min_grnd      ::Float64 = 5.0
-    H_min_flt       ::Float64 = 75.0
-    sd_min          ::Float64 = 100.0
-    sd_max          ::Float64 = 500.0
-    calv_grnd_max   ::Float64 = 0.0
-    calv_tau        ::Float64 = 1.0
-    calv_thin       ::Float64 = 30.0
-    k2              ::Float64 = 3.2e9
-    w2              ::Float64 = 0.0
-    kt_ref          ::Float64 = 0.0025
-    kt_deep         ::Float64 = 0.1
-    Hc_ref_flt      ::Float64 = 200.0
-    Hc_ref_grnd     ::Float64 = 200.0
-    Hc_ref_thin     ::Float64 = 50.0
-    Hc_deep         ::Float64 = 500.0
-    zb_deep_0       ::Float64 = -1000.0
-    zb_deep_1       ::Float64 = -1500.0
-    zb_sigma        ::Float64 = 0.0
-end
-ycalv_params(; kwargs...) = YcalvParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ydyn
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YdynParams
-    solver          ::String  = "diva"
-    uz_method       ::Int     = 3
-    visc_method     ::Int     = 1
-    visc_const      ::Float64 = 1e7
-    beta_method     ::Int     = 1
-    beta_const      ::Float64 = 1e3
-    beta_q          ::Float64 = 1.0
-    beta_u0         ::Float64 = 100.0
-    beta_gl_scale   ::Int     = 0
-    beta_gl_stag    ::Int     = 1
-    beta_gl_f       ::Float64 = 1.0
-    taud_gl_method  ::Int     = 0
-    H_grnd_lim      ::Float64 = 500.0
-    beta_min        ::Float64 = 100.0
-    eps_0           ::Float64 = 1e-6
-    # Split from `ssa_lis_opt`: Fortran-yelmo added a second SSA assembly method
-    # ("energy", alongside the original "residual") and takes a separate LIS solver-option
-    # string per method. Our previous single value matches Fortran's own
-    # ssa_lis_opt_residual default exactly; ssa_lis_opt_energy is Fortran's own default too
-    # (unused unless ssa_solver="energy", which we never write, so Fortran defaults it to
-    # "residual" on its own).
-    ssa_lis_opt_residual::String = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
-    ssa_lis_opt_energy  ::String = "-i cg -p jacobi -maxiter 200 -tol 1.0e-4 -initx_zeros false"
-    ssa_lat_bc      ::String  = "floating"
-    ssa_vel_max     ::Float64 = 5000.0
-    ssa_iter_max    ::Int     = 20
-    ssa_iter_rel    ::Float64 = 0.7
-    ssa_iter_conv   ::Float64 = 1e-2
-    taud_lim        ::Float64 = 2e5
-end
-ydyn_params(; kwargs...) = YdynParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ytill
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YtillParams
-    method    ::Int     = 1
-    scale_zb  ::Int     = 1
-    scale_sed ::Int     = 0
-    is_angle  ::Bool    = false
-    n_sd      ::Int     = 10
-    f_sed     ::Float64 = 0.01
-    sed_min   ::Float64 = 5.0
-    sed_max   ::Float64 = 15.0
-    z0        ::Float64 = -300.0
-    z1        ::Float64 = 200.0
-    cf_min    ::Float64 = 0.1
-    cf_ref    ::Float64 = 0.8
-end
-ytill_params(; kwargs...) = YtillParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &yneff
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YneffParams
-    method  ::Int     = 3
-    nxi     ::Int     = 0
-    const_  ::Float64 = 1e7          # note: 'const' is a Julia keyword, stored as const_
-    p       ::Float64 = 0.0
-    H_w_max ::Float64 = -1.0
-    N0      ::Float64 = 1000.0
-    delta   ::Float64 = 0.04
-    e0      ::Float64 = 0.69
-    Cc      ::Float64 = 0.12
-    s_const ::Float64 = 0.5
-end
-yneff_params(; kwargs...) = YneffParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &yhyd
-#
-# Minimal current-schema counterpart to the legacy `YneffParams` above: only
-# `bkt_N_closure` is modelled, the one &yhyd key Mirror callers need to set from
-# Julia. Every other &yhyd key (method_til, bkt_till_rate, k24_*, ...) is left to
-# Fortran's own yelmo_defaults.nml -- `write_nml` emits a &yhyd block containing
-# only `bkt_N_closure`, and Fortran's per-key defaults_file fallback fills the rest.
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YhydParams
-    # 3 = TILL (Fortran's default): apply_N_closure computes hyd%now%N from the
-    # configured closure every step, as usual. Set -1 (EXTERNAL) only when an
-    # external host -- e.g. a coupled Julia hydrology model driving YelmoMirror --
-    # owns N itself and pushes it in via yelmo_sync!/hyd.N, otherwise Fortran's
-    # closure overwrites the pushed value on the next step.
-    bkt_N_closure ::Int = 3
-end
-yhyd_params(; kwargs...) = YhydParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ymat
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YmatParams
-    flow_law            ::String  = "glen"
-    # `rf_method = -1` ("external") matches `YelmoPar.YmatParams`
-    # default — see that file for the rationale (therm not yet ported).
-    rf_method           ::Int     = -1
-    rf_const            ::Float64 = 1e-18
-    rf_use_eismint2     ::Bool    = false
-    rf_with_water       ::Bool    = false
-    n_glen              ::Float64 = 3.0
-    visc_min            ::Float64 = 1e3
-    de_max              ::Float64 = 2.0
-    enh_method          ::String  = "shear3D"
-    enh_shear           ::Float64 = 3.0
-    enh_stream          ::Float64 = 3.0
-    enh_shlf            ::Float64 = 0.7
-    enh_umin            ::Float64 = 50.0
-    enh_umax            ::Float64 = 500.0
-    # `calc_age`/`age_iso` dropped: Fortran-yelmo's &ymat no longer has them (age tracking
-    # moved to the new &ytrc passive-tracer subsystem). Same schema drift as nml_yhyd above.
-    tracer_method       ::String  = "expl"
-    tracer_impl_kappa   ::Float64 = 1.5
-end
-ymat_params(; kwargs...) = YmatParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &ytherm
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YthermParams
-    method          ::String  = "temp"
-    qb_method       ::Int     = 2
-    dt_method       ::String  = "FE"
-    solver_advec    ::String  = "impl-upwind"
-    gamma           ::Float64 = 1.0
-    use_strain_sia  ::Bool    = false
-    use_const_cp    ::Bool    = false
-    const_cp        ::Float64 = 2009.0
-    use_const_kt    ::Bool    = false
-    const_kt        ::Float64 = 6.62e7
-    enth_cr         ::Float64 = 1e-3
-    omega_max       ::Float64 = 0.01
-    H_ice_thin      ::Float64 = 10.0      # [m] columns thinner than this are not solved (linear profile)
-    # Grounded basal BC (Fortran basal-bc-capacity): "capacity" or the deprecated "wtil";
-    # cap_source "auto" picks "hyd" with Fortran-side water transport, else "till". A host that
-    # runs its own hydrology and pushes hyd%now%C_frz (yelmo_set_hydrology_exchange!) sets "hyd".
-    basal_bc_method ::String  = "capacity"
-    cap_source      ::String  = "auto"
-    cap_W_floor     ::Float64 = 0.0
-    cap_eps         ::Float64 = 1e-4
-    # `till_rate`/`H_w_max` dropped: Fortran-yelmo's own &ytherm comment says it outright --
-    # "Basal water bucket (till_rate, H_w_max) moved to &yhyd."
-    rock_method     ::String  = "equil"
-    nzr_aa          ::Int     = 5
-    zeta_scale_rock ::String  = "exp-inv"
-    zeta_exp_rock   ::Float64 = 2.0
-    H_rock          ::Float64 = 2000.0
-    kt_rock         ::Float64 = 6.3e7
-end
-ytherm_params(; kwargs...) = YthermParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &yelmo_masks
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YelmoMasksParams
-    basins_load   ::Bool   = true
-    basins_path   ::String = "ice_data/{domain}/{grid_name}/{grid_name}_BASINS-nasa.nc"
-    basins_nms    ::Vector{String} = ["basin", "basin_mask"]
-    regions_load  ::Bool   = true
-    regions_path  ::String = "ice_data/{domain}/{grid_name}/{grid_name}_REGIONS.nc"
-    regions_nms   ::Vector{String} = ["mask", "None"]
-end
-yelmo_masks_params(; kwargs...) = YelmoMasksParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &yelmo_init_topo
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YelmoInitTopoParams
-    init_topo_load  ::Bool    = true
-    init_topo_path  ::String  = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
-    init_topo_names ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
-    init_topo_state ::Int     = 0
-    z_bed_f_sd      ::Float64 = -1.0
-    smooth_H_ice    ::Float64 = 0.0
-    smooth_z_bed    ::Float64 = 0.0
-end
-yelmo_init_topo_params(; kwargs...) = YelmoInitTopoParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &yelmo_data
-# ---------------------------------------------------------------------------
-Base.@kwdef struct YelmoDataParams
-    pd_topo_load    ::Bool   = true
-    pd_topo_path    ::String = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
-    pd_topo_names   ::Vector{String} = ["H_ice", "z_bed", "z_bed_sd", "z_srf"]
-    pd_tsrf_load    ::Bool   = true
-    pd_tsrf_path    ::String = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
-    pd_tsrf_name    ::String = "T_srf"
-    pd_tsrf_monthly ::Bool   = false
-    pd_smb_load     ::Bool   = true
-    pd_smb_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
-    pd_smb_name     ::String = "smb"
-    pd_smb_monthly  ::Bool   = false
-    pd_vel_load     ::Bool   = true
-    pd_vel_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_VEL-J18.nc"
-    pd_vel_names    ::Vector{String} = ["ux_srf", "uy_srf"]
-    pd_age_load     ::Bool   = false
-    pd_age_path     ::String = "ice_data/{domain}/{grid_name}/{grid_name}_STRAT-M15.nc"
-    pd_age_names    ::Vector{String} = ["age_iso", "depth_iso"]
-end
-yelmo_data_params(; kwargs...) = YelmoDataParams(; kwargs...)
-# ---------------------------------------------------------------------------
-# &phys  (physical constants)
-# ---------------------------------------------------------------------------
-Base.@kwdef struct PhysParams
-    sec_year    ::Float64 = 31536000.0   # [s/a]      365*24*3600
-    g           ::Float64 = 9.81         # [m/s^2]    Gravitational accel.
-    T0          ::Float64 = 273.15       # [K]        Reference freezing temperature
-    rho_ice     ::Float64 = 910.0        # [kg/m^3]   Density ice
-    rho_w       ::Float64 = 1000.0       # [kg/m^3]   Density water
-    rho_sw      ::Float64 = 1028.0       # [kg/m^3]   Density seawater
-    rho_a       ::Float64 = 3300.0       # [kg/m^3]   Density asthenosphere
-    rho_rock    ::Float64 = 2000.0       # [kg/m^3]   Density bedrock (mantle/lithosphere)
-    L_ice       ::Float64 = 333500.0     # [J/kg]     Latent heat of fusion for ice/water
-    T_pmp_beta  ::Float64 = 9.8e-8       # [K/Pa]     Greve and Blatter (2009)
-end
-phys_params(; kwargs...) = PhysParams(; kwargs...)
 
-const _EARTH_DEFAULTS = (
-    sec_year   = 31536000.0,
-    g          = 9.81,
-    T0         = 273.15,
-    rho_ice    = 910.0,
-    rho_w      = 1000.0,
-    rho_sw     = 1028.0,
-    rho_a      = 3300.0,
-    rho_rock   = 2000.0,
-    L_ice      = 333500.0,
-    T_pmp_beta = 9.8e-8,
-)
+const YELMO_FORTRAN_DIR = joinpath(@__DIR__, "..", "yelmo")
 
-earth_params(; kwargs...) = PhysParams(; _EARTH_DEFAULTS..., kwargs...)
+defaults_file()   = joinpath(YELMO_FORTRAN_DIR, "input", "yelmo_defaults.nml")
+phys_const_file() = joinpath(YELMO_FORTRAN_DIR, "input", "yelmo_phys_const.nml")
+
+# Ordered raw namelist: group => [key => raw value string]
+const RawGroups = Vector{Pair{String, Vector{Pair{String,String}}}}
+
+# Parsed schema: group order, key order per group, typed default per key.
+struct Schema
+    groups   :: Vector{String}
+    keys     :: Dict{String, Vector{String}}
+    defaults :: Dict{String, Dict{String, Any}}
+end
+
+const _SCHEMA = Ref{Union{Nothing,Schema}}(nothing)
+
+"""
+    schema() -> Schema
+
+The Fortran parameter schema, parsed once from `yelmo_defaults.nml`.
+"""
+function schema()
+    if _SCHEMA[] === nothing
+        f = defaults_file()
+        isfile(f) || error("YelmoMirrorPar: Fortran defaults file not found: $(f). " *
+                           "YelmoMirror needs the Fortran yelmo tree at $(YELMO_FORTRAN_DIR).")
+        raw = parse_nml_file(f)
+        groups = String[]
+        keys = Dict{String, Vector{String}}()
+        defaults = Dict{String, Dict{String, Any}}()
+        for (g, kvs) in raw
+            push!(groups, g)
+            keys[g] = first.(kvs)
+            defaults[g] = Dict{String,Any}(k => parse_nml_value(v) for (k, v) in kvs)
+        end
+        _SCHEMA[] = Schema(groups, keys, defaults)
+    end
+    return _SCHEMA[]
+end
+
+is_yelmo_group(g::AbstractString) = haskey(schema().defaults, g)
+
+# Value kinds used to check an override against its default.
+_kind(::Bool) = :bool
+_kind(::AbstractString) = :string
+_kind(::AbstractVector{<:AbstractString}) = :string
+_kind(::Real) = :num
+_kind(::AbstractVector{<:Real}) = :num
+_kind(x) = error("YelmoMirrorPar: unsupported namelist value type $(typeof(x))")
+
+const NmlValue = Union{Bool, Real, AbstractString,
+                       AbstractVector{<:Real}, AbstractVector{<:AbstractString}}
+
+function _check_key(group::String, key::String, value)
+    s = schema()
+    haskey(s.defaults, group) ||
+        error("YelmoMirrorPar: unknown Yelmo namelist group &$(group). " *
+              "Groups in $(defaults_file()): $(join(s.groups, ", "))")
+    d = s.defaults[group]
+    haskey(d, key) ||
+        error("YelmoMirrorPar: &$(group) has no parameter `$(key)` in $(defaults_file()).")
+    _kind(value) == _kind(d[key]) ||
+        error("YelmoMirrorPar: &$(group).$(key) = $(repr(value)) does not match the type " *
+              "of its default $(repr(d[key])).")
+    return nothing
+end
+
+"""
+    phys_constants(name="Earth") -> NamedTuple
+
+Physical constants of group `&name` in Fortran's `input/yelmo_phys_const.nml`,
+the file Fortran reads for `yelmo.phys_const`.
+"""
+function phys_constants(name::AbstractString="Earth")
+    raw = parse_nml_file(phys_const_file())
+    i = findfirst(gp -> gp.first == lowercase(name), raw)
+    i === nothing && error("YelmoMirrorPar: no group &$(name) in $(phys_const_file()).")
+    kvs = raw[i].second
+    return NamedTuple(Symbol(k) => parse_nml_value(v) for (k, v) in kvs)
+end
 
 # ---------------------------------------------------------------------------
-# Top-level container
+# Container
 # ---------------------------------------------------------------------------
 """
     YelmoMirrorParameters
-Top-level container holding one struct per namelist group. Construct via
-`YelmoMirrorParameters(name; kwargs...)` to override individual groups.
+
+Namelist for a `YelmoMirror`: the values that differ from Fortran's
+`yelmo_defaults.nml` (`overrides`, group => key => value) plus any non-Yelmo
+groups carried verbatim (`extra`, e.g. a driver's `&ctrl`).
+
+Group access falls back to the Fortran defaults: `p.ydyn.solver` returns the
+override if set, else the default. `p.phys` returns the constants of
+`p.yelmo.phys_const` from Fortran's `yelmo_phys_const.nml`.
 """
 struct YelmoMirrorParameters
-    name            ::String
-    yelmo           ::YelmoParams
-    ytopo           ::YtopoParams
-    ycalv           ::YcalvParams
-    ydyn            ::YdynParams
-    ytill           ::YtillParams
-    yneff           ::YneffParams
-    hyd             ::YhydParams
-    ymat            ::YmatParams
-    ytherm          ::YthermParams
-    yelmo_masks     ::YelmoMasksParams
-    yelmo_init_topo ::YelmoInitTopoParams
-    yelmo_data      ::YelmoDataParams
-    phys           ::PhysParams
+    name      :: String
+    overrides :: Dict{String, Dict{String, Any}}
+    extra     :: RawGroups
 end
+
 """
-    YelmoMirrorParameters(name; yelmo, ytopo, ...) -> YelmoMirrorParameters
-Construct a `YelmoMirrorParameters` object. Any group can be supplied as a keyword
-argument; omitted groups are filled with defaults. `name` is a label for the
-parameter set and the stem of the output filename.
+    YelmoMirrorParameters(name; extra=[], group=(key=value, ...), ...)
+
+Build a parameter set from overrides, one keyword per Yelmo group. Each group is
+a `NamedTuple` or `AbstractDict` of key => value. Unknown groups or keys, and
+values whose type does not match the Fortran default, are errors.
+
 # Example
 ```julia
 p = YelmoMirrorParameters("experiment1";
-    ydyn  = ydyn_params(solver="ssa"),
-    phys = phys_params(rho_ice=917.0),
+    yelmo = (domain = "Greenland", grid_name = "GRL-16KM"),
+    ydyn  = (solver = "ssa",),
 )
 write_nml("run.nml", p)
 ```
 """
-function YelmoMirrorParameters(name;
-    yelmo           = yelmo_params(),
-    ytopo           = ytopo_params(),
-    ycalv           = ycalv_params(),
-    ydyn            = ydyn_params(),
-    ytill           = ytill_params(),
-    yneff           = yneff_params(),
-    hyd             = yhyd_params(),
-    ymat            = ymat_params(),
-    ytherm          = ytherm_params(),
-    yelmo_masks     = yelmo_masks_params(),
-    yelmo_init_topo = yelmo_init_topo_params(),
-    yelmo_data      = yelmo_data_params(),
-    phys            = phys_params(),
-)
-    return YelmoMirrorParameters(
-        name, yelmo, ytopo, ycalv, ydyn, ytill, yneff, hyd, ymat, ytherm,
-        yelmo_masks, yelmo_init_topo, yelmo_data, phys,
-    )
+function YelmoMirrorParameters(name::AbstractString; extra::RawGroups=RawGroups(), groups...)
+    p = YelmoMirrorParameters(String(name), Dict{String, Dict{String, Any}}(), extra)
+    for (g, kv) in groups
+        _set!(p, String(g), kv)
+    end
+    return p
 end
 
-function YelmoMirrorParameters(filename, name)
-    p = read_nml(filename)
-    return YelmoMirrorParameters(
-        name, p.yelmo, p.ytopo, p.ycalv, p.ydyn, p.ytill, p.yneff, p.hyd,
-        p.ymat, p.ytherm, p.yelmo_masks, p.yelmo_init_topo, p.yelmo_data, p.phys,
-    )
+"""
+    YelmoMirrorParameters(p::YelmoMirrorParameters; name=p.name, group=(...), ...)
+
+Copy of `p` with further overrides applied.
+"""
+function YelmoMirrorParameters(p::YelmoMirrorParameters; name::AbstractString=p.name, groups...)
+    q = YelmoMirrorParameters(String(name),
+                              Dict(g => copy(d) for (g, d) in p.overrides),
+                              copy(p.extra))
+    for (g, kv) in groups
+        _set!(q, String(g), kv)
+    end
+    return q
+end
+
+"""
+    YelmoMirrorParameters(filename, name)
+
+Read the namelist `filename` (see [`read_nml`](@ref)) and label it `name`.
+"""
+YelmoMirrorParameters(filename::AbstractString, name::AbstractString) =
+    YelmoMirrorParameters(read_nml(filename); name)
+
+_pairs(kv::NamedTuple) = pairs(kv)
+_pairs(kv) = kv
+
+function _set!(p::YelmoMirrorParameters, group::String, kv)
+    d = get!(p.overrides, group, Dict{String,Any}())
+    for (k, v) in _pairs(kv)
+        key = String(k)
+        _check_key(group, key, v)
+        d[key] = v
+    end
+    return p
+end
+
+# Group view with fallback to the Fortran defaults.
+struct MirrorGroup
+    group     :: String
+    overrides :: Dict{String, Any}
+end
+
+function Base.getproperty(p::YelmoMirrorParameters, s::Symbol)
+    s in fieldnames(YelmoMirrorParameters) && return getfield(p, s)
+    s === :phys && return phys_constants(p.yelmo.phys_const)
+    g = String(s)
+    is_yelmo_group(g) || error("YelmoMirrorParameters has no group &$(g).")
+    return MirrorGroup(g, get(getfield(p, :overrides), g, Dict{String,Any}()))
+end
+
+Base.propertynames(::YelmoMirrorParameters) =
+    (fieldnames(YelmoMirrorParameters)..., :phys, Symbol.(schema().groups)...)
+
+function Base.getproperty(g::MirrorGroup, s::Symbol)
+    s in fieldnames(MirrorGroup) && return getfield(g, s)
+    key = String(s)
+    ov = getfield(g, :overrides)
+    haskey(ov, key) && return ov[key]
+    d = schema().defaults[getfield(g, :group)]
+    haskey(d, key) || error("&$(getfield(g, :group)) has no parameter `$(key)`.")
+    return d[key]
+end
+
+Base.propertynames(g::MirrorGroup) = Tuple(Symbol.(schema().keys[getfield(g, :group)]))
+
+"""
+    effective(p, group) -> Dict{String,Any}
+
+All parameters of `group`: Fortran defaults overlaid with the overrides of `p`.
+"""
+effective(p::YelmoMirrorParameters, group::String) =
+    merge(schema().defaults[group], get(p.overrides, group, Dict{String,Any}()))
+
+function Base.show(io::IO, ::MIME"text/plain", p::YelmoMirrorParameters)
+    println(io, "YelmoMirrorParameters \"$(p.name)\" (overrides of $(defaults_file()))")
+    for g in schema().groups
+        ov = get(p.overrides, g, nothing)
+        (ov === nothing || isempty(ov)) && continue
+        println(io, "  &$(g)")
+        for k in schema().keys[g]
+            haskey(ov, k) && println(io, "    $(rpad(k, 20)) = $(format_value(ov[k]))")
+        end
+    end
+    isempty(p.extra) || println(io, "  extra groups: ", join(first.(p.extra), ", "))
 end
 
 # ---------------------------------------------------------------------------
@@ -443,8 +265,8 @@ end
 `&yelmo` parameters whose meaning or valid options differ between the
 pure-Julia `YelmoModel` timestepping and the Fortran (Mirror)
 timestepping. `to_mirror` never copies these from a `YelmoParameters`
-into the generated Mirror configuration — the Mirror keeps its own
-Fortran-native values (e.g. `pc_method = "AB-SAM"`, since Julia's
+into the generated Mirror configuration — the Mirror keeps the Fortran
+defaults (e.g. `pc_method = "AB-SAM"`, since Julia's
 "HEUN" ≠ Fortran's "HEUN" despite the shared name). The shared adaptive
 controls (`dt_method`, `dt_min`, `cfl_max`) are NOT in
 this set — they have identical meaning on both backends and are copied.
@@ -459,31 +281,16 @@ const MIRROR_DIVERGENT_YELMO = (
     :pc_corr_vel, :pc_n_redo, :pc_tol, :pc_eps,
 )
 
-# Build a Mirror parameter-group struct (type `typeof(mirror_default)`)
-# by copying each field that also exists on the Julia `julia_group` and
-# is not flagged divergent. Fields absent on the Julia side (e.g.
-# Julia-only `pc_advective`, `pc_eta_masked`, `timing`) or flagged
-# divergent keep the Mirror default.
-function _translate_group(mirror_default, julia_group, divergent::Tuple)
-    kw = Dict{Symbol,Any}()
-    for f in fieldnames(typeof(mirror_default))
-        f in divergent && continue
-        if hasfield(typeof(julia_group), f)
-            kw[f] = getfield(julia_group, f)
-        end
-    end
-    return typeof(mirror_default)(; kw...)
-end
-
 """
     to_mirror(p::YelmoParameters) -> YelmoMirrorParameters
 
 Translate a pure-Julia `YelmoParameters` (the canonical configuration
 for a `YelmoModel`) into a `YelmoMirrorParameters` for the Fortran
-backend. Shared parameters are copied group-by-group; backend-divergent
-timestepping options (`MIRROR_DIVERGENT_YELMO`) are left at the Mirror's
-Fortran-native values, and the `&phys` group is derived from
-`phys_const` (`"Earth"` → `earth_params()`).
+backend. Every `YelmoParameters` group field whose name is a parameter
+of the Fortran group of the same name is copied; Julia-only fields and
+fields holding Julia objects (e.g. `ydyn.ssa_solver::SSASolver`) are
+skipped, and backend-divergent timestepping options
+(`MIRROR_DIVERGENT_YELMO`) are left at the Fortran defaults.
 
 Errors if any divergent parameter was changed away from its
 `YelmoParameters` default, since that intent cannot be carried to the
@@ -504,24 +311,25 @@ function to_mirror(p::YelmoPar.YelmoParameters)
         "their YelmoParameters defaults — the Mirror uses its own " *
         "Fortran-native values. See `MIRROR_DIVERGENT_YELMO`.")
 
-    phys = strip(p.yelmo.phys_const) == "Earth" ? earth_params() : phys_params()
-
-    return YelmoMirrorParameters(
-        p.name,
-        _translate_group(yelmo_params(),           p.yelmo,           MIRROR_DIVERGENT_YELMO),
-        _translate_group(ytopo_params(),           p.ytopo,           ()),
-        _translate_group(ycalv_params(),           p.ycalv,           ()),
-        _translate_group(ydyn_params(),            p.ydyn,            ()),
-        _translate_group(ytill_params(),           p.ytill,           ()),
-        _translate_group(yneff_params(),           p.yneff,           ()),
-        yhyd_params(),   # no &yhyd counterpart on the pure-Julia side; Mirror-only key
-        _translate_group(ymat_params(),            p.ymat,            ()),
-        _translate_group(ytherm_params(),          p.ytherm,          ()),
-        _translate_group(yelmo_masks_params(),     p.yelmo_masks,     ()),
-        _translate_group(yelmo_init_topo_params(), p.yelmo_init_topo, ()),
-        _translate_group(yelmo_data_params(),      p.yelmo_data,      ()),
-        phys,
-    )
+    s = schema()
+    overrides = Dict{String, Dict{String, Any}}()
+    for gname in fieldnames(YelmoPar.YelmoParameters)
+        g = String(gname)
+        haskey(s.defaults, g) || continue
+        jgroup = getfield(p, gname)
+        d = Dict{String, Any}()
+        for f in fieldnames(typeof(jgroup))
+            g == "yelmo" && f in MIRROR_DIVERGENT_YELMO && continue
+            key = String(f)
+            haskey(s.defaults[g], key) || continue
+            v = getfield(jgroup, f)
+            v isa NmlValue || continue   # Julia object under a Fortran key name (ydyn.ssa_solver)
+            _check_key(g, key, v)
+            d[key] = v
+        end
+        isempty(d) || (overrides[g] = d)
+    end
+    return YelmoMirrorParameters(p.name, overrides, RawGroups())
 end
 
 # ---------------------------------------------------------------------------
@@ -533,8 +341,8 @@ Format a Julia value for Fortran namelist syntax.
 """
 format_value(v::Bool)              = v ? "True" : "False"
 format_value(v::AbstractString)    = "\"$(v)\""
-format_value(v::Int)               = string(v)
-format_value(v::Float64)           = _fmt_float(v)
+format_value(v::Integer)           = string(v)
+format_value(v::AbstractFloat)     = _fmt_float(Float64(v))
 format_value(v::AbstractVector{<:AbstractString}) = join(["\"$s\"" for s in v], " ")
 format_value(v::AbstractVector{<:Real})            = join(format_value.(v), ", ")
 """
@@ -561,43 +369,44 @@ function _fmt_float(x::Float64)
         return s
     end
 end
-"""
-    write_group(io, group_name, s)
-Write one namelist group to `io` from struct `s`.
-The field named `const_` is written as `const` (Julia keyword workaround).
-"""
-function write_group(io::IO, group_name::AbstractString, s)
-    println(io, "&$(group_name)")
-    for fname in fieldnames(typeof(s))
-        nml_name = fname == :const_ ? "const" : string(fname)
-        val = getfield(s, fname)
-        println(io, "    $(rpad(nml_name, 20)) = $(format_value(val))")
+
+# An integer-valued float for an integer parameter is written as an integer, which
+# Fortran's integer read requires (e.g. a Julia Float64 field copied by `to_mirror`).
+_as_default_type(::Integer, v::AbstractFloat) = isinteger(v) ? Int(v) : v
+_as_default_type(default, v) = v
+
+function _write_group(io::IO, group::AbstractString, kvs)
+    println(io, "&$(group)")
+    for (k, v) in kvs
+        println(io, "    $(rpad(k, 20)) = $(v)")
     end
     println(io, "/\n")
 end
+
 """
-    write_nml(filename, p::YelmoMirrorParameters)
-Write a complete Yelmo namelist file from `p`.
+    write_nml(filename, p::YelmoMirrorParameters; overwrite=false)
+
+Write the namelist of `p`: the Yelmo groups that have overrides (keys in the
+order of `yelmo_defaults.nml`), then the extra groups verbatim. Fortran takes
+every key not written here from `yelmo_defaults.nml`.
 """
 function write_nml(filename::AbstractString, p::YelmoMirrorParameters; overwrite::Bool=false)
     if isfile(filename) && !overwrite
         error("File already exists: $(filename). Use overwrite=true to overwrite.")
     end
+    s = schema()
     open(filename, "w") do io
-        write_group(io, "phys",            p.phys)
-        write_group(io, "yelmo",           p.yelmo)
-        write_group(io, "ytopo",           p.ytopo)
-        write_group(io, "ycalv",           p.ycalv)
-        write_group(io, "ydyn",            p.ydyn)
-        write_group(io, "ytill",           p.ytill)
-        # &yhyd written from the minimal `YhydParams`; legacy &yneff is deliberately NOT
-        # written -- see the nml_yhyd field comment in YelmoParams above for why.
-        write_group(io, "yhyd",            p.hyd)
-        write_group(io, "ymat",            p.ymat)
-        write_group(io, "ytherm",          p.ytherm)
-        write_group(io, "yelmo_masks",     p.yelmo_masks)
-        write_group(io, "yelmo_init_topo", p.yelmo_init_topo)
-        write_group(io, "yelmo_data",      p.yelmo_data)
+        println(io, "! Overrides of $(abspath(defaults_file()))\n")
+        for g in s.groups
+            ov = get(p.overrides, g, nothing)
+            (ov === nothing || isempty(ov)) && continue
+            d = s.defaults[g]
+            _write_group(io, g, (k => format_value(_as_default_type(d[k], ov[k]))
+                                 for k in s.keys[g] if haskey(ov, k)))
+        end
+        for (g, kvs) in p.extra
+            _write_group(io, g, kvs)
+        end
     end
     @info "Namelist written to $(filename)"
     return nothing
@@ -610,22 +419,23 @@ end
 
 ### READING NML FILES ###
 
-# ---------------------------------------------------------------------------
-# Deserialization helpers
-# ---------------------------------------------------------------------------
-
 """
-    parse_nml_file(filename) -> Dict{String, Dict{String, String}}
+    parse_nml_file(filename) -> Vector{Pair{String, Vector{Pair{String,String}}}}
 
-Low-level parser. Returns a two-level dict:
-    group_name => (field_name => raw_value_string)
+Low-level parser. Returns the groups in file order, each with its
+`key => raw value string` pairs in file order. Group names are lowercased.
 Handles line continuation, inline comments, and multi-line values.
 """
 function parse_nml_file(filename::AbstractString)
-    groups = Dict{String, Dict{String, String}}()
-    current_group = nothing
-    current_key   = nothing
-    current_val   = nothing
+    groups = RawGroups()
+    current = nothing          # Vector{Pair{String,String}} of the open group
+    current_key = nothing
+    current_val = nothing
+
+    flush!() = if current !== nothing && current_key !== nothing
+        push!(current, current_key => String(strip(current_val)))
+        current_key = current_val = nothing
+    end
 
     for raw_line in eachline(filename)
         line = strip(raw_line)
@@ -638,46 +448,33 @@ function parse_nml_file(filename::AbstractString)
 
         # &group_name
         if startswith(line, '&')
-            # Flush any pending continuation
-            if current_group !== nothing && current_key !== nothing
-                groups[current_group][current_key] = strip(current_val)
-                current_key = current_val = nothing
-            end
-            current_group = lowercase(strip(line[2:end]))
-            groups[current_group] = Dict{String, String}()
+            flush!()
+            current = Pair{String,String}[]
+            push!(groups, lowercase(strip(line[2:end])) => current)
             continue
         end
 
         # End-of-group marker
         if line == "/" || line == "&end" || startswith(line, "/")
-            if current_group !== nothing && current_key !== nothing
-                groups[current_group][current_key] = strip(current_val)
-                current_key = current_val = nothing
-            end
-            current_group = nothing
+            flush!()
+            current = nothing
             continue
         end
 
-        current_group === nothing && continue
+        current === nothing && continue
 
         # key = value  (possibly continued on next line via trailing comma)
         if occursin('=', line)
-            # Flush previous key if any
-            if current_key !== nothing
-                groups[current_group][current_key] = strip(current_val)
-            end
+            flush!()
             idx = findfirst('=', line)
-            current_key = strip(line[1:idx-1])
+            current_key = String(strip(line[1:idx-1]))
             current_val = strip(line[idx+1:end])
         else
             # Continuation line: append to current value
             current_key !== nothing && (current_val *= " " * line)
         end
     end
-    # Flush final key
-    if current_group !== nothing && current_key !== nothing
-        groups[current_group][current_key] = strip(current_val)
-    end
+    flush!()
 
     return groups
 end
@@ -696,66 +493,32 @@ function _strip_inline_comment(line::AbstractString)
     return line
 end
 
-# ---------------------------------------------------------------------------
-# Type-directed value parsing
-# ---------------------------------------------------------------------------
-
 """
-    parse_nml_value(::Type{T}, s) -> T
+    parse_nml_value(s) -> Bool | Int | Float64 | String | Vector
 
-Parse a raw namelist string `s` into Julia type `T`.
+Parse a raw namelist value. Quoted values are strings (several quoted tokens: a
+`Vector{String}`), `True`/`False` (or `.true.`/`.false.`) are `Bool`, other
+values are numbers (several tokens: a vector).
 """
-parse_nml_value(::Type{Bool}, s::AbstractString) =
-    lowercase(strip(s)) in ("true", ".true.", "t", "1")
-
-parse_nml_value(::Type{Int}, s::AbstractString) =
-    parse(Int, strip(s))
-
-parse_nml_value(::Type{Float64}, s::AbstractString) =
-    parse(Float64, replace(strip(s), r"[dD]" => "e"))  # Fortran D-exponent
-
-parse_nml_value(::Type{String}, s::AbstractString) =
-    strip(s, [' ', '"', '\''])
-
-function parse_nml_value(::Type{Vector{Float64}}, s::AbstractString)
-    parts = split(strip(s), r"[\s,]+"; keepempty=false)
-    return parse.(Float64, replace.(parts, r"[dD]" => "e"))
-end
-
-function parse_nml_value(::Type{Vector{String}}, s::AbstractString)
-    # Match all quoted tokens
-    ms = collect(eachmatch(r"\"([^\"]*)\"|'([^']*)'", s))
-    isempty(ms) && return String[]
-    return [something(m[1], m[2]) for m in ms]
-end
-
-# Fallback for unexpected types
-parse_nml_value(::Type{T}, s::AbstractString) where {T} = parse(T, strip(s))
-
-# ---------------------------------------------------------------------------
-# Struct reconstruction from a flat Dict{String,String}
-# ---------------------------------------------------------------------------
-
-"""
-    struct_from_dict(::Type{S}, d) -> S
-
-Reconstruct struct `S` from a `Dict{String,String}` of raw namelist values.
-Fields absent from `d` keep the default value from `S`'s `@kwdef` constructor.
-The Fortran field `const` is mapped back to Julia field `const_`.
-"""
-function struct_from_dict(::Type{S}, d::Dict{String,String}) where {S}
-    kwargs = Dict{Symbol,Any}()
-    defaults = S()   # zero-arg @kwdef constructor gives us all defaults
-    for fname in fieldnames(S)
-        nml_name = fname == :const_ ? "const" : string(fname)
-        if haskey(d, nml_name)
-            FT = fieldtype(S, fname)
-            kwargs[fname] = parse_nml_value(FT, d[nml_name])
-        else
-            kwargs[fname] = getfield(defaults, fname)
-        end
+function parse_nml_value(s::AbstractString)
+    s = strip(s)
+    if startswith(s, '"') || startswith(s, '\'')
+        toks = [something(m[1], m[2]) for m in eachmatch(r"\"([^\"]*)\"|'([^']*)'", s)]
+        return length(toks) == 1 ? String(toks[1]) : String.(toks)
     end
-    return S(; kwargs...)
+    lowercase(s) in ("true", ".true.", "t") && return true
+    lowercase(s) in ("false", ".false.", "f") && return false
+    toks = split(s, r"[\s,]+"; keepempty=false)
+    nums = [_parse_number(t) for t in toks]
+    return length(nums) == 1 ? nums[1] : [nums...]
+end
+
+function _parse_number(t::AbstractString)
+    i = tryparse(Int, t)
+    i !== nothing && return i
+    x = tryparse(Float64, replace(t, r"[dD]" => "e"))   # Fortran D-exponent
+    x === nothing && error("YelmoMirrorPar: cannot parse namelist value `$(t)`.")
+    return x
 end
 
 # ---------------------------------------------------------------------------
@@ -765,99 +528,64 @@ end
 """
     read_nml(filename) -> YelmoMirrorParameters
 
-Read a Yelmo namelist file and return a fully populated `YelmoMirrorParameters`.
-Groups or fields absent from the file fall back to the struct defaults.
+Read a Yelmo namelist file. Every key of a Yelmo group becomes an override and
+is checked against `yelmo_defaults.nml` (unknown keys are an error, as in
+Fortran's `nml_validate`); non-Yelmo groups are kept verbatim in `extra`.
 
 # Example
 ```julia
 p = read_nml("run.nml")
-println(p.ydyn.solver)   # "diva"
+println(p.ydyn.solver)
 ```
 """
 function read_nml(filename::AbstractString)
-    raw = parse_nml_file(filename)
-    get_group(name) = get(raw, name, Dict{String,String}())
-
-    return YelmoMirrorParameters(
-        splitext(basename(filename))[1];   # name = stem of filename
-        yelmo           = struct_from_dict(YelmoParams,          get_group("yelmo")),
-        ytopo           = struct_from_dict(YtopoParams,          get_group("ytopo")),
-        ycalv           = struct_from_dict(YcalvParams,          get_group("ycalv")),
-        ydyn            = struct_from_dict(YdynParams,           get_group("ydyn")),
-        ytill           = struct_from_dict(YtillParams,          get_group("ytill")),
-        yneff           = struct_from_dict(YneffParams,          get_group("yneff")),
-        hyd             = struct_from_dict(YhydParams,           get_group("yhyd")),
-        ymat            = struct_from_dict(YmatParams,           get_group("ymat")),
-        ytherm          = struct_from_dict(YthermParams,         get_group("ytherm")),
-        yelmo_masks     = struct_from_dict(YelmoMasksParams,     get_group("yelmo_masks")),
-        yelmo_init_topo = struct_from_dict(YelmoInitTopoParams,  get_group("yelmo_init_topo")),
-        yelmo_data      = struct_from_dict(YelmoDataParams,      get_group("yelmo_data")),
-        phys            = struct_from_dict(PhysParams,           get_group("phys")),
-    )
+    p = YelmoMirrorParameters(splitext(basename(filename))[1])   # name = stem of filename
+    for (g, kvs) in parse_nml_file(filename)
+        if is_yelmo_group(g)
+            _set!(p, g, (k => parse_nml_value(v) for (k, v) in kvs))
+        else
+            push!(p.extra, g => kvs)
+        end
+    end
+    return p
 end
 
 
 ## Comparison
 
-# ---------------------------------------------------------------------------
-# Equality
-# ---------------------------------------------------------------------------
-
 function Base.:(==)(a::YelmoMirrorParameters, b::YelmoMirrorParameters)
-    for fname in fieldnames(YelmoMirrorParameters)
-        fname == :name && continue
-        getfield(a, fname) == getfield(b, fname) || return false
-    end
-    return true
+    all(effective(a, g) == effective(b, g) for g in schema().groups) || return false
+    return a.extra == b.extra
 end
-
-for S in (YelmoParams, YtopoParams, YcalvParams, YdynParams, YtillParams,
-          YneffParams, YhydParams, YmatParams, YthermParams, YelmoMasksParams,
-          YelmoInitTopoParams, YelmoDataParams, PhysParams)
-    @eval function Base.:(==)(a::$S, b::$S)
-        for fname in fieldnames($S)
-            getfield(a, fname) == getfield(b, fname) || return false
-        end
-        return true
-    end
-end
-
-# For each sub-struct, fall back to the auto-generated field-wise ==
-# (this works because all leaf types are Bool/Int/Float64/String/Vector,
-#  which already have == defined)
-
-# ---------------------------------------------------------------------------
-# Diff printing
-# ---------------------------------------------------------------------------
 
 """
-    diff_nml([io,] p1, p2; include_name=false)
+    compare([io,] p1, p2; include_name=false)
 
-Print all fields that differ between `p1` and `p2`, grouped by namelist group.
-Identical groups are skipped entirely.
+Print all parameters that differ between `p1` and `p2` (with Fortran defaults
+filled in), grouped by namelist group. Identical groups are skipped entirely.
 """
 function compare(io::IO, p1::YelmoMirrorParameters, p2::YelmoMirrorParameters; include_name=false)
     any_diff = false
-    for fname in fieldnames(YelmoMirrorParameters)
-        fname == :name && !include_name && continue
-        g1, g2 = getfield(p1, fname), getfield(p2, fname)
-        g1 == g2 && continue
-
-        # Group header
+    if include_name && p1.name != p2.name
         any_diff = true
-        println(io, "&$(fname)")
-
-        if fname == :name
-            println(io, "  $(rpad("name", 24))  \"$(g1)\"  =>  \"$(g2)\"")
-        else
-            for sfield in fieldnames(typeof(g1))
-                v1, v2 = getfield(g1, sfield), getfield(g2, sfield)
-                v1 == v2 && continue
-                label = sfield == :const_ ? "const" : string(sfield)
-                println(io, "  $(rpad(label, 24))  $(format_value(v1))  =>  $(format_value(v2))")
-            end
+        println(io, "  $(rpad("name", 24))  \"$(p1.name)\"  =>  \"$(p2.name)\"\n")
+    end
+    s = schema()
+    for g in s.groups
+        e1, e2 = effective(p1, g), effective(p2, g)
+        e1 == e2 && continue
+        any_diff = true
+        println(io, "&$(g)")
+        for k in s.keys[g]
+            e1[k] == e2[k] && continue
+            println(io, "  $(rpad(k, 24))  $(format_value(e1[k]))  =>  $(format_value(e2[k]))")
         end
         println(io, "/\n")
+    end
+    if p1.extra != p2.extra
+        any_diff = true
+        println(io, "extra groups differ: ", join(first.(p1.extra), ", "), "  =>  ",
+                join(first.(p2.extra), ", "))
     end
     any_diff || println(io, "(no differences)")
     return nothing
@@ -866,4 +594,3 @@ end
 compare(p1::YelmoMirrorParameters, p2::YelmoMirrorParameters; kw...) = compare(stdout, p1, p2; kw...)
 
 end # module YelmoMirrorPar
-

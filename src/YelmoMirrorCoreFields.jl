@@ -3,7 +3,8 @@ module YelmoMirrorCore
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
-using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml
+using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml, read_nml
+import ..YelmoMirrorPar
 using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
                    XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 import ..YelmoCore: init_state!, step!, uses_split_boundary_storage
@@ -57,7 +58,7 @@ uses_split_boundary_storage(::YelmoMirror) = false
 
 function YelmoMirror(filename::String, time::Float64; 
     alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
-    p = YelmoMirrorParameters(filename)
+    p = read_nml(filename)
     return YelmoMirror(p, time; alias, rundir, overwrite)
 end
 
@@ -113,6 +114,7 @@ function YelmoMirror(p::YelmoMirrorParameters, time::Float64;
         isfile(nml_file) || error("YelmoMirror: nml_file not found: $(nml_file)")
         filename = nml_file
     end
+    grid === nothing && _check_log_timestep(filename)
     if grid === nothing
         _init_yelmomirror(filename, time, calias)
     else
@@ -150,6 +152,22 @@ function YelmoMirror(p::YelmoMirrorParameters, time::Float64;
     tpo  = yelmo_get_variable_group(v_meta.tpo,  g, gt, gr, buffers, calias)
     
     return YelmoMirror(alias, calias, rundir, time, p, g, gt, gr, v_meta, bnd, dta, dyn, mat, thrm, tpo, buffers)
+end
+
+# Fortran `yelmo.log_timestep = True` stops in yelmo_init for a file-based
+# (real-domain) Mirror: creating timesteps.nc fails in nf90_enddef with
+# "NetCDF: HDF error" (initmip-GRL on yelmo dev, 2026-10; cause not known).
+# Synthetic-grid runs write timesteps.nc fine. Refuse it here with a clear message.
+function _check_log_timestep(filename::AbstractString)
+    yelmo = Dict(get(Dict(YelmoMirrorPar.parse_nml_file(filename)), "yelmo", Pair{String,String}[]))
+    on = haskey(yelmo, "log_timestep") ?
+         YelmoMirrorPar.parse_nml_value(yelmo["log_timestep"]) :
+         YelmoMirrorPar.schema().defaults["yelmo"]["log_timestep"]
+    on && error("YelmoMirror: yelmo.log_timestep = True is not supported for a file-based " *
+                "domain: Fortran fails to create timesteps.nc (NetCDF: HDF error). " *
+                "Set log_timestep = False, e.g. " *
+                "YelmoMirrorParameters(p; yelmo=(log_timestep=false,)). ($(filename))")
+    return nothing
 end
 
 # --- Grid Logic ---

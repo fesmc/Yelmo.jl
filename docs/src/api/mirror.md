@@ -81,10 +81,10 @@ ymf = YelmoMirror("yelmo_GRL.nml", 0.0; alias="grl", rundir="./output")
 init_state!(ymf, 0.0)
 ```
 
-The same field set (`Yelmo.YelmoMirrorPar.YelmoInitTopoParams`, see
-[Parameters API](parameters.md)) is exposed as Julia keywords on
-`yelmo_init_topo_params(...)` if you build the parameters
-programmatically.
+The same keys can be set programmatically as overrides of the
+`yelmo_init_topo` group, e.g.
+`YelmoMirrorParameters("grl"; yelmo_init_topo = (init_topo_state = 1,))`
+(see [Parameters API](parameters.md)).
 
 ## Saving a restart
 

@@ -57,14 +57,23 @@ p = YelmoParameters("demo";
 YelmoMirrorParameters
 ```
 
-The Mirror parameter tree mirrors the Fortran namelist exactly
-(including a `phys` group with the per-experiment physical
-constants). Its group factories follow the same naming as the
-`YelmoModel` set, plus `phys_params` and `earth_params` for the
-physical-constants group, but they are **not** exported at the package
-level (to avoid clobbering the primary `YelmoPar` factories). Call them
-namespaced — `YelmoMirrorPar.ydyn_params(...)`,
-`YelmoMirrorPar.phys_params(...)`, etc.
+A `YelmoMirrorParameters` holds only the values that differ from
+Fortran's `yelmo/input/yelmo_defaults.nml`, which is also its schema:
+groups are given as `NamedTuple`s of overrides and every key is checked
+against that file, so a key that Fortran removed or renamed is an error
+in Julia. Reading a group falls back to the Fortran default, and
+`p.phys` returns the constants of `p.yelmo.phys_const` from Fortran's
+`yelmo_phys_const.nml`.
+
+```julia
+p = YelmoMirrorParameters("grl";
+    yelmo = (domain = "Greenland", grid_name = "GRL-16KM"),
+    ydyn  = (solver = "ssa",),
+)
+p.ydyn.solver          # "ssa"
+p.ydyn.beta_method     # Fortran default
+p2 = YelmoMirrorParameters(p; ymat = (de_max = 2.0,))   # copy with more overrides
+```
 
 ## Namelist round-trip
 
