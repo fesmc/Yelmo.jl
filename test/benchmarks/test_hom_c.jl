@@ -97,7 +97,7 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 function _hom_c_yelmo_params()
     Lx_m = _SPEC.L_km * 1e3
     return with_ported_options(YelmoParameters("hom_c";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(phys_const = "ISMIPHOM", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         # Periodic-slope offset for surface gradients on the periodic-x
         # axis (HOM-C `z_srf = -x · tan α`). Without this the wrap-face
         # FD reads the raw periodic image and produces a giant spurious

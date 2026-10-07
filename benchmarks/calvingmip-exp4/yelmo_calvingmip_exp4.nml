@@ -17,7 +17,7 @@
     domain          = "CALVINGMIP"
     grid_name       = "CALVINGMIP"
     grid_path       = "none"
-    phys_const      = "EISMINT"
+    phys_const      = "CALVINGMIP"
     experiment      = "CALVINGMIP"
     nml_ytopo       = "ytopo"
     nml_ycalv       = "ycalv"

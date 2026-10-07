@@ -13,7 +13,7 @@ y = YelmoModel(restart_file::String, time::Float64;
                alias  = "ymodel1",
                rundir = "./",
                p      = nothing,           # YelmoParameters or nothing
-               c      = YelmoConstants(),  # physical constants
+               c      = nothing,           # constants; default YelmoConstants(p)
                groups = (:bnd, :dta, :dyn, :mat, :thrm, :tpo),
                strict = true)
 ```
@@ -95,17 +95,18 @@ Use the symbol-dispatch shortcut over a named-experiment preset, or
 the named factory directly:
 
 ```julia
-c1 = YelmoConstants()                                  # Earth, all defaults
-c2 = YelmoConstants(rho_ice = 917.0)                   # Earth + override
-c3 = YelmoConstants(:EISMINT)                          # preset
-c4 = YelmoConstants(:MISMIP3D, rho_sw = 1027.5)        # preset + override
+c1 = YelmoConstants()                                  # &Earth
+c2 = YelmoConstants(rho_ice = 917.0)                   # &Earth + override
+c3 = YelmoConstants(:EISMINT)                          # &EISMINT
+c4 = YelmoConstants(:MISMIP3D, rho_sw = 1027.5)        # group + override
 c5 = mismip3d_constants(rho_sw = 1027.5)               # equivalent
+c6 = YelmoConstants(p)                                 # p.yelmo.phys_const
 ```
 
-The presets diverge from `Earth` in `sec_year`, `rho_ice`, and
-`T_pmp_beta`. All other fields fall through to the
-`YelmoConstants` defaults. See [`YelmoConstants`](@ref) for the
-full table.
+Without `c`, a `YelmoModel` uses `YelmoConstants(p)`, the group of
+Fortran `input/yelmo_phys_const.nml` named by `p.yelmo.phys_const`. See
+[`YelmoConstants`](@ref) for the fields and [`PHYS_CONST_GROUPS`](@ref)
+for the group values.
 
 ## YelmoMirror constructor
 

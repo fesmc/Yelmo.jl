@@ -62,3 +62,25 @@ end
 @testset "check_ported" begin
     @test_throws ErrorException check_ported(YelmoParameters("defaults"))
 end
+
+# YelmoConstants vs Fortran's `input/yelmo_phys_const.nml`: same groups,
+# same keys, same values.
+@testset "YelmoConstants = yelmo_phys_const.nml" begin
+    raw = MP.parse_nml_file(MP.phys_const_file())
+    @test sort([g.first for g in raw]) == sort(lowercase.(String.(keys(PHYS_CONST_GROUPS))))
+    fields = Set(fieldnames(YelmoConstants))
+    for g in keys(PHYS_CONST_GROUPS)
+        f = MP.phys_constants(String(g))
+        c = YelmoConstants(g)
+        @testset "&$g" begin
+            @test Set(keys(f)) == fields
+            for k in intersect(keys(f), fields)
+                @test getfield(c, k) == f[k] || (@info "&$g.$k differs" julia=getfield(c, k) fortran=f[k]; false)
+            end
+        end
+    end
+    @test YelmoConstants("MISMIP+") == YelmoConstants(:MISMIPplus)
+    @test YelmoConstants(YelmoParameters("c"; yelmo = yelmo_params(phys_const = "EISMINT2"))) ==
+          YelmoConstants(:EISMINT)
+    @test_throws ErrorException YelmoConstants(:bogus)
+end

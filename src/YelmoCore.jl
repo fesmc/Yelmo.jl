@@ -10,8 +10,8 @@ using NCDatasets
 using Krylov: BicgstabWorkspace, CgWorkspace
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
-using ..YelmoConst: YelmoConstants,
-                    MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC,
+import ..YelmoConst: YelmoConstants   # extended below with a YelmoParameters method
+using ..YelmoConst: MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
@@ -1144,9 +1144,11 @@ restart file. Variable layout is taken from `src/variables/model/` markdown
 tables. The model parameters `p` are passed through verbatim and may be
 `nothing`, a `YelmoParameters`, or any user object.
 
-The physical constants `c` default to `YelmoConstants()` (Yelmo Fortran
-defaults). The struct is immutable, so the same `c` instance can be safely
-shared across multiple `YelmoModel`s when the physics is identical.
+The physical constants `c` default to the group of Fortran
+`input/yelmo_phys_const.nml` named by `p.yelmo.phys_const` (see
+[`YelmoConstants`](@ref)). The struct is immutable, so the same `c` instance
+can be safely shared across multiple `YelmoModel`s when the physics is
+identical.
 
 `groups` selects which component groups to load from the restart (default:
 all six). `strict=true` (default) errors if a variable in a loaded group
@@ -1158,11 +1160,24 @@ variables, leaving the corresponding field at its default-allocated value.
 # `YelmoModel` constructors to initialise the per-model `YelmoTimer`.
 _resolve_timing_enabled(p) = p === nothing ? false : p.yelmo.timing
 
+"""
+    YelmoConstants(p::YelmoParameters) -> YelmoConstants
+
+Physical constants of the `yelmo.phys_const` group of `p` (as in Fortran),
+the default `c` of a `YelmoModel` built with `p`.
+"""
+YelmoConstants(p::YelmoParameters) = YelmoConstants(p.yelmo.phys_const)
+
+# Physical constants of a model whose `c` is not given. A non-Yelmo `p`
+# gets `&Earth`.
+_default_constants(p::YelmoParameters) = YelmoConstants(p)
+_default_constants(p) = YelmoConstants()
+
 function YelmoModel(restart_file::String, time::Float64;
                     alias::String = "ymodel1",
                     rundir::String = "./",
                     p = nothing,
-                    c::YelmoConstants = YelmoConstants(),
+                    c::Union{Nothing,YelmoConstants} = nothing,
                     boundaries = :bounded,
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
                     strict::Bool = true,
@@ -1175,6 +1190,7 @@ function YelmoModel(restart_file::String, time::Float64;
               "with_ported_options(YelmoParameters(\"$(alias)\")) (defaults, unported options replaced)."
         p = with_ported_options(YelmoParameters(alias))
     end
+    c === nothing && (c = _default_constants(p))
 
     # Build grids: if a target_grid_file is provided, the model lives
     # on the target horizontal grid (vertical axis from restart) and
@@ -1249,7 +1265,7 @@ Callers are expected to populate boundary/topography fields (`bnd.z_bed`,
 # Keyword arguments
   - `time` (default `0.0`): initial model time.
   - `alias` (default `"ymodel1"`), `rundir` (default `"./"`).
-  - `c::YelmoConstants` (default `YelmoConstants()`).
+  - `c::YelmoConstants` (default `YelmoConstants(p.yelmo.phys_const)`).
   - `boundaries` (default `:bounded`): horizontal topology, see
     [`resolve_boundaries`](@ref).
 """
@@ -1258,8 +1274,10 @@ function YelmoModel(xc::AbstractVector, yc::AbstractVector,
                     time::Float64 = 0.0,
                     alias::String = "ymodel1",
                     rundir::String = "./",
-                    c::YelmoConstants = YelmoConstants(),
+                    c::Union{Nothing,YelmoConstants} = nothing,
                     boundaries = :bounded)
+
+    c === nothing && (c = _default_constants(p))
 
     # Ice and rock vertical axes recovered from the parameters.
     zeta_aa_ice, _ = calc_zeta(p.yelmo.nz_aa, p.yelmo.zeta_scale, p.yelmo.zeta_exp)
@@ -1306,7 +1324,7 @@ function YelmoModel(gridfile::AbstractString, p::YelmoParameters;
                     time::Float64 = 0.0,
                     alias::String = "ymodel1",
                     rundir::String = "./",
-                    c::YelmoConstants = YelmoConstants(),
+                    c::Union{Nothing,YelmoConstants} = nothing,
                     boundaries = :bounded)
 
     xc, yc = NCDataset(gridfile) do ds

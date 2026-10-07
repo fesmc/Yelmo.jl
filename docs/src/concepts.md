@@ -107,16 +107,16 @@ Two distinct concepts, two distinct types:
 - [`YelmoConstants`](@ref) — **physical constants**: ice density
   (`rho_ice = 910.0`), gravity (`g = 9.81`), seconds per year. These
   rarely change within a run, but **may differ across experimental
-  setups** — e.g. EISMINT uses 917 kg/m³ for ice, MISMIP3D uses 900,
-  the Earth default uses 910. Yelmo Fortran handles this via the
-  `phys_const` namelist switch that selects a `&phys` group from
-  `yelmo_phys_const.nml`. The Julia side mirrors this with named
-  constructors:
+  setups** — e.g. MISMIP3D uses 900 kg/m³ for ice and 1000 kg/m³ for
+  seawater, TROUGH uses 918, the Earth default 910. Yelmo Fortran
+  selects a group of `yelmo_phys_const.nml` with the `yelmo.phys_const`
+  parameter; `YelmoModel` does the same (`c = YelmoConstants(p)`) unless
+  `c` is given:
 
   ```julia
-  c1 = YelmoConstants()                       # Earth defaults
-  c2 = YelmoConstants(:EISMINT)               # symbol-dispatched preset
-  c3 = mismip3d_constants(rho_sw = 1027.5)    # named factory + override
+  c1 = YelmoConstants()                       # &Earth
+  c2 = YelmoConstants(:EISMINT)               # &EISMINT
+  c3 = mismip3d_constants(rho_sw = 1027.5)    # named shortcut + override
   ```
 
   `YelmoConstants` is immutable, so the same instance can be shared
@@ -136,8 +136,6 @@ through without parameter-table maintenance.
 - Lengths are metres (Yelmo NetCDF restarts that store coordinates in
   km are converted on load — see [`load_grids_from_restart`](@ref)).
 - Mass-balance fields are m/yr (ice-equivalent thickness rate).
-- The reference year length is configurable via `c.sec_year`. The
-  EISMINT / MISMIP3D / TROUGH presets use 31_556_926 s/yr; the Earth
-  default uses 31_536_000 s/yr (365 × 86_400). Inconsistent year
-  conventions are a frequent source of cross-model bias — pick a
-  convention per project and stick to it.
+- The reference year length is configurable via `c.sec_year`. Earth
+  and most benchmark groups use 31_556_926 s/yr (365.2422 d); MISMIP3D
+  uses 31_536_000 s/yr (365 × 86_400), as its protocol specifies.

@@ -2,44 +2,44 @@
 
 Physical constants live in the `Yelmo.YelmoConst` module and are
 re-exported at the package level. The container type is
-[`YelmoConstants`](@ref); the Fortran `phys_const` namelist switch is
-mirrored on the Julia side by the symbol-dispatch shortcut
-[`YelmoConstants(::Symbol)`](@ref) and a set of named factories.
+[`YelmoConstants`](@ref). Its fields and named groups follow Fortran
+`input/yelmo_phys_const.nml` (checked by `test/test_par_schema.jl`), and
+the Fortran `yelmo.phys_const` switch is mirrored by
+`YelmoConstants(phys_const)`. A `YelmoModel` built with parameters `p`
+uses `YelmoConstants(p)`, the `p.yelmo.phys_const` group, unless `c` is
+given.
 
 See the [concepts page](../concepts.md) for the parameters-vs-constants
 design rationale.
 
-## Container type and presets
+## Container type and groups
 
 ```@docs
 YelmoConstants
 yelmo_constants
+PHYS_CONST_GROUPS
 earth_constants
-eismint_constants
-mismip3d_constants
-trough_constants
 ```
 
-## Symbol-dispatch shortcut
-
-For users who want to write `YelmoConstants(:EISMINT)` instead of
-calling the named factory directly. Mirrors Fortran's
-`select case (phys_const)` dispatch in
-`yelmo_boundaries.f90:ybound_define_physical_constants`.
+## Selecting a group
 
 ```julia
-c = YelmoConstants(:EISMINT)              # → eismint_constants()
-c = YelmoConstants(:MISMIP3D, rho_sw=1027.5)
+c = YelmoConstants(:EISMINT)                  # &EISMINT
+c = YelmoConstants("MISMIP3D"; rho_sw=1027.5) # &MISMIP3D + override
+c = YelmoConstants(p)                         # p.yelmo.phys_const
 ```
 
-Aliases:
+Accepted names (as in Fortran `ybound_define_physical_constants`):
 
-| symbol | factory |
+| `phys_const` | group |
 |---|---|
-| `:Earth` | `earth_constants` |
-| `:EISMINT` / `:EISMINT1` / `:EISMINT2` | `eismint_constants` |
-| `:MISMIP` / `:MISMIP3D` | `mismip3d_constants` |
-| `:TROUGH` | `trough_constants` |
+| `Earth` | `&Earth` |
+| `EISMINT`, `EISMINT1`, `EISMINT2` | `&EISMINT` |
+| `MISMIP`, `MISMIP3D` | `&MISMIP3D` |
+| `MISMIP+`, `MISMIPplus` | `&MISMIPplus` |
+| `ISMIPHOM`, `ISMIP-HOM` | `&ISMIPHOM` |
+| `CALVINGMIP`, `CalvingMIP` | `&CALVINGMIP` |
+| `TROUGH` | `&TROUGH` |
 
 For a custom preset, follow the named-factory pattern:
 

@@ -63,7 +63,7 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 # in sync with that file (or factor out if drift becomes a problem).
 function _eismint_moving_lockstep_params()
     return with_ported_options(YelmoParameters("eismint_moving_lockstep";
-        yelmo = yelmo_params(
+        yelmo = yelmo_params(phys_const = "EISMINT",
             dt_method     = 2,
             pc_method     = "HEUN",
             pc_controller = "PI42",

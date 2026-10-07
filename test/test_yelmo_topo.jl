@@ -1698,12 +1698,13 @@ end
 end
 
 @testset "model: YelmoConstants plumbing" begin
-    # Default constants land on `y.c`.
+    # Default constants: the `yelmo.phys_const` group of `p`.
     y = YelmoModel(RESTART_PATH, 0.0; alias="c-default", strict=false)
-    @test y.c isa YelmoConstants
-    @test y.c.rho_ice == 910.0
-    @test y.c.rho_sw  == 1028.0
-    @test y.c.g       == 9.81
+    @test y.c == YelmoConstants(:Earth)
+    p_eis = with_ported_options(YelmoParameters("c-eismint";
+                                yelmo = yelmo_params(phys_const = "EISMINT")))
+    y = YelmoModel(RESTART_PATH, 0.0; alias="c-eismint", p=p_eis, strict=false)
+    @test y.c == YelmoConstants(:EISMINT)
 
     # Override via the `c=` keyword; same instance can be shared.
     custom = YelmoConstants(rho_ice=917.0, rho_sw=1027.0)
@@ -1724,51 +1725,26 @@ end
 end
 
 @testset "model: named constants constructors" begin
-    # earth_constants — identical to the bare default.
-    e = earth_constants()
-    @test e == YelmoConstants()
+    # Values per group are checked against Fortran's yelmo_phys_const.nml
+    # in test_par_schema.jl; here the constructors and aliases.
+    @test earth_constants()    == YelmoConstants()
+    @test eismint_constants()  == YelmoConstants(:EISMINT)
+    @test mismip3d_constants() == YelmoConstants(:MISMIP3D)
+    @test trough_constants()   == YelmoConstants(:TROUGH)
+    for (alias, group) in (("EISMINT1", :EISMINT), ("EISMINT2", :EISMINT),
+                           ("MISMIP", :MISMIP3D), ("MISMIP+", :MISMIPplus),
+                           ("ISMIP-HOM", :ISMIPHOM), ("CalvingMIP", :CALVINGMIP))
+        @test YelmoConstants(alias) == YelmoConstants(group)
+    end
 
-    # EISMINT — diverges from Earth in three fields; rest fall through.
-    ei = eismint_constants()
-    @test ei.sec_year   == 31556926.0
-    @test ei.rho_ice    == 917.0
-    @test ei.T_pmp_beta == 9.7e-8
-    @test ei.rho_sw     == 1028.0    # falls through to default
-    @test ei.g          == 9.81
-
-    # MISMIP3D — rho_ice = 900.0.
-    m = mismip3d_constants()
-    @test m.sec_year    == 31556926.0
-    @test m.rho_ice     == 900.0
-    @test m.T_pmp_beta  == 9.7e-8
-
-    # TROUGH — rho_ice = 918.0.
-    t = trough_constants()
-    @test t.sec_year    == 31556926.0
-    @test t.rho_ice     == 918.0
-    @test t.T_pmp_beta  == 9.7e-8
-
-    # Kwargs override on top of the named-experiment defaults.
+    # Kwargs override on top of the group values.
     custom = eismint_constants(rho_sw=1027.5, rho_ice=915.0)
     @test custom.rho_sw     == 1027.5
-    @test custom.rho_ice    == 915.0           # kwargs win over the EISMINT default
-    @test custom.sec_year   == 31556926.0      # untouched EISMINT field still set
-    @test custom.T_pmp_beta == 9.7e-8
-
-    # Symbol-dispatch constructor agrees with the named functions and
-    # supports the Fortran-style aliases.
-    @test YelmoConstants(:Earth)    == earth_constants()
-    @test YelmoConstants(:EISMINT)  == eismint_constants()
-    @test YelmoConstants(:EISMINT1) == eismint_constants()
-    @test YelmoConstants(:EISMINT2) == eismint_constants()
-    @test YelmoConstants(:MISMIP)   == mismip3d_constants()
-    @test YelmoConstants(:MISMIP3D) == mismip3d_constants()
-    @test YelmoConstants(:TROUGH)   == trough_constants()
-
-    # kwargs flow through the symbol dispatch.
+    @test custom.rho_ice    == 915.0
+    @test custom.T_pmp_beta == eismint_constants().T_pmp_beta
     sym_override = YelmoConstants(:MISMIP3D, rho_sw=1027.5)
     @test sym_override.rho_sw  == 1027.5
-    @test sym_override.rho_ice == 900.0
+    @test sym_override.rho_ice == mismip3d_constants().rho_ice
 
     @test_throws ErrorException YelmoConstants(:bogus)
 end

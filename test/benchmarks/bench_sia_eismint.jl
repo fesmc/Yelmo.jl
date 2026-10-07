@@ -48,7 +48,7 @@ const PLOT_PATH    = joinpath(RUNDIR_ROOT, "bench_sia_eismint.png")
 
 function build_params(dt_method::Int; log_timestep::Bool = false)
     return with_ported_options(YelmoParameters("eismint_moving_$(dt_method)";
-        yelmo = yelmo_params(
+        yelmo = yelmo_params(phys_const = "EISMINT",
             dt_method     = dt_method,
             pc_method     = "HEUN",
             pc_controller = "PI42",

@@ -148,7 +148,7 @@ end
         # Override solver to "sia" and pin n_glen = 3 to match the
         # BUELER-B convention.
         p = with_ported_options(YelmoParameters("sia_conv_$(Int(round(dx_km)))km";
-                                 yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                 yelmo = yelmo_params(phys_const = "EISMINT", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
                                  ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                                  ydyn = ydyn_params(solver = "sia", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                                  ymat = ymat_params(n_glen = 3.0, rf_method = -1, de_max = 2.0),

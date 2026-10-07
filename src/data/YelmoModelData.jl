@@ -138,7 +138,7 @@ function init_topo_load!(y::YelmoModel;
     grid_name = y.p.yelmo.grid_name
     rho_ice   = y.c.rho_ice
     rho_sw    = y.c.rho_sw
-    rho_a     = y.c.rho_a
+    rho_asth  = y.c.rho_asth
     dx        = _grid_dx(y.g)
 
     if !par.init_topo_load
@@ -209,7 +209,7 @@ function init_topo_load!(y::YelmoModel;
         fill!(H_ice, 0.0)
     elseif par.init_topo_state == 2
         @inbounds for j in 1:ny, i in 1:nx
-            z_bed[i, j] += (rho_ice / rho_a) * H_ice[i, j]
+            z_bed[i, j] += (rho_ice / rho_asth) * H_ice[i, j]
             H_ice[i, j]  = 0.0
         end
     else
