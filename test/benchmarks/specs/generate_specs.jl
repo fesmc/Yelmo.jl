@@ -13,15 +13,17 @@ const PARDIR  = joinpath(MP.YELMO_FORTRAN_DIR, "par")
 const SPECDIR = @__DIR__
 
 # Changes relative to the Fortran par file, group => (key => value).
-# The CalvingMIP and EISMINT-moving changes date from the v1.15 specs; keys
-# that yelmo dev renamed are translated (ssa_lis_opt -> ssa_solver="residual" +
+# The CalvingMIP and EISMINT-moving changes date from the v1.15 specs, except
+# pc_tol/pc_eps: the v1.15 values (5, 1) were for the max-norm pc_eta; under
+# dev's RMS norm they let EISMINT dt grow 3x and the SIA go unstable (863 m/yr
+# at the dome), so the par-file values are used. Keys that yelmo dev renamed are translated (ssa_lis_opt -> ssa_solver="residual" +
 # ssa_lis_opt_residual, &yneff const -> &yhyd bkt_N_closure=0 + const_N).
 const LIS_TIGHT = "-i bicgsafe -p jacobi -maxiter 1000 -tol 1.0e-6 -initx_zeros false"
 
 const CALVINGMIP = Dict(
     "yelmo" => Dict("domain" => "CALVINGMIP", "grid_name" => "CALVINGMIP",
                     "dt_method" => 0, "dt_min" => 0.1, "log_timestep" => false,
-                    "nz_aa" => 5, "zeta_scale" => "linear", "pc_tol" => 5.0, "pc_eps" => 1.0),
+                    "nz_aa" => 5, "zeta_scale" => "linear"),
     "ydyn"  => Dict("beta_method" => 4, "beta_q" => 0.3333333, "beta_gl_stag" => 3,
                     "taud_lim" => 1e6, "ssa_iter_max" => 20, "ssa_iter_conv" => 1e-3,
                     "ssa_solver" => "residual", "ssa_lis_opt_residual" => LIS_TIGHT),
@@ -60,7 +62,7 @@ const SPECS = [
      changes = Dict(
          "ctrl"  => Dict("time_end" => 25000.0),
          "yelmo" => Dict("zeta_scale" => "linear", "log_timestep" => false, "cfl_max" => 0.5,
-                         "pc_method" => "HEUN", "pc_n_redo" => 5, "pc_tol" => 5.0, "pc_eps" => 1.0),
+                         "pc_method" => "HEUN", "pc_n_redo" => 5),
          "ycalv" => Dict("use_lsf" => false),
          "yhyd"  => Dict("bkt_N_closure" => 0, "const_N" => 1.0),
          "ymat"  => Dict("de_max" => 0.5),
