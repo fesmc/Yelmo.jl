@@ -7,28 +7,21 @@ import Pkg; Pkg.activate("..")
 #
 # Setup (per Pattyn 2008 / yelmo/tests/yelmo_ismiphom.f90):
 #   - Domain      : [0, L] × [0, L], L = 80 km, dx = 2 km (Nx = Ny = 40).
-#   - Geometry    : uniform 1000 m slab over a sloping bed (α = 0.1°).
+#   - Geometry    : uniform 1000 m slab over a bed inclined at α = 0.1°.
 #   - Material    : isothermal, A_glen = 1e-16, n = 3.
 #   - Friction    : β(x, y) = β₀ + β_amp · sin(2πx/L) · sin(2πy/L)
 #                   with β₀ = β_amp = 1000 (Yelmo Fortran convention).
 #   - Boundaries  : fully periodic in x and y.
 #
-# Periodic-slope offset (config-time, not a post-`update_diagnostics!`
-# override):
+# Background slope (as in Fortran `yelmo_ismiphom.f90`):
 #
-#   `update_diagnostics!` calls `calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,
-#   …)` which finite-differences `z_srf = -x · tan α` across the periodic-x
-#   wrap. `z_srf` is monotonically decreasing in x and discontinuous across
-#   the periodic boundary, so without help the wrap-column gradient would
-#   be anomalous. The HOM-C config sets
-#   `ytopo.dzsdx_periodic_offset = -tan(α) · Lx_m`, which the gradient
-#   kernel adds to the wrap-face halo read so the FD recovers the true
-#   uniform `-tan α` everywhere. Step 2 of `dyn_step!`
-#   (`calc_driving_stress!`) then produces the desired uniform
-#   `taud_acx = -ρgH·tan α`, `taud_acy = 0`. The same offset is applied
-#   to the `z_base` gradient since `z_base = z_srf - H_ice` and `H_ice`
-#   is periodic. See `src/topo/gradients.jl::calc_gradient_acx!` and
-#   the `dzsdx_periodic_offset` field on `YtopoParams`.
+#   The inclined plane `z = -x · tan α` is not periodic, so `state(b, 0)`
+#   holds only the periodic part of the geometry (`z_srf = 0`,
+#   `z_bed = -H`) and the tilt is `background_slope(b) = (-tan α, 0)`,
+#   set as `ytopo.slope_bg_x/y`. `calc_gradient_acx!` adds it to the
+#   surface and base gradients, so `dzsdx = -tan α` everywhere and
+#   `calc_driving_stress!` produces the uniform `taud_acx = -ρgH·tan α`,
+#   `taud_acy = 0`.
 #
 # 180° rotational symmetry physics:
 #
@@ -50,8 +43,8 @@ import Pkg; Pkg.activate("..")
 #   With uniform `taud = ρgH·tan α ≈ 1.56e4 Pa` and β₀ = 1000, in the
 #   pure-friction limit ux ≈ taud / β = 15.6 m/yr. Membrane terms
 #   modify this slightly. The test asserts `mean(|ux_bar|) ∈ [10, 50]`
-#   m/yr — wildly out-of-range values are a sign that the periodic-
-#   slope offset didn't apply or has the wrong sign.
+#   m/yr — wildly out-of-range values are a sign that the background
+#   slope didn't apply.
 #
 # This test does NOT check against an analytical velocity (HOM-C has
 # no closed-form). It exercises the SSA solver under fully-periodic BC,
@@ -95,17 +88,11 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 # (`visc_method = 1` → `calc_visc_eff_3D_nodes!`), N_eff irrelevant
 # under external β, isothermal ATT.
 function _hom_c_yelmo_params()
-    Lx_m = _SPEC.L_km * 1e3
+    slope_bg_x, slope_bg_y = background_slope(_SPEC)
     return with_ported_options(YelmoParameters("hom_c";
         yelmo = yelmo_params(phys_const = "ISMIPHOM", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
-        # Periodic-slope offset for surface gradients on the periodic-x
-        # axis (HOM-C `z_srf = -x · tan α`). Without this the wrap-face
-        # FD reads the raw periodic image and produces a giant spurious
-        # gradient. See module docstring above and gradients.jl docstring.
-        ytopo = ytopo_params(
-            dzsdx_periodic_offset = -tan(_SPEC.alpha_rad) * Lx_m,
-            dzsdy_periodic_offset =  0.0,
-        ),
+        # The bed tilt, not contained in z_srf/z_bed (see header).
+        ytopo = ytopo_params(slope_bg_x = slope_bg_x, slope_bg_y = slope_bg_y),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
@@ -170,15 +157,11 @@ end
     fill!(interior(y.mat.ATT), p.ymat.rf_const)
 
     # Run topo diagnostics: this populates z_srf, dzsdx, dzsdy from
-    # H_ice + z_bed. The `dzsdx_periodic_offset = -tan(α) · Lx_m` set on
-    # `ytopo` above makes `calc_gradient_acx!` shift the wrap-face halo
-    # read by the correct amount, so `dzsdx` comes out uniformly equal
-    # to `-tan α` across all faces (interior + wrap) — no post-hoc
-    # override needed.
+    # H_ice + z_bed, plus `ytopo.slope_bg_x/y`.
     Yelmo.update_diagnostics!(y)
 
-    # Sanity-check: the periodic-slope offset mechanism produced the
-    # analytical uniform gradient at every interior + wrap face.
+    # Sanity-check: flat periodic geometry + background slope gives the
+    # analytical uniform gradient at every face.
     @test all(isapprox.(interior(y.tpo.dzsdx)[:, :, 1],
                         -tan(b.alpha_rad); atol = 1e-12))
     @test all(isapprox.(interior(y.tpo.dzsdy)[:, :, 1],
@@ -201,11 +184,8 @@ end
     @test all(isfinite, uy)
 
     # Sanity-check magnitude: should be O(15 m/yr) for HOM-C-C with
-    # L = 80 km. If the periodic-slope offset didn't apply, ux would
-    # be near zero (no driving stress on most cells, garbage on the
-    # wrap face). If the offset has the wrong sign, mean(|ux|) might
-    # still pass but the test is more useful as a catch on "offset
-    # forgotten" than on sign errors.
+    # L = 80 km. Without the background slope there is no driving
+    # stress and ux would be near zero.
     mean_abs_ux = sum(abs, ux) / length(ux)
     @info "HOM-C mean(|ux_bar|) = $(round(mean_abs_ux; digits=3)) m/yr " *
           "(expected ≈ 15.6 for taud / β₀ = ρgH·tan α / 1000)"

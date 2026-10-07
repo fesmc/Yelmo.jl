@@ -136,17 +136,7 @@ Base.@kwdef struct YtopoParams
     dmb_m_r             ::Float64 = 1.0         # [-]   Discharge resolution scaling exponent
     fmb_method          ::Int     = 0           # 0: fmb_shlf; 1: fmb~bmb_shlf; 2: scaled by submerged front area; 3: Rignot et al. (2016)
     fmb_scale           ::Float64 = 1.0         # Scaling of fmb ~ scale*bmb
-    fmb_lambda          ::Float64 = 1.0         # fmb_method=3: scaling of the Rignot et al. (2016) frontal melt
-    # --- Julia-only (see JULIA_ONLY_KEYS) ---
-    # Signed surface change `Δz_srf` across one periodic image in +x / +y,
-    # added at the wrap face of the surface-gradient kernels, for periodic
-    # benchmarks whose z_srf contains a uniform tilt (HOM-C:
-    # `-tan(α) · Lx_m`). Config-time constant. Fortran dev instead keeps the
-    # tilt out of z_srf/z_bed and adds `slope_bg_x/y` to the gradients;
-    # this offset goes once the benchmarks are moved to slope_bg.
-    dzsdx_periodic_offset ::Float64 = 0.0
-    dzsdy_periodic_offset ::Float64 = 0.0
-end
+    fmb_lambda          ::Float64 = 1.0         # fmb_method=3: scaling of the Rignot et al. (2016) frontal meltend
 ytopo_params(; kwargs...) = YtopoParams(; kwargs...)
 # ---------------------------------------------------------------------------
 # &ycalv
@@ -520,9 +510,6 @@ const JULIA_ONLY_KEYS = Dict(
         "pc_advective"  => "Fortran's advective-only PC vs. the legacy two-cascade Yelmo.jl PC (until the reject-path regression is understood)",
         "pc_eta_masked" => "switch off the Fortran pc error mask (diagnostics)",
         "timing"        => "per-section wall-clock timing of YelmoModel"),
-    "ytopo" => Dict(
-        "dzsdx_periodic_offset" => "periodic-wrap correction for tilted z_srf; replaced by slope_bg_x once the benchmarks move to it",
-        "dzsdy_periodic_offset" => "periodic-wrap correction for tilted z_srf; replaced by slope_bg_y once the benchmarks move to it"),
     "ydyn" => Dict(
         "ssa_solver_linear_method" => "Krylov method of the SSA linear solve (Fortran: Lis options)",
         "ssa_solver_precond"       => "preconditioner of the SSA linear solve (Fortran: Lis options)",
