@@ -3,7 +3,7 @@ module YelmoMirrorCore
 using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using ..YelmoMeta: VariableMeta, parse_variable_table
-using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml
+using ..YelmoMirrorPar: YelmoMirrorParameters, write_nml, read_nml
 using ..YelmoCore: AbstractYelmoModel, _alloc_field, yelmo_define_grids,
                    XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 import ..YelmoCore: init_state!, step!, uses_split_boundary_storage
@@ -57,7 +57,7 @@ uses_split_boundary_storage(::YelmoMirror) = false
 
 function YelmoMirror(filename::String, time::Float64; 
     alias::String="ylmo1", rundir::String="./", overwrite::Bool=false)
-    p = YelmoMirrorParameters(filename)
+    p = read_nml(filename)
     return YelmoMirror(p, time; alias, rundir, overwrite)
 end
 

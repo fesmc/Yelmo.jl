@@ -11,7 +11,7 @@ using Oceananigans.Grids
 using Yelmo
 
 # Define parameters and write parameter file
-p = YelmoMirrorParameters("Greenland")
+p = YelmoMirrorParameters("Greenland"; yelmo=(domain="Greenland", grid_name="GRL-16KM"))
 
 # Initialize Yelmo
 ylmo = YelmoMirror(p, 0.0; rundir="run01", overwrite=true);
@@ -55,8 +55,8 @@ heatmap(ylmo.dyn.uxy_s,colorscale=log10)
 
 ## Parameter sets
 
-p1 = YelmoMirrorParameters("Greenland");
-p2 = YelmoMirrorParameters("Greenland";ydyn  = ydyn_params(solver="ssa"));
+p1 = YelmoMirrorParameters("Greenland"; yelmo=(domain="Greenland", grid_name="GRL-16KM"));
+p2 = YelmoMirrorParameters(p1; ydyn=(solver="ssa",));
 
 p3 = YelmoMirrorParameters("/Users/alrobi001/models/yelmo/output/grl-diva-test/yelmo_initmip.nml","Greenland")
 
