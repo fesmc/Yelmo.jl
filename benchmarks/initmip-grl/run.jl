@@ -41,7 +41,7 @@ const BMB_SHLF_CONST = -0.5         # [m/yr] constant basal melt under shelves
 function build_params(backend::Symbol = :yelmo)
     pc = backend === :yelmo ? (pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0) : (;)
     return with_ported_options(YelmoParameters("initmip_grl";
-        yelmo = yelmo_params(
+        yelmo = yelmo_params(;
             domain       = "Greenland",
             grid_name    = "GRL-16KM",
             grid_path    = joinpath(DATA_DIR, "GRL-16KM_REGIONS.nc"),
