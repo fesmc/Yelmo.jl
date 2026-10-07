@@ -209,10 +209,9 @@ end
     s = state(b, 0.0)
     @test size(s.H_ice) == (40, 40)
     @test all(s.H_ice .== 1000.0)
-    # z_bed = -x · tan α - H. Linear in x, constant in y.
-    @test s.z_bed[1, 1]    ≈ -b.xc[1]   * tan(b.alpha_rad) - b.H
-    @test s.z_bed[end, 1]  ≈ -b.xc[end] * tan(b.alpha_rad) - b.H
-    @test all(abs.(diff(s.z_bed; dims=2)) .< 1e-10)   # constant in y
+    # Periodic part only: z_bed = -H; the tilt is the background slope.
+    @test all(s.z_bed .== -b.H)
+    @test background_slope(b) == (-tan(b.alpha_rad), 0.0)
 
     # Variant validation.
     @test_throws ErrorException HOMCBenchmark(:A; L_km=80.0, dx_km=2.0)

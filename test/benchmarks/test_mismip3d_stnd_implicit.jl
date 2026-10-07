@@ -54,7 +54,7 @@ const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 
 function _params_with_solver(solver_str::String, alias::String)
     return with_ported_options(YelmoParameters(alias;
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(phys_const = "MISMIP3D", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         ytopo = ytopo_params(solver = solver_str),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(

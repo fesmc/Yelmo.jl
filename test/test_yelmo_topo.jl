@@ -1698,12 +1698,13 @@ end
 end
 
 @testset "model: YelmoConstants plumbing" begin
-    # Default constants land on `y.c`.
+    # Default constants: the `yelmo.phys_const` group of `p`.
     y = YelmoModel(RESTART_PATH, 0.0; alias="c-default", strict=false)
-    @test y.c isa YelmoConstants
-    @test y.c.rho_ice == 910.0
-    @test y.c.rho_sw  == 1028.0
-    @test y.c.g       == 9.81
+    @test y.c == YelmoConstants(:Earth)
+    p_eis = with_ported_options(YelmoParameters("c-eismint";
+                                yelmo = yelmo_params(phys_const = "EISMINT")))
+    y = YelmoModel(RESTART_PATH, 0.0; alias="c-eismint", p=p_eis, strict=false)
+    @test y.c == YelmoConstants(:EISMINT)
 
     # Override via the `c=` keyword; same instance can be shared.
     custom = YelmoConstants(rho_ice=917.0, rho_sw=1027.0)
@@ -1724,51 +1725,26 @@ end
 end
 
 @testset "model: named constants constructors" begin
-    # earth_constants — identical to the bare default.
-    e = earth_constants()
-    @test e == YelmoConstants()
+    # Values per group are checked against Fortran's yelmo_phys_const.nml
+    # in test_par_schema.jl; here the constructors and aliases.
+    @test earth_constants()    == YelmoConstants()
+    @test eismint_constants()  == YelmoConstants(:EISMINT)
+    @test mismip3d_constants() == YelmoConstants(:MISMIP3D)
+    @test trough_constants()   == YelmoConstants(:TROUGH)
+    for (alias, group) in (("EISMINT1", :EISMINT), ("EISMINT2", :EISMINT),
+                           ("MISMIP", :MISMIP3D), ("MISMIP+", :MISMIPplus),
+                           ("ISMIP-HOM", :ISMIPHOM), ("CalvingMIP", :CALVINGMIP))
+        @test YelmoConstants(alias) == YelmoConstants(group)
+    end
 
-    # EISMINT — diverges from Earth in three fields; rest fall through.
-    ei = eismint_constants()
-    @test ei.sec_year   == 31556926.0
-    @test ei.rho_ice    == 917.0
-    @test ei.T_pmp_beta == 9.7e-8
-    @test ei.rho_sw     == 1028.0    # falls through to default
-    @test ei.g          == 9.81
-
-    # MISMIP3D — rho_ice = 900.0.
-    m = mismip3d_constants()
-    @test m.sec_year    == 31556926.0
-    @test m.rho_ice     == 900.0
-    @test m.T_pmp_beta  == 9.7e-8
-
-    # TROUGH — rho_ice = 918.0.
-    t = trough_constants()
-    @test t.sec_year    == 31556926.0
-    @test t.rho_ice     == 918.0
-    @test t.T_pmp_beta  == 9.7e-8
-
-    # Kwargs override on top of the named-experiment defaults.
+    # Kwargs override on top of the group values.
     custom = eismint_constants(rho_sw=1027.5, rho_ice=915.0)
     @test custom.rho_sw     == 1027.5
-    @test custom.rho_ice    == 915.0           # kwargs win over the EISMINT default
-    @test custom.sec_year   == 31556926.0      # untouched EISMINT field still set
-    @test custom.T_pmp_beta == 9.7e-8
-
-    # Symbol-dispatch constructor agrees with the named functions and
-    # supports the Fortran-style aliases.
-    @test YelmoConstants(:Earth)    == earth_constants()
-    @test YelmoConstants(:EISMINT)  == eismint_constants()
-    @test YelmoConstants(:EISMINT1) == eismint_constants()
-    @test YelmoConstants(:EISMINT2) == eismint_constants()
-    @test YelmoConstants(:MISMIP)   == mismip3d_constants()
-    @test YelmoConstants(:MISMIP3D) == mismip3d_constants()
-    @test YelmoConstants(:TROUGH)   == trough_constants()
-
-    # kwargs flow through the symbol dispatch.
+    @test custom.rho_ice    == 915.0
+    @test custom.T_pmp_beta == eismint_constants().T_pmp_beta
     sym_override = YelmoConstants(:MISMIP3D, rho_sw=1027.5)
     @test sym_override.rho_sw  == 1027.5
-    @test sym_override.rho_ice == 900.0
+    @test sym_override.rho_ice == mismip3d_constants().rho_ice
 
     @test_throws ErrorException YelmoConstants(:bogus)
 end
@@ -2378,97 +2354,57 @@ end
     @test Dx[3, 2, 1] ≈ 400.0
 end
 
-@testset "tpo: calc_gradient_acx! — periodic-x slope offset" begin
-    # Periodic-x grid with `var = -slope · x_centre`. Without a
-    # `periodic_offset`, the wrap face (i = Nx) reads the raw periodic
-    # image `var[1]` and produces a spurious large positive gradient.
-    # With `periodic_offset = -slope · Lx`, the wrap face sees the
-    # correct one-image-east shift and recovers the true uniform
-    # `-slope` everywhere.
+@testset "tpo: calc_gradient_acx! — background slope (slope_bg)" begin
+    # Tilted periodic domain as in Fortran: `var` holds only the periodic
+    # part (a bump), the tilt is `slope_bg`, added to every face.
     Nx = 8
     dx = 1.0
-    slope = 0.1
-    Lx = Nx * dx                 # one periodic image distance
+    slope = -0.1
     g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, Lx), y=(0.0, Lx),
+                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
                         topology=(Periodic, Bounded, Flat))
     var    = CenterField(g)
     f_ice  = CenterField(g)
-    dvardx = CenterField(g)
+    d0     = CenterField(g)
+    d1     = CenterField(g)
 
     fill!(interior(f_ice), 1.0)
     @inbounds for j in 1:Nx, i in 1:Nx
-        interior(var)[i, j, 1] = -slope * (i - 0.5) * dx
+        interior(var)[i, j, 1] = sin(2π * (i - 0.5) / Nx)
     end
 
-    # Without offset: interior faces all see -slope; wrap face is wrong.
-    calc_gradient_acx!(dvardx, var, f_ice, dx)
-    Dx = interior(dvardx)
-    @test all(isapprox.(Dx[1:Nx-1, :, 1], -slope; atol = 1e-12))
-    @test abs(Dx[Nx, 1, 1]) > 0.1   # demonstrably wrong without offset
+    calc_gradient_acx!(d0, var, f_ice, dx)
+    calc_gradient_acx!(d1, var, f_ice, dx; slope_bg = slope)
+    @test all(isapprox.(interior(d1), interior(d0) .+ slope; atol = 1e-12))
+    # Periodic part only: the wrap face is consistent with the rest.
+    @test isapprox(sum(interior(d0)[:, 1, 1]), 0.0; atol = 1e-12)
 
-    # With offset = -slope · Lx, all faces (interior + wrap) recover
-    # the true uniform slope.
-    fill!(interior(dvardx), 0.0)
-    calc_gradient_acx!(dvardx, var, f_ice, dx;
-                       periodic_offset = -slope * Lx)
-    Dx = interior(dvardx)
-    @test all(isapprox.(Dx[:, :, 1], -slope; atol = 1e-12))
+    # grad_lim bounds the total slope (slope_bg added before the clamp).
+    calc_gradient_acx!(d1, var, f_ice, dx; slope_bg = slope, grad_lim = 0.2)
+    @test maximum(abs, interior(d1)) <= 0.2
+    @test minimum(interior(d1)) == -0.2
 end
 
-@testset "tpo: calc_gradient_acy! — periodic-y slope offset" begin
-    # Mirror of the acx test on the y-axis: Periodic-y grid, var
-    # increasing in y with constant slope, wrap face at j = Ny.
+@testset "tpo: calc_gradient_acy! — background slope (slope_bg)" begin
     Nx = 8
     dy = 2.0
-    slope = -0.05
-    Ly = Nx * dy
+    slope = 0.05
     g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, Nx*dy), y=(0.0, Ly),
+                        x=(0.0, Nx*dy), y=(0.0, Nx*dy),
                         topology=(Bounded, Periodic, Flat))
     var    = CenterField(g)
     f_ice  = CenterField(g)
-    dvardy = CenterField(g)
+    d0     = CenterField(g)
+    d1     = CenterField(g)
 
     fill!(interior(f_ice), 1.0)
     @inbounds for j in 1:Nx, i in 1:Nx
-        interior(var)[i, j, 1] = slope * (j - 0.5) * dy
+        interior(var)[i, j, 1] = cos(2π * (j - 0.5) / Nx)
     end
 
-    calc_gradient_acy!(dvardy, var, f_ice, dy)
-    Dy = interior(dvardy)
-    @test all(isapprox.(Dy[:, 1:Nx-1, 1], slope; atol = 1e-12))
-    @test abs(Dy[1, Nx, 1]) > 0.1   # wrap face wrong without offset
-
-    fill!(interior(dvardy), 0.0)
-    calc_gradient_acy!(dvardy, var, f_ice, dy;
-                       periodic_offset = slope * Ly)
-    Dy = interior(dvardy)
-    @test all(isapprox.(Dy[:, :, 1], slope; atol = 1e-12))
-end
-
-@testset "tpo: calc_gradient_acx! — Bounded ignores periodic_offset" begin
-    # Under Bounded-x there is no wrap face, so `periodic_offset` is
-    # silently a no-op. Confirm the output is identical with offset=0
-    # vs offset=large.
-    Nx = 6
-    dx = 1.0
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
-                        topology=(Bounded, Bounded, Flat))
-    var    = CenterField(g)
-    f_ice  = CenterField(g)
-    dvardx_a = CenterField(g)
-    dvardx_b = CenterField(g)
-
-    fill!(interior(f_ice), 1.0)
-    @inbounds for j in 1:Nx, i in 1:Nx
-        interior(var)[i, j, 1] = 1.5 * (i - 0.5) * dx
-    end
-
-    calc_gradient_acx!(dvardx_a, var, f_ice, dx)
-    calc_gradient_acx!(dvardx_b, var, f_ice, dx; periodic_offset = 1234.0)
-    @test interior(dvardx_a) == interior(dvardx_b)
+    calc_gradient_acy!(d0, var, f_ice, dy)
+    calc_gradient_acy!(d1, var, f_ice, dy; slope_bg = slope)
+    @test all(isapprox.(interior(d1), interior(d0) .+ slope; atol = 1e-12))
 end
 
 @testset "tpo: calc_f_grnd_subgrid_linear!" begin

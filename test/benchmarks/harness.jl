@@ -40,7 +40,7 @@ using Oceananigans: interior
 # This module only adds Yelmo-side scaffolding: BenchmarkSpec, the
 # YelmoMirror fixture-generation harness, and the per-benchmark IC
 # callbacks / fixture writers.
-using IceSheetBenchmarks: AbstractBenchmark, BuelerBenchmark,
+using IceSheetBenchmarks: AbstractBenchmark, background_slope, BuelerBenchmark,
                            bueler_gamma, bueler_test_BC!,
                            HOMCBenchmark,
                            TroughBenchmark,
@@ -135,7 +135,7 @@ export BenchmarkSpec
 export AbstractBenchmark, BuelerBenchmark, TroughBenchmark, HOMCBenchmark,
        MISMIP3DBenchmark, EISMINT1MovingBenchmark, CalvingMIPBenchmark
 export generate_fixture!, load_fixture
-export state, write_fixture!, analytical_velocity
+export state, write_fixture!, analytical_velocity, background_slope
 export bueler_test_BC!, bueler_gamma
 export _setup_hom_c_beta!
 export apply_trough_f17_ic!

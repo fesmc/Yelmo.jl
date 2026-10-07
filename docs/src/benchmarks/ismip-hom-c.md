@@ -45,8 +45,8 @@ u_y(x, y) = u_y(L - x,\, L - y).
 The test:
 
 1. Checks that `update_diagnostics!` produces a uniform `dzsdx = −tan α`
-   at every face (including across the periodic wrap), confirming that the
-   `dzsdx_periodic_offset` mechanism works correctly.
+   at every face (including across the periodic wrap) from the flat
+   geometry plus the background slope.
 2. Checks that `mean(|ux_bar|) ∈ [10, 50]` m/yr (sanity bound on driving
    stress / friction balance).
 3. Asserts the rotational symmetry residual (maximum element-wise
@@ -58,18 +58,15 @@ floor, not a structural error.  The 1 × 10⁻⁷ threshold sits 5× above that
 noise floor while detecting any recurrence of the periodic-wrap clamp bug
 it was written to catch (that bug produced residuals of ~5 × 10⁻²).
 
-## Periodic-slope offset
+## Background slope
 
-The benchmark geometry is a uniformly-sloped surface `z_s = −x tan α`.
-On a periodic domain, the gradient kernel `calc_gradient_acx!` reads the
-halo from the opposing face across the wrap.  Without correction, the
-wrap-face gradient would see a discontinuous jump from `z_s(Nx·dx) ≈ 0` back
-to `z_s(0) = 0`, producing zero driving stress on that column instead of the
-uniform `−tan α`.
-
-The fix is the `ytopo.dzsdx_periodic_offset` parameter: the gradient
-kernel adds `offset = −tan α · L_x` to the halo read at the wrap face, so
-every face (interior and wrap) recovers the correct uniform gradient.
+The inclined plane `z = −x tan α` is not periodic.  As in the Fortran
+reference (`yelmo/tests/yelmo_ismiphom.f90`), it is carried as a uniform
+background slope: the geometry holds only the periodic part (`z_srf = 0`,
+`z_bed = −H`), and `ytopo.slope_bg_x = −tan α` (from
+`background_slope(b)` of the IceSheetBenchmarks spec) is added to the
+surface and bed gradients by `calc_gradient_acx!`, before the `grad_lim`
+clamp.
 
 ## How to run
 

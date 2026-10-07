@@ -658,24 +658,20 @@ function _update_diagnostics!(y::YelmoModel,
     dx = _dx(y.g)
     dy = _dy(y.g)
     grad_lim = y.p.ytopo.grad_lim
-    # Periodic-wrap slope offsets. Default 0.0 (production ice sheets,
-    # Bounded lateral axes); set in benchmark configs with a uniform-
-    # slope surface across a periodic axis (HOM-C, MISMIP3D Stnd).
-    # `z_base = z_srf - H_ice` and `H_ice` is periodic in those
-    # configs, so the same offset applies to the `z_base` gradient.
-    # `dHidx`/`dHidy` use offset = 0 (default) since `H_ice` is
-    # periodic by construction in those benchmarks.
-    dzsdx_off = y.p.ytopo.dzsdx_periodic_offset
-    dzsdy_off = y.p.ytopo.dzsdy_periodic_offset
+    # Uniform background slope (`ytopo.slope_bg_x/y`, default 0) of a
+    # tilted periodic domain, not contained in z_srf/z_bed: added to the
+    # surface and base gradients, not to dHidx/dHidy.
+    slope_bg_x = y.p.ytopo.slope_bg_x
+    slope_bg_y = y.p.ytopo.slope_bg_y
 
     calc_gradient_acx!(y.tpo.dzsdx, y.tpo.z_srf,  y.tpo.f_ice, dx;
                        grad_lim = grad_lim,
                        zero_outside = false,
-                       periodic_offset = dzsdx_off)
+                       slope_bg = slope_bg_x)
     calc_gradient_acy!(y.tpo.dzsdy, y.tpo.z_srf,  y.tpo.f_ice, dy;
                        grad_lim = grad_lim,
                        zero_outside = false,
-                       periodic_offset = dzsdy_off)
+                       slope_bg = slope_bg_y)
 
     calc_gradient_acx!(y.tpo.dHidx, y.tpo.H_ice,  y.tpo.f_ice, dx;
                        grad_lim = grad_lim,
@@ -687,11 +683,11 @@ function _update_diagnostics!(y::YelmoModel,
     calc_gradient_acx!(y.tpo.dzbdx, y.tpo.z_base, y.tpo.f_ice, dx;
                        grad_lim = grad_lim,
                        zero_outside = false,
-                       periodic_offset = dzsdx_off)
+                       slope_bg = slope_bg_x)
     calc_gradient_acy!(y.tpo.dzbdy, y.tpo.z_base, y.tpo.f_ice, dy;
                        grad_lim = grad_lim,
                        zero_outside = false,
-                       periodic_offset = dzsdy_off)
+                       slope_bg = slope_bg_y)
 
     # Distance-to-feature fields (metres) and bed-state masks.
     calc_distance_to_grounding_line!(y.tpo.dist_grline, y.tpo.f_grnd, dx)

@@ -72,7 +72,8 @@ export VariableMeta, parse_variable_table
 
 # YelmoConst
 export YelmoConstants, yelmo_constants, earth_constants,
-       eismint_constants, mismip3d_constants, trough_constants
+       eismint_constants, mismip3d_constants, trough_constants,
+       PHYS_CONST_GROUPS
 # (MASK_ICE_* are also exported from YelmoCore for back-compat — see below.)
 
 # YelmoMirrorPar (mirror-specific params; constructors/read_nml stay namespaced

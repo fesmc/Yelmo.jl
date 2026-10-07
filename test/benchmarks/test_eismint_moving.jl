@@ -57,7 +57,7 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
 # reference values (the package default is `"AB-SAM"`).
 function _eismint_moving_params()
     return with_ported_options(YelmoParameters("eismint_moving";
-        yelmo = yelmo_params(
+        yelmo = yelmo_params(phys_const = "EISMINT",
             dt_method     = 2,
             pc_method     = "HEUN",
             pc_controller = "PI42",

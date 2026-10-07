@@ -46,7 +46,7 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
 # `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
 function _adaptive_params(; pc_method::String = "FE-SBE")
     return with_ported_options(YelmoParameters("mismip3d_stnd_adaptive";
-        yelmo = yelmo_params(
+        yelmo = yelmo_params(phys_const = "MISMIP3D",
             dt_method     = 2,
             pc_method     = pc_method,
             pc_controller = "PI42",
@@ -97,7 +97,7 @@ function _fixed_params()
     p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
     return with_ported_options(YelmoParameters(p.name;
-        yelmo = yelmo_params(dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(phys_const = "MISMIP3D", dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         ytopo = p.ytopo,
         ycalv = p.ycalv,
         ydyn = p.ydyn,
