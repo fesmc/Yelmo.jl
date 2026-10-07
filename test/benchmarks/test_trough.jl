@@ -38,7 +38,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params
+                           yhyd_params, ytill_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 
@@ -49,7 +49,7 @@ const _SPEC  = TroughBenchmark(:F17; dx_km=8.0)
 # Trough-physics parameters for the file-based YelmoModel — must
 # echo every override from `specs/yelmo_TROUGH.nml` so the solver
 # config is consistent with the fixture's reference state. Defaults
-# from `ytill_params`, `yneff_params`, `ymat_params`, and
+# from `ytill_params`, `yhyd_params`, `ymat_params`, and
 # `ydyn_params` follow the Fortran *global* defaults; the trough
 # namelist overrides several of them and we must mirror that here.
 #
@@ -58,7 +58,9 @@ const _SPEC  = TroughBenchmark(:F17; dx_km=8.0)
 # through, producing c_bed ~53× too large. Fixing the ytill block
 # (and auditing yneff / ymat / ydyn while we're at it) closes it.
 function _trough_yelmo_params()
-    return YelmoParameters("trough_f17_load";
+    return with_ported_options(YelmoParameters("trough_f17_load";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         # &ydyn — overrides namelist values for an SSA-only lockstep
         # check. solver = "ssa" diverges from the namelist's "diva"
         # by design (test exercises the SSA kernel against the
@@ -73,20 +75,10 @@ function _trough_yelmo_params()
             beta_gl_stag   = 3,                     # namelist: 3 (default is 1)
             beta_min       = 0.0,                   # namelist: 0.0 (default is 100.0)
             ssa_lat_bc     = "floating",            # namelist: "floating"
-            ssa_solver     = SSASolver(rtol            = 1e-4,
-                                       itmax           = 200,
-                                       picard_tol      = 1e-3,    # namelist ssa_iter_conv = 1e-3
-                                       picard_iter_max = 20,      # namelist ssa_iter_max  = 20
-                                       picard_relax    = 0.7),    # namelist ssa_iter_rel  = 0.7
+            ssa_solver     = SSASolver(method = :residual, rtol            = 1e-4, itmax           = 200),    # namelist ssa_iter_rel  = 0.7,
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        # &yneff — namelist sets method=3 with nxi=5 subgrid sampling,
-        # but Yelmo.jl has nxi > 0 deferred (errors on non-zero nxi
-        # in calc_ydyn_neff!). Use method=-1 (external) so the
-        # fixture's loaded N_eff is preserved as-is. Phase 1 diag
-        # confirmed N_eff matches the fixture exactly under this
-        # path; switching to method=3 with nxi=0 would compute a
-        # slightly different N_eff than Fortran's nxi=5 result.
-        yneff = yneff_params(method = -1, const_ = 1e7),
         # &ytill — namelist:
         #   method=1, scale_zb=0, scale_sed=0, is_angle=True, n_sd=1,
         #   f_sed=1.0, sed_min=5.0, sed_max=15.0, z0=-300, z1=200,
@@ -110,18 +102,28 @@ function _trough_yelmo_params()
             cf_min    =  5.0,
             cf_ref    = 10.0,
         ),
+        # &yneff — namelist sets method=3 with nxi=5 subgrid sampling,
+        # but Yelmo.jl has nxi > 0 deferred (errors on non-zero nxi
+        # in calc_ydyn_neff!). Use method=-1 (external) so the
+        # fixture's loaded N_eff is preserved as-is. Phase 1 diag
+        # confirmed N_eff matches the fixture exactly under this
+        # path; switching to method=3 with nxi=0 would compute a
+        # slightly different N_eff than Fortran's nxi=5 result.
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
         # &ymat — namelist overrides:
         #   rf_const=3.1536e-18, de_max=0.5, enh_shear/stream/shlf=1.0
         # (defaults are 1e-18, 2.0, 3.0/3.0/0.7).
-        ymat  = ymat_params(
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 3.1536e-18,
             de_max     = 0.5,
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-    )
+        ytherm = ytherm_params(method = "temp"),
+    ))
 end
 
 @testset "benchmarks: TroughBenchmark fixture round-trip + SSA dyn_step" begin
@@ -229,7 +231,7 @@ end
     iter_count = y_file.dyn.scratch.ssa_iter_now[]
     @info "Trough dyn_step! Picard iterations: $iter_count"
     @test iter_count > 0
-    @test iter_count <= y_file.p.ydyn.ssa_solver.picard_iter_max
+    @test iter_count <= y_file.p.ydyn.ssa_iter_max
 
     new_ux_bar = interior(y_file.dyn.ux_bar)
     new_uy_bar = interior(y_file.dyn.uy_bar)

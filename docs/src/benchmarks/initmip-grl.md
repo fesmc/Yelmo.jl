@@ -26,7 +26,7 @@ reference `yelmo/tests/yelmo_initmip.f90` (`set_grl_pd` case).
 | Vertical layers | 10 ice + 5 bedrock |
 | Solver | DIVA (`ydyn.solver = "diva"`) |
 | Calving | von Mises (`vm-l19`) |
-| Effective pressure | till pressure (`yneff.method = 3`) |
+| Effective pressure | till pressure (`yhyd.bkt_N_closure = 3`) |
 | Time-stepping | adaptive PC, `dt_method = 2` (HEUN on `YelmoModel`, AB-SAM on Mirror) |
 | Default `t_end` | 20 yr (functional check; raise for spin-up) |
 

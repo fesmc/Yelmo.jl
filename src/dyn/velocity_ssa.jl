@@ -95,7 +95,7 @@ If `use_ssa == false`, all faces stay 0 (everything Dirichlet).
 
 `lateral_bc` selects which fronts trigger the BC:
   - "none"               : no fronts.
-  - "floating"|"float"|"slab"|"slab-ext" : only floating fronts.
+  - "floating"|"float"    : only floating fronts.
   - "marine"             : floating + grounded-marine.
   - "all"                : all fronts.
 
@@ -146,8 +146,7 @@ function set_ssa_masks!(ssa_mask_acx, ssa_mask_acy,
                 mask_frnt_dyn[i, j] = _SSA_MASK_FRNT_DISABLED
             end
         end
-    elseif lateral_bc == "floating" || lateral_bc == "float" ||
-           lateral_bc == "slab"     || lateral_bc == "slab-ext"
+    elseif lateral_bc == "floating" || lateral_bc == "float"
         # Only floating fronts trigger BC; disable grounded + marine.
         @inbounds for j in 1:Ny, i in 1:Nx
             v = mask_frnt_dyn[i, j]
@@ -1514,7 +1513,7 @@ end
 #
 # The Fortran driver also has an adaptive corr_theta block that's
 # disabled (`if (.FALSE.)`); we mirror that omission and use a
-# constant relaxation parameter `ssa.picard_relax`.
+# constant relaxation parameter `p_ydyn.ssa_iter_rel`.
 # ----------------------------------------------------------------------
 
 """
@@ -1526,8 +1525,8 @@ Run the SSA Picard iteration on `y`. Updates `y.dyn.ux_b`, `y.dyn.uy_b`,
 plus diagnostic scratch fields (`scratch.ssa_residuals`,
 `scratch.ssa_iter_now`, `scratch.ssa_picard_*_nm1`).
 
-Reads from `y.p.ydyn.ssa_solver` (the `SSASolver` object) for all
-solver knobs. Other inputs come from the prior pre-solver kinematic
+Reads the linear-solver knobs from `y.p.ydyn.ssa_solver` (`SSASolver`)
+and the Picard settings from `ydyn.ssa_iter_*`. Other inputs come from the prior pre-solver kinematic
 calls in `dyn_step!` (driving stress, lateral BC stress, masks, c_bed).
 
 Mirrors `velocity_ssa.f90:60 calc_velocity_ssa`. Uses the
@@ -1577,7 +1576,7 @@ function calc_velocity_ssa!(y)
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
 
-    for iter in 1:ssa.picard_iter_max
+    for iter in 1:p_ydyn.ssa_iter_max
         iter_now = iter
 
         # Snapshot n minus 1 state before computing new viscosity / vel.
@@ -1607,7 +1606,7 @@ function calc_velocity_ssa!(y)
         # nm1 snapshot equals the n value (pre-iteration state).
         if iter > 1
             picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1,
-                               ssa.picard_relax)
+                               p_ydyn.ssa_iter_rel)
         end
 
         # ---- Step 3: depth-integrated viscosity. ----
@@ -1776,7 +1775,7 @@ function calc_velocity_ssa!(y)
         if iter > 1
             picard_relax_vel!(y.dyn.ux_b, y.dyn.uy_b,
                               sc.ssa_picard_ux_b_nm1, sc.ssa_picard_uy_b_nm1,
-                              ssa.picard_relax)
+                              p_ydyn.ssa_iter_rel)
         end
 
         # ---- Step 11: zero out fully-empty-margin face velocities. ----
@@ -1796,7 +1795,7 @@ function calc_velocity_ssa!(y)
             interior(y.dyn.ux_b), interior(y.dyn.uy_b),
             interior(sc.ssa_picard_ux_b_nm1), interior(sc.ssa_picard_uy_b_nm1))
 
-        if l2_resid < ssa.picard_tol
+        if l2_resid < p_ydyn.ssa_iter_conv
             converged = true
             break
         end
@@ -1805,7 +1804,7 @@ function calc_velocity_ssa!(y)
     sc.ssa_iter_now[] = iter_now
 
     if !converged
-        @warn "SSA Picard did not converge" iter = iter_now resid = (iter_now > 0 && iter_now <= n_resid_max ? sc.ssa_residuals[iter_now] : NaN) tol = ssa.picard_tol
+        @warn "SSA Picard did not converge" iter = iter_now resid = (iter_now > 0 && iter_now <= n_resid_max ? sc.ssa_residuals[iter_now] : NaN) tol = p_ydyn.ssa_iter_conv
     end
 
     # Post-loop: basal stress (Fortran line 325).

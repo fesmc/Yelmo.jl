@@ -34,11 +34,13 @@ const BMB_SHLF_CONST = -0.5         # [m/yr] constant basal melt under shelves
 # ----------------------------------------------------------------------
 # Canonical configuration — pure-Julia YelmoParameters.
 # Anything left unset keeps its Yelmo.jl default; only non-default values
-# appear here. `pc_method` is deliberately left at the Julia default
-# (HEUN) — the Mirror backend uses its own Fortran-native value.
+# appear here. The pc settings (HEUN, pc_tol 5, pc_eps 1) are YelmoModel's
+# (`backend = :yelmo`); the Mirror backend keeps its Fortran-native values
+# (`MIRROR_DIVERGENT_YELMO`).
 # ----------------------------------------------------------------------
-function build_params()
-    return YelmoParameters("initmip_grl";
+function build_params(backend::Symbol = :yelmo)
+    pc = backend === :yelmo ? (pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0) : (;)
+    return with_ported_options(YelmoParameters("initmip_grl";
         yelmo = yelmo_params(
             domain       = "Greenland",
             grid_name    = "GRL-16KM",
@@ -46,12 +48,14 @@ function build_params()
             dt_method    = 2,             # adaptive predictor-corrector
             timing       = true,
             log_timestep = true,
+            pc...,
         ),
-        yneff = yneff_params(method = 3, N0 = 1000.0, delta = 0.04,
-                             e0 = 0.69, Cc = 0.12),
-        ymat = ymat_params(rf_method = 1),   # standard rate-factor function
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+        yhyd = yhyd_params(bkt_N_closure = 3, till_N0 = 1000.0, till_delta = 0.04, till_e0 = 0.69, till_Cc = 0.12,
+                           bkt_till_rate = 0.001, W_til_max = 2.0),
+        ymat = ymat_params(rf_method = 1, de_max = 2.0),   # standard rate-factor function
         ytherm = ytherm_params(method = "temp", solver_advec = "impl-upwind",
-                               till_rate = 0.001, H_w_max = 2.0,
                                rock_method = "equil", nzr_aa = 5, H_rock = 2000.0),
         yelmo_masks = yelmo_masks_params(
             basins_load  = true,
@@ -73,7 +77,7 @@ function build_params()
             pd_topo_load = false, pd_tsrf_load = false,
             pd_smb_load = false, pd_vel_load = false,
         ),
-    )
+    ))
 end
 
 # ----------------------------------------------------------------------
@@ -167,7 +171,7 @@ function main(; t_end = 20.0, dt_outer = 1.0, backend = :yelmo,
         isfile(joinpath(outdir, f)) && rm(joinpath(outdir, f))
     end
 
-    p = build_params()
+    p = build_params(backend)
     @info "initmip-grl" backend t_end dt_outer bmb_shlf=BMB_SHLF_CONST pc_method=p.yelmo.pc_method
     y = backend === :mirror ? build_mirror(p, outdir) : build_yelmo(p)
 

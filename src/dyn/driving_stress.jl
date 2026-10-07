@@ -66,7 +66,7 @@ slot of the X/Y-Face fields (interior index 1) is replicated from the
 adjacent interior face to match the YelmoMirror NetCDF convention.
 
 `H_ice_dyn` and `f_ice_dyn` are the dynamic-ice fields produced by
-`extend_floating_slab!` / `calc_dynamic_ice_fields!`; `dzsdx` /
+`calc_dynamic_ice_fields!`; `dzsdx` /
 `dzsdy` are CenterField gradients staggered to ac-faces (per the
 Yelmo schema). `dx` is in metres; `taud_lim` is in Pa.
 

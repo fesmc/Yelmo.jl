@@ -53,7 +53,7 @@ The test:
    difference divided by maximum velocity magnitude) is below **1 × 10⁻⁷**.
 
 The asymmetry residual at production solver settings (`rtol = 1e-8`,
-`picard_tol = 1e-6`) is ~2 × 10⁻⁸ — this is the iterative-solver noise
+`ydyn.ssa_iter_conv = 1e-6`) is ~2 × 10⁻⁸ — this is the iterative-solver noise
 floor, not a structural error.  The 1 × 10⁻⁷ threshold sits 5× above that
 noise floor while detecting any recurrence of the periodic-wrap clamp bug
 it was written to catch (that bug produced residuals of ~5 × 10⁻²).

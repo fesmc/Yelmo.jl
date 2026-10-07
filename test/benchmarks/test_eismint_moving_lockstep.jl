@@ -54,7 +54,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
@@ -62,7 +62,7 @@ const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 # Same params as `test_eismint_moving.jl::_eismint_moving_params`. Keep
 # in sync with that file (or factor out if drift becomes a problem).
 function _eismint_moving_lockstep_params()
-    return YelmoParameters("eismint_moving_lockstep";
+    return with_ported_options(YelmoParameters("eismint_moving_lockstep";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",
@@ -79,21 +79,25 @@ function _eismint_moving_lockstep_params()
             # behaviour on this benchmark and compounds the 100-yr-step
             # truncation error.
             pc_use_H_pred = false,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
+        ytopo = ytopo_params(
+            solver  = "expl",
+            use_bmb = false,
+        ),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver       = "sia",
             uz_method    = 3,
             visc_method  = 1,
             eps_0        = 1e-6,
             taud_lim     = 2e5,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50
         ),
-        ytopo = ytopo_params(
-            solver  = "expl",
-            use_bmb = false,
-        ),
-        yneff = yneff_params(method = 0, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 1e-16,
             visc_min   = 1e3,
@@ -102,12 +106,13 @@ function _eismint_moving_lockstep_params()
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
         # therm decoupled — Fortran runs `ytherm.method = "fixed"`
         # for this benchmark (see header note); Yelmo.jl now exercises
         # `therm_step!` with the same `"fixed"` no-op.
         ytherm = ytherm_params(method = "fixed"),
-    )
+    ))
 end
 
 function _build_yelmo_lockstep(b::EISMINT1MovingBenchmark, p::YelmoParameters)

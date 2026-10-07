@@ -11,15 +11,14 @@
 #   - `calc_c_bed!` — basal drag coefficient `c_bed = c · N_eff`,
 #     where `c = cb_ref` (Pa) or `tan(cb_ref°) · N_eff` (when
 #     `is_angle = true`, Bueler & van Pelt 2015 till-strength angle
-#     formulation). Optional thermal scaling (`scale_T = 1`) blends
-#     toward a frozen-bed reference value as `T'_b` drops below 0.
+#     formulation).
 #
 # Both fed from the dyn_step! orchestrator after lateral-stress; both
 # operate on Center fields (no staggered indexing).
 #
 # Port of `yelmo/src/physics/basal_dragging.f90`:
 #   - `calc_cb_ref` (line 62)
-#   - `calc_c_bed` (line 278)
+#   - `calc_c_bed`
 #   - `calc_lambda_bed_lin` (line 843), `calc_lambda_bed_exp` (line 870)
 # ----------------------------------------------------------------------
 
@@ -156,8 +155,7 @@ function calc_cb_ref!(cb_ref,
 end
 
 """
-    calc_c_bed!(c_bed, cb_ref, N_eff, T_prime_b,
-                is_angle, cf_ref, T_frz, scale_T) -> c_bed
+    calc_c_bed!(c_bed, cb_ref, N_eff, is_angle) -> c_bed
 
 Basal drag coefficient at aa-cells:
 
@@ -167,60 +165,23 @@ with `c = cb_ref` (Pa) by default, or `c = tan(cb_ref°)` when
 `is_angle = true` (Bueler & van Pelt 2015 till-strength angle
 formulation; `cb_ref` is then in degrees).
 
-If `scale_T = 1`, a per-cell linear blend toward the frozen-bed
-reference value `c_bed_frz = c_frz · N_eff` is applied as the
-homologous basal temperature `T'_b` drops below 0:
-
-    λ = clamp((T'_b - T_frz) / (0 - T_frz), 0, 1)
-    c_bed = c_bed · λ + c_bed_frz · (1 - λ)
-
-`T_frz` must be < 0; an error is raised otherwise.
-
-`T_prime_b` is the homologous temperature `T - T_pmp` at the base —
-0 at melting, negative when frozen, expressed in degC despite the
-`K` label in the variable schema (the value semantics is degrees-
-relative-to-melting, not Kelvin).
-
-Port of `basal_dragging.f90:278 calc_c_bed`.
+Port of `basal_dragging.f90 calc_c_bed`. Frozen beds are handled by the
+sliding factor `f_slide` in `calc_beta` (`ydyn.frz_scale`), not here.
 """
-function calc_c_bed!(c_bed, cb_ref, N_eff, T_prime_b,
-                     is_angle::Bool, cf_ref::Real,
-                     T_frz::Real, scale_T::Int)
-    c_int    = interior(c_bed)
-    cb_int   = interior(cb_ref)
-    N_int    = interior(N_eff)
-    Tp_int   = interior(T_prime_b)
+function calc_c_bed!(c_bed, cb_ref, N_eff, is_angle::Bool)
+    c_int  = interior(c_bed)
+    cb_int = interior(cb_ref)
+    N_int  = interior(N_eff)
 
     Nx, Ny = size(c_int, 1), size(c_int, 2)
-    cf_ref_f = Float64(cf_ref)
-    T_frz_f  = Float64(T_frz)
-
-    # First pass: c_bed = c · N_eff with the appropriate transform.
-    cf_frz = if is_angle
+    if is_angle
         @inbounds for j in 1:Ny, i in 1:Nx
             c_int[i, j, 1] = tan(cb_int[i, j, 1] * π / 180) * N_int[i, j, 1]
         end
-        tan(cf_ref_f * π / 180)
     else
         @inbounds for j in 1:Ny, i in 1:Nx
             c_int[i, j, 1] = cb_int[i, j, 1] * N_int[i, j, 1]
         end
-        cf_ref_f
-    end
-
-    # Optional thermal scaling toward c_bed_frz as T'_b → T_frz.
-    if scale_T == 0
-        # No-op.
-    elseif scale_T == 1
-        T_frz_f >= 0.0 && error(
-            "calc_c_bed!: ydyn.T_frz must be < 0 for scale_T = 1; got $T_frz_f")
-        @inbounds for j in 1:Ny, i in 1:Nx
-            λ = clamp((Tp_int[i, j, 1] - T_frz_f) / (0.0 - T_frz_f), 0.0, 1.0)
-            c_bed_frz = cf_frz * N_int[i, j, 1]
-            c_int[i, j, 1] = c_int[i, j, 1] * λ + c_bed_frz * (1.0 - λ)
-        end
-    else
-        error("calc_c_bed!: ydyn.scale_T must be 0 or 1; got $scale_T")
     end
 
     return c_bed

@@ -29,8 +29,6 @@ Usage:
 """
 module YelmoMirrorPar
 
-using Printf
-
 # write_nml/compare are owned by the primary `YelmoPar` module; extend them here
 # with methods for `YelmoMirrorParameters`.
 import ..YelmoPar: write_nml, compare
@@ -93,9 +91,6 @@ _kind(::AbstractVector{<:AbstractString}) = :string
 _kind(::Real) = :num
 _kind(::AbstractVector{<:Real}) = :num
 _kind(x) = error("YelmoMirrorPar: unsupported namelist value type $(typeof(x))")
-
-const NmlValue = Union{Bool, Real, AbstractString,
-                       AbstractVector{<:Real}, AbstractVector{<:AbstractString}}
 
 function _check_key(group::String, key::String, value)
     s = schema()
@@ -278,7 +273,7 @@ explicitly on the Mirror side instead.
 """
 const MIRROR_DIVERGENT_YELMO = (
     :pc_method, :pc_controller, :pc_use_H_pred, :pc_filter_vel,
-    :pc_corr_vel, :pc_n_redo, :pc_tol, :pc_eps,
+    :pc_n_redo, :pc_tol, :pc_eps,
 )
 
 """
@@ -286,9 +281,10 @@ const MIRROR_DIVERGENT_YELMO = (
 
 Translate a pure-Julia `YelmoParameters` (the canonical configuration
 for a `YelmoModel`) into a `YelmoMirrorParameters` for the Fortran
-backend. Every `YelmoParameters` group field whose name is a parameter
-of the Fortran group of the same name is copied; Julia-only fields and
-fields holding Julia objects (e.g. `ydyn.ssa_solver::SSASolver`) are
+backend. Every namelist entry of a `YelmoParameters` group (as written
+by `write_nml`) that is a parameter of the Fortran group of the same
+name is copied — `ydyn.ssa_solver::SSASolver` becomes Fortran's
+`ssa_solver` string; Julia-only keys (`YelmoPar.JULIA_ONLY_KEYS`) are
 skipped, and backend-divergent timestepping options
 (`MIRROR_DIVERGENT_YELMO`) are left at the Fortran defaults.
 
@@ -320,12 +316,11 @@ function to_mirror(p::YelmoPar.YelmoParameters)
         d = Dict{String, Any}()
         for f in fieldnames(typeof(jgroup))
             g == "yelmo" && f in MIRROR_DIVERGENT_YELMO && continue
-            key = String(f)
-            haskey(s.defaults[g], key) || continue
-            v = getfield(jgroup, f)
-            v isa NmlValue || continue   # Julia object under a Fortran key name (ydyn.ssa_solver)
-            _check_key(g, key, v)
-            d[key] = v
+            for (key, v) in YelmoPar._nml_entries(f, getfield(jgroup, f))
+                haskey(s.defaults[g], key) || continue
+                _check_key(g, key, v)
+                d[key] = v
+            end
         end
         isempty(d) || (overrides[g] = d)
     end
@@ -347,28 +342,10 @@ format_value(v::AbstractVector{<:AbstractString}) = join(["\"$s\"" for s in v], 
 format_value(v::AbstractVector{<:Real})            = join(format_value.(v), ", ")
 """
     _fmt_float(x) -> String
-Produce a clean, compact float representation. Uses exponential notation
-when the magnitude is very large or very small, otherwise decimal.
+Shortest representation that reads back to exactly `x` (Julia's `repr`,
+e.g. `0.1`, `1.0e7`, `3.168808781402895e-11`); Fortran reads all of these.
 """
-function _fmt_float(x::Float64)
-    x == 0.0 && return "0.0"
-    a = abs(x)
-    if a >= 1e5 || (a < 1e-3 && a > 0.0)
-        s = @sprintf("%.6e", x)
-        m = match(r"^(-?)(\d+\.\d*?)0*(e[+-]?)0*(\d+)$", s)
-        if m !== nothing
-            mantissa = endswith(m[2], ".") ? m[2] * "0" : m[2]
-            exp_sign = replace(m[3], "e+" => "e", "e-" => "e-")
-            exp_dig  = m[4]
-            return "$(m[1])$(mantissa)$(exp_sign)$(exp_dig)"
-        end
-        return s
-    else
-        s = @sprintf("%.10g", x)
-        occursin('.', s) || (s *= ".0")
-        return s
-    end
-end
+_fmt_float(x::Float64) = repr(x)
 
 # An integer-valued float for an integer parameter is written as an integer, which
 # Fortran's integer read requires (e.g. a Julia Float64 field copied by `to_mirror`).

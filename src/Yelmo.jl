@@ -101,9 +101,9 @@ export vert_int_trapz_boundary!
 # YelmoPar (primary parameter API)
 export YelmoParameters
 export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
-       ytill_params, yneff_params, ymat_params, ytherm_params,
+       ytill_params, yhyd_params, ymat_params, ytrc_params, ytherm_params,
        yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
-export write_nml
+export write_nml, write_defaults_nml, check_ported, with_ported_options
 export read_nml
 export compare
 
@@ -147,7 +147,7 @@ export calc_distance_to_grounding_line!, calc_distance_to_ice_margin!,
 export calc_gradient_acx!, calc_gradient_acy!
 export calc_f_grnd_subgrid_linear!, calc_f_grnd_subgrid_area!,
        calc_f_grnd_pinning_points!, calc_grounded_fractions!
-export extend_floating_slab!, calc_dynamic_ice_fields!
+export calc_dynamic_ice_fields!
 export update_diagnostics!
 
 # YelmoModelDyn

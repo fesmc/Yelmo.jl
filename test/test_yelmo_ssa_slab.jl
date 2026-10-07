@@ -56,7 +56,7 @@ using Statistics: mean
 using SparseArrays: SparseMatrixCSC, sparse, nnz as sparse_nnz
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                            yneff_params, ytill_params
+                            yhyd_params, ytill_params
 
 # ----------------------------------------------------------------------
 # Synthetic restart fixture for the SLAB-S06 setup.
@@ -148,7 +148,9 @@ end
     _write_slab_s06_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H_const, alpha=alpha, Nz=Nz)
 
-    p = YelmoParameters("ssa_slab_diag";
+    p = with_ported_options(YelmoParameters("ssa_slab_diag";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,                # constant viscosity = visc_const
@@ -158,16 +160,15 @@ end
             beta_gl_scale  = 0,                # no GL scaling
             beta_min       = 0.0,
             ssa_lat_bc     = "none",           # try "none" first per prompt
-            ssa_solver     = SSASolver(rtol            = 1e-8,
-                                       itmax           = 500,
-                                       picard_tol      = 1e-6,
-                                       picard_iter_max = 50,
-                                       picard_relax    = 0.7),
+            ssa_solver     = SSASolver(method = :residual, rtol            = 1e-8, itmax           = 500),
+            ssa_iter_conv = 1e-6, ssa_iter_rel = 0.7, ssa_iter_max = 50,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(n_glen = n_glen),
-    )
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
+        ymat = ymat_params(n_glen = n_glen, rf_method = -1, de_max = 2.0),
+        ytherm = ytherm_params(method = "temp"),
+    ))
 
     y = YelmoModel(path, 0.0;
                    rundir     = tdir,
@@ -195,7 +196,7 @@ end
     Yelmo.YelmoModelDyn.dyn_step!(y, 1.0)
 
     iter_count = y.dyn.scratch.ssa_iter_now[]
-    picard_iter_max = y.p.ydyn.ssa_solver.picard_iter_max
+    picard_iter_max = y.p.ydyn.ssa_iter_max
     @info "SSA SLAB-S06 Picard iterations" iter_count picard_iter_max
 
     # ----- Smoke checks (loose, diagnostic) -----

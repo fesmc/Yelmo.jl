@@ -29,11 +29,8 @@ component of `init_state!`'s equilibration cycle but exposed as a
 public entry point for callers that only need the thermal piece.
 
 Without this call, `y.thrm.T_ice` stays at its Field-allocation
-default (≈ zeros). Combined with `T_pmp ≈ 272 K` from the hydrostatic
-pressure-melting calculation, this yields `T_prime_b ≈ -272 K`, which
-sends `calc_c_bed!`'s thermal-scaling branch (`scale_T = 1`) into
-the cold-base end and collapses basal friction to
-`ytill.cf_ref · N_eff` (default 0.8 Pa) — saturating the SSA solver.
+default (≈ zeros), so `T_prime_b ≈ -272 K` and every temperature-
+dependent quantity (rate factor, frozen-bed sliding) sees a cold base.
 
 # Arguments
 - `thrm_method::AbstractString` (default `"robin"`) — analytic
@@ -116,17 +113,17 @@ function init_thrm!(y::YelmoModel; thrm_method::AbstractString = "robin")
 
     # 5. Bedrock equilibrium init. Mirrors Fortran's hard-coded
     #    `dom%thrm%par%rock_method = "equil"` override during
-    #    `yelmo_init_state` (yelmo_ice.f90:1309). Seeds `T_rock`,
-    #    `enth_rock`, and `Q_rock` to the analytic linear profile
+    #    `yelmo_init_state` (yelmo_ice.f90:1309). Seeds `T_rock`
+    #    and `Q_rock` to the analytic linear profile
     #    anchored at `T_ice_b` with deep slope from `Q_geo` —
     #    regardless of the user's chosen `par.rock_method`. Without
     #    this seed, `rock_method = "active"` cold-start runs would
     #    advance from a zero-T_rock IC and take ~10 kyr to relax.
     zeta_aa_rock = znodes(y.gr, Center())
-    define_temp_bedrock_3D!(y.thrm.enth_rock, y.thrm.T_rock,
+    define_temp_bedrock_3D!(y.thrm.T_rock,
                              y.thrm.Q_rock,
                              y.thrm.T_ice_b, y.bnd.Q_geo,
-                             par.cp_rock, par.kt_rock, par.H_rock,
+                             par.kt_rock, par.H_rock,
                              zeta_aa_rock, c.sec_year)
     interior(y.thrm.T_rock_b) .= view(interior(y.thrm.T_rock), :, :, 1)
 

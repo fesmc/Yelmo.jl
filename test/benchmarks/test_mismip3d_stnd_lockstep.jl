@@ -48,7 +48,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params
+                           yhyd_params, ytill_params, ytopo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 
@@ -58,7 +58,10 @@ const _SPEC_LOCK = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 # `test_mismip3d_stnd.jl::_mismip3d_yelmo_params` exactly so both tests
 # exercise the same Yelmo.jl-side solver setup.
 function _mismip3d_lockstep_params()
-    return YelmoParameters("mismip3d_stnd_lockstep";
+    return with_ported_options(YelmoParameters("mismip3d_stnd_lockstep";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ytopo = ytopo_params(),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,
@@ -71,16 +74,13 @@ function _mismip3d_lockstep_params()
             ssa_lat_bc     = "floating",
             eps_0          = 1e-6,
             taud_lim       = 1e6,
-            ssa_solver     = SSASolver(precond         = :jacobi,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7,
-                                       rtol            = 1e-6,
-                                       itmax           = 500),
+            ssa_solver     = SSASolver(method = :residual, precond         = :jacobi, rtol            = 1e-6, itmax           = 500),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = 0, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 3.1536e-18,
             visc_min   = 1e3,
@@ -88,12 +88,12 @@ function _mismip3d_lockstep_params()
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-        ytopo = ytopo_params(),
         # Mirror MISMIP3D namelist: `ytherm.method = "fixed"` keeps
         # `therm_step!` a no-op for this benchmark.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 # Run the Yelmo.jl-side standalone trajectory and return the final

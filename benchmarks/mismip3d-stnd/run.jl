@@ -13,7 +13,7 @@
 using IceSheetBenchmarks
 using Yelmo
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           ytherm_params, yneff_params, ytill_params,
+                           ytherm_params, yhyd_params, ytill_params,
                            ytopo_params
 using Oceananigans: interior
 using NCDatasets
@@ -40,7 +40,10 @@ const RESTART_FINAL = joinpath(OUTPUT_DIR, "restart_final.nc")
 # ----------------------------------------------------------------------
 
 function _mismip3d_params(b)
-    return YelmoParameters("mismip3d_stnd";
+    return with_ported_options(YelmoParameters("mismip3d_stnd";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ytopo = ytopo_params(),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,
@@ -53,16 +56,13 @@ function _mismip3d_params(b)
             ssa_lat_bc     = "floating",
             eps_0          = 1e-6,
             taud_lim       = 1e6,
-            ssa_solver     = SSASolver(precond         = :jacobi,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7,
-                                       rtol            = 1e-6,
-                                       itmax           = 500),
+            ssa_solver     = SSASolver(method = :residual, precond         = :jacobi, rtol            = 1e-6, itmax           = 500),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = 0, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = b.A_glen,
             visc_min   = 1e3,
@@ -70,10 +70,10 @@ function _mismip3d_params(b)
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-        ytopo  = ytopo_params(),
         ytherm = ytherm_params(method = "fixed"),
-    )
+    ))
 end
 
 function _build(b, p)
@@ -98,10 +98,7 @@ function _build(b, p)
     # thermal init → mat → β-safety-net → initial SSA solve → mat refresh
     # → final topo sync). Mirrors `yelmo_init_state` in
     # `yelmo/tests/yelmo_mismip.f90` (`thrm_method = "robin"`). Without
-    # the analytic thermal init the basal-friction thermal-scaling branch
-    # (`calc_c_bed!`, `scale_T = 1`) reads `T_prime_b ≈ -272 K`,
-    # collapses `c_bed` to `ytill.cf_ref · N_eff = 0.8`, and the SSA
-    # solver saturates at the velocity clamp.
+    # the analytic thermal init `T_prime_b ≈ -272 K` everywhere.
     Yelmo.init_state!(y, 0.0; thrm_method = "robin")
     return y
 end

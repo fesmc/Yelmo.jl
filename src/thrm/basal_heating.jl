@@ -3,13 +3,13 @@
 #
 # Two implementations matching the Fortran `qb_method` choices:
 #
-#   - `qb_method = 1` ("aa")    : `calc_basal_heating_simplestagger!` —
+#   - `qb_method = 3` ("aa")    : `calc_basal_heating_simplestagger!` —
 #       single aa-node value per cell, computed from the average of
 #       the four surrounding ac-x / ac-y face stresses and velocities.
 #       Boundary handling is Fortran-style clamped (`im1 = max(i-1,1)`).
-#   - `qb_method = 2` ("nodes") : `calc_basal_heating_nodes!` —
+#   - `qb_method = 4` ("nodes") : `calc_basal_heating_nodes!` —
 #       2-point Gauss–Legendre quadrature on the cell's four ab-corners.
-#       Default and best choice per the Fortran header.
+#       The better of the two ported schemes.
 #
 # Both forms produce `Q_b` in [mW m^-2] (multiplied by `1e3 / sec_year`
 # from the natural [J a-1 m-2] units), zero outside ice-covered cells,
@@ -30,7 +30,7 @@
                                       taub_acx_field, taub_acy_field,
                                       sec_year) -> Q_b_field
 
-Simple-stagger basal frictional heating (qb_method = 1). Direct port
+Simple-stagger basal frictional heating (qb_method = 3; 1 before yelmo dev). Direct port
 of Fortran `calc_basal_heating_simplestagger`
 (`thermodynamics.f90:794`).
 
@@ -98,7 +98,7 @@ end
                               sec_year) -> Q_b_field
 
 Gauss–Legendre 2-point quadrature basal frictional heating
-(qb_method = 2, default). Direct port of Fortran
+(qb_method = 4; 2 before yelmo dev). Direct port of Fortran
 `calc_basal_heating_nodes` (`thermodynamics.f90:706`).
 
 Per ice-covered cell:

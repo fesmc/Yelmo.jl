@@ -26,7 +26,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params, ytopo_params
+                           yhyd_params, ytill_params, ytopo_params
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "fixtures"))
 const _T_OUT_DIVA  = 1000.0
@@ -36,7 +36,9 @@ const _SPEC_DIVA   = TroughBenchmark(:F17; dx_km = 8.0)
 # with `solver = "diva"` (matching the Fortran TROUGH-F17 namelist
 # default) and the new `no_slip = false` flag explicit.
 function _trough_diva_params()
-    return YelmoParameters("trough_f17_diva_load";
+    return with_ported_options(YelmoParameters("trough_f17_diva_load";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "diva",
             visc_method    = 1,
@@ -47,14 +49,10 @@ function _trough_diva_params()
             beta_gl_stag   = 3,
             beta_min       = 0.0,
             ssa_lat_bc     = "floating",
-            no_slip        = false,
-            ssa_solver     = SSASolver(rtol            = 1e-4,
-                                       itmax           = 200,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7),
+            ssa_solver     = SSASolver(method = :residual, rtol            = 1e-4, itmax           = 200),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(
             method    = 1,  scale_zb = 0,  scale_sed = 0,
             is_angle  = true, n_sd = 1,    f_sed = 1.0,
@@ -62,11 +60,14 @@ function _trough_diva_params()
             z0        = -300.0,  z1   = 200.0,
             cf_min    = 5.0, cf_ref   = 10.0,
         ),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
+        ymat = ymat_params(
             n_glen = 3.0, rf_const = 3.1536e-18,
             de_max = 0.5, enh_shear = 1.0, enh_stream = 1.0, enh_shlf = 1.0,
+            rf_method = -1
         ),
-    )
+        ytherm = ytherm_params(method = "temp"),
+    ))
 end
 
 @testset "benchmarks: TroughBenchmark DIVA dyn_step lockstep" begin
@@ -102,7 +103,7 @@ end
     iter_count = y.dyn.scratch.ssa_iter_now[]
     @info "Trough DIVA Picard iterations: $iter_count"
     @test iter_count > 0
-    @test iter_count <= y.p.ydyn.ssa_solver.picard_iter_max
+    @test iter_count <= y.p.ydyn.ssa_iter_max
 
     jl_ux_bar = interior(y.dyn.ux_bar)
     jl_uy_bar = interior(y.dyn.uy_bar)

@@ -327,30 +327,20 @@ end
     end
 end
 
-@testset "dyn: calc_c_bed! — is_angle and scale_T paths" begin
+@testset "dyn: calc_c_bed! — scalar and is_angle paths" begin
     Nx, Ny = 4, 3
     g = _bounded_2d(Nx, Ny; dx=1.0)
     cb = CenterField(g);  fill!(interior(cb), 30.0)   # degrees if is_angle
     N  = CenterField(g);  fill!(interior(N),  1e7)
-    Tp = CenterField(g);  fill!(interior(Tp), -1.5)   # half-frozen vs T_frz=-3
     c  = CenterField(g)
 
-    # Plain scalar path, no thermal scaling.
-    calc_c_bed!(c, cb, N, Tp, false, 40.0, -3.0, 0)
+    # Plain scalar path.
+    calc_c_bed!(c, cb, N, false)
     @test all(interior(c) .≈ 30.0 * 1e7)
 
-    # Angle path, no thermal scaling.
-    calc_c_bed!(c, cb, N, Tp, true, 40.0, -3.0, 0)
+    # Angle path.
+    calc_c_bed!(c, cb, N, true)
     @test all(interior(c) .≈ tan(30.0 * π/180) * 1e7)
-
-    # Angle path, thermal scaling: λ = (-1.5 - (-3))/(0 - (-3)) = 0.5
-    # → c_bed = 0.5·tan(30°)·N + 0.5·tan(40°)·N
-    calc_c_bed!(c, cb, N, Tp, true, 40.0, -3.0, 1)
-    expected = 0.5 * tan(30.0 * π/180) * 1e7 + 0.5 * tan(40.0 * π/180) * 1e7
-    @test all(interior(c) .≈ expected)
-
-    # T_frz >= 0 errors when scale_T=1.
-    @test_throws ErrorException calc_c_bed!(c, cb, N, Tp, true, 40.0, 0.0, 1)
 end
 
 @testset "dyn: N_eff helpers — overburden / two-value edge cases" begin
@@ -430,30 +420,27 @@ end
     # at their restart-loaded values; `dyn_step!` only refreshes the
     # diagnostic outputs (driving stress, lateral stress, ice flux,
     # magnitudes, surface / basal slices, `f_vbvs`).
-    p_nml = Yelmo.YelmoPar.read_nml(NML_PATH)
-    # `ydyn.scale_T` is forced to 0 here even though the namelist says
-    # 1: the restart's saved `c_bed` was generated with no thermal
-    # scaling (verified by `c_bed / N_eff = tan(cb_ref°)` exactly
-    # across all grounded cells). This namelist-vs-restart drift will
-    # be eliminated once the YelmoMirror benchmark fixtures land in
-    # milestone 3c (regenerated from current namelist + source).
-    p = Yelmo.YelmoPar.YelmoParameters("dyn-consistency";
+    # The namelist is a v1.15 yelmox output: read it non-strictly (its
+    # legacy keys are dropped). The restart's saved `c_bed` has no
+    # thermal scaling (`c_bed / N_eff = tan(cb_ref°)` exactly across all
+    # grounded cells), which is what `calc_c_bed!` computes.
+    p_nml = Yelmo.YelmoPar.read_nml(NML_PATH; strict = false)
+    p = with_ported_options(Yelmo.YelmoPar.YelmoParameters("dyn-consistency";
             yelmo           = p_nml.yelmo,
             ytopo           = p_nml.ytopo,
             ycalv           = p_nml.ycalv,
             ydyn            = ydyn_params(solver         = "fixed",
                                           taud_lim       = p_nml.ydyn.taud_lim,
-                                          taud_gl_method = p_nml.ydyn.taud_gl_method,
-                                          T_frz          = p_nml.ydyn.T_frz,
-                                          scale_T        = 0),
+                                          taud_gl_method = p_nml.ydyn.taud_gl_method),
             ytill           = p_nml.ytill,
-            yneff           = p_nml.yneff,
+            yhyd            = p_nml.yhyd,
             ymat            = p_nml.ymat,
+            ytrc            = p_nml.ytrc,
             ytherm          = p_nml.ytherm,
             yelmo_masks     = p_nml.yelmo_masks,
             yelmo_init_topo = p_nml.yelmo_init_topo,
             yelmo_data      = p_nml.yelmo_data,
-        )
+        ))
 
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="dyn_diag_"),
@@ -546,11 +533,11 @@ end
     @test err < 1e-3
 
     # --- Bed-roughness chain (milestone 3b). The restart's `N_eff`
-    # was computed via yneff.method = 3 (van Pelt-Bueler till) using
+    # was computed with the van Pelt-Bueler till closure (bkt_N_closure = 3) using
     # `H_w` from thrm; recompute should match to Float32 rounding.
     # `cb_tgt` and `cb_ref` (linear z_bed scaling, n_sd = 10) come
     # from the same z_bed / z_bed_sd / H_sed inputs, and `c_bed =
-    # tan(cb_ref°) · N_eff` (`scale_T = 0` per the override above).
+    # tan(cb_ref°) · N_eff`.
     for k in (:N_eff, :cb_tgt, :cb_ref, :c_bed)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
         @test err < 1e-3

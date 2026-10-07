@@ -100,7 +100,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params
+                           yhyd_params, ytill_params, ytopo_params
 
 const _SPEC = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 
@@ -111,7 +111,12 @@ const _SMOKE_ONLY = get(ENV, "MISMIP3D_SMOKE_ONLY", "0") == "1"
 # Stnd SSA + topo parameters. solver = "ssa" + the Fortran namelist
 # overrides for beta / Picard / advection.
 function _mismip3d_yelmo_params()
-    return YelmoParameters("mismip3d_stnd";
+    return with_ported_options(YelmoParameters("mismip3d_stnd";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        # ytopo defaults are fine. The y-direction is periodic but
+        # z_bed is y-invariant -> dzsdy_periodic_offset stays at 0.
+        ytopo = ytopo_params(),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,                    # Glen-flow Gauss-quadrature
@@ -124,23 +129,20 @@ function _mismip3d_yelmo_params()
             ssa_lat_bc     = "floating",
             eps_0          = 1e-6,
             taud_lim       = 1e6,
-            ssa_solver     = SSASolver(precond         = :jacobi,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7,
-                                       rtol            = 1e-6,
-                                       itmax           = 500),
+            ssa_solver     = SSASolver(method = :residual, precond         = :jacobi, rtol            = 1e-6, itmax           = 500),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        # N_eff = const = 1 Pa (yneff method=0).
-        yneff = yneff_params(method = 0, const_ = 1.0),
         # Till: method=-1 bypasses the runtime cb_ref recomputation in
         # dyn_step! so the pre-filled cb_ref survives every step
         # (mirrors Fortran's "till_method=-1 + cb_ref=till_cf_ref"
         # override applied at every program iteration).
         ytill = ytill_params(method = -1),
+        # N_eff = const = 1 Pa (yneff method=0).
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
         # Glen flow: rf_method=0 (constant ATT). mat module not wired
         # -> we pre-fill mat.ATT once below.
-        ymat  = ymat_params(
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 3.1536e-18,
             visc_min   = 1e3,
@@ -148,14 +150,12 @@ function _mismip3d_yelmo_params()
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-        # ytopo defaults are fine. The y-direction is periodic but
-        # z_bed is y-invariant -> dzsdy_periodic_offset stays at 0.
-        ytopo = ytopo_params(),
         # Mirror the Fortran namelist: MISMIP3D runs `ytherm.method =
         # "fixed"`, so `therm_step!` is a no-op in the integration loop.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 @testset "benchmarks: MISMIP3D Stnd 500-yr standalone trajectory" begin

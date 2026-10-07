@@ -54,7 +54,7 @@
 # and the solve counts as converged only once `c_bed` has also settled
 # (relative L1 change below `ssa_solver.picard_tol`). Anything else the
 # hook needs (geometry, rate factor, the hydrology state) is captured
-# via closure. Requires `yneff.method = -1` so that `calc_ydyn_neff!`
+# via closure. Requires `yhyd.bkt_N_closure = -1` so that `calc_ydyn_neff!`
 # does not overwrite the N the hook produced. Only the DIVA solver
 # calls it.
 # ----------------------------------------------------------------------

@@ -35,18 +35,16 @@ balance phase. Pseudocode:
 
 ```julia
 for each (i, j):
-    g  = clamp(G_mb[i,j], -mb_lim, +mb_lim)         # 1. clip
-    H_new = H[i,j] + dt * g                         # 2. apply
-    H_new = max(H_new, 0)                           # 3. clamp
-    H_new = abs(H_new) < 1e-9 ? 0 : H_new           # 4. denoise
+    H_new = H[i,j] + dt * G_mb[i,j]                 # 1. apply
+    H_new = max(H_new, 0)                           # 2. clamp
+    H_new = abs(H_new) < 1e-9 ? 0 : H_new           # 3. denoise
     H[i,j] = H_new
     if adjust_mb:
-        G_mb[i,j] = (H_new - H_prev) / dt           # 5. record realised
+        G_mb[i,j] = (H_new - H_prev) / dt           # 4. record realised
 end
 ```
 
-The `mb_lim = 9999.0 m/yr` clip is a safety rail against runaway
-forcing. The `1e-9 m` denoising matches Fortran's `TOL` parameter and
+There is no rate limit (yelmo dev removed `dHdt_dyn_lim`). The `1e-9 m` denoising matches Fortran's `TOL` parameter and
 prevents micro-residual ice from confusing margin detection.
 
 `adjust_mb=true` is used for every phase except the final residual
@@ -205,8 +203,8 @@ mask. Sub-passes:
 
 1. **Forced-zero cells**: `H = 0` where `bnd.mask_ice == MASK_ICE_NONE`.
 2. **Margin too thin**: at margins, zero cells with effective
-   thickness below `ytopo.H_min_flt` (floating) or
-   `ytopo.H_min_grnd` (grounded). Sub-tolerance ice
+   thickness below `ycalv.H_min_flt` (floating) or
+   `ycalv.H_min_grnd` (grounded). Sub-tolerance ice
    (`H < 1e-6 m`) is also zeroed.
 3. **Islands**: cells with `H > 0` and *every* orthogonal neighbour
    `H = 0` are zeroed.

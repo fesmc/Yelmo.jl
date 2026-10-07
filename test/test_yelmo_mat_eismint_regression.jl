@@ -54,7 +54,7 @@ using Statistics
 using NCDatasets
 using Yelmo
 using Yelmo.YelmoPar: YelmoParameters, ymat_params, ydyn_params,
-                           ytill_params, yneff_params, ytopo_params
+                           ytill_params, yhyd_params, ytopo_params
 using Oceananigans.Fields: interior
 
 const FIXTURES_DIR = abspath(joinpath(@__DIR__, "benchmarks", "fixtures"))
@@ -71,15 +71,19 @@ const FIXTURE_PATH = joinpath(FIXTURES_DIR, "eismint_moving_t25000.nc")
 # `mat_step!` honours these to build ATT, enh, visc, visc_bar,
 # visc_int, and strs2D_* from the loaded Mirror state.
 function _mat_regression_params()
-    return YelmoParameters("mat_eismint_regression";
+    return with_ported_options(YelmoParameters("mat_eismint_regression";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ytopo = ytopo_params(solver = "expl"),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(solver = "sia",
                            uz_method = 3,
                            visc_method = 1,
-                           eps_0 = 1e-6),
-        yneff = yneff_params(method = 0, const_ = 1.0),
+                           eps_0 = 1e-6,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
         ytill = ytill_params(method = -1),
-        ytopo = ytopo_params(solver = "expl"),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             rf_method  = 0,
             rf_const   = 1e-16,
             n_glen     = 3.0,
@@ -90,7 +94,8 @@ function _mat_regression_params()
             enh_stream = 1.0,
             enh_shlf   = 1.0,
         ),
-    )
+        ytherm = ytherm_params(method = "temp"),
+    ))
 end
 
 

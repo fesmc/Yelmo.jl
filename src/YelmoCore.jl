@@ -15,7 +15,7 @@ using ..YelmoConst: YelmoConstants,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
-using ..YelmoPar: YelmoParameters
+using ..YelmoPar: YelmoParameters, check_ported, with_ported_options
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 using ..YelmoHooks: YelmoHooks
@@ -98,8 +98,8 @@ const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
 #     `yelmo_set_var3D!`): same glue/split when bridging Yelmo
 #     fields to the Fortran-side length-`Nz_file` buffers.
 #
-# Only ice-grid fields are registered. Bedrock fields (`T_rock`,
-# `enth_rock`) currently use the interior-extended grid convention.
+# Only ice-grid fields are registered. Bedrock fields (`T_rock`)
+# currently use the interior-extended grid convention.
 # `T_rock_b` is written as a diagnostic from the deepest bedrock
 # layer in `therm_step!`; when the bedrock grid switches to the
 # split layout, `T_rock_s` will be aliased to `T_ice_b` (encoded
@@ -928,6 +928,16 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     # User-supplied calving-rate hooks. Set after construction to inject
     # a custom calving law (e.g. CalvingMIP experiments). See YelmoHooks.jl.
     hooks::YelmoHooks
+
+    # Every construction path (restart, axes, benchmark extensions) ends
+    # here: reject Fortran options YelmoModel does not implement yet.
+    function YelmoModel(alias, rundir, time, p::P, c, g, gt, gr, v,
+                        bnd::B, dta::DT, dyn::DY, mat::M, thrm::TH, tpo::TP,
+                        timer, hooks) where {P, B, DT, DY, M, TH, TP}
+        p isa YelmoParameters && check_ported(p)
+        return new{P, B, DT, DY, M, TH, TP}(alias, rundir, time, p, c, g, gt, gr, v,
+                                            bnd, dta, dyn, mat, thrm, tpo, timer, hooks)
+    end
 end
 
 const _ALL_MODEL_GROUPS = (:bnd, :dta, :dyn, :mat, :thrm, :tpo)
@@ -1161,8 +1171,9 @@ function YelmoModel(restart_file::String, time::Float64;
                     regrid_method::AbstractString = "con")
 
     if p === nothing
-        @warn "No parameters supplied to YelmoModel; constructing YelmoParameters(\"$(alias)\") with defaults."
-        p = YelmoParameters(alias)
+        @warn "No parameters supplied to YelmoModel; constructing " *
+              "with_ported_options(YelmoParameters(\"$(alias)\")) (defaults, unported options replaced)."
+        p = with_ported_options(YelmoParameters(alias))
     end
 
     # Build grids: if a target_grid_file is provided, the model lives

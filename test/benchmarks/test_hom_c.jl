@@ -85,7 +85,7 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params, ytopo_params
+                           yhyd_params, ytill_params, ytopo_params
 
 const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 
@@ -96,7 +96,8 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 # under external β, isothermal ATT.
 function _hom_c_yelmo_params()
     Lx_m = _SPEC.L_km * 1e3
-    return YelmoParameters("hom_c";
+    return with_ported_options(YelmoParameters("hom_c";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         # Periodic-slope offset for surface gradients on the periodic-x
         # axis (HOM-C `z_srf = -x · tan α`). Without this the wrap-face
         # FD reads the raw periodic image and produces a giant spurious
@@ -105,6 +106,7 @@ function _hom_c_yelmo_params()
             dzsdx_periodic_offset = -tan(_SPEC.alpha_rad) * Lx_m,
             dzsdy_periodic_offset =  0.0,
         ),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,                       # Glen-flow Gauss-quadrature
@@ -114,26 +116,26 @@ function _hom_c_yelmo_params()
             beta_min       = 0.0,
             ssa_lat_bc     = "floating",
             taud_lim       = 2e5,
-            ssa_solver     = SSASolver(rtol            = 1e-8,
-                                       itmax           = 500,
-                                       picard_tol      = 1e-6,
-                                       picard_iter_max = 100,
-                                       picard_relax    = 0.7),
+            ssa_solver     = SSASolver(method = :residual, rtol            = 1e-8, itmax           = 500),
+            ssa_iter_conv = 1e-6, ssa_iter_rel = 0.7, ssa_iter_max = 100,
+            ssa_vel_max = 5000.0
         ),
-        # No till / N_eff dependency under beta_method = -1.
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(method = -1),
+        # No till / N_eff dependency under beta_method = -1.
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
         # Glen flow law from HOM-C: A = 1e-16 Pa^-3 yr^-1, n = 3,
         # constant ATT (isothermal).
-        ymat  = ymat_params(
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 1e-16,
             de_max     = 0.5,
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-    )
+        ytherm = ytherm_params(method = "temp"),
+    ))
 end
 
 @testset "benchmarks: ISMIP-HOM-C 180° rotational symmetry under SSA" begin
@@ -190,7 +192,7 @@ end
     iter_count = y.dyn.scratch.ssa_iter_now[]
     @info "HOM-C dyn_step! Picard iterations: $iter_count"
     @test iter_count > 0
-    @test iter_count <= y.p.ydyn.ssa_solver.picard_iter_max
+    @test iter_count <= y.p.ydyn.ssa_iter_max
 
     ux = interior(y.dyn.ux_bar)
     uy = interior(y.dyn.uy_bar)

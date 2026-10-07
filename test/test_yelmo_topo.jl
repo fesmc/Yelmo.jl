@@ -139,9 +139,13 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
-                   p      = YelmoParameters("tpo-mask-test";
-                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
+                   p      = with_ported_options(YelmoParameters("tpo-mask-test";
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                                ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"),
+                            )),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -341,9 +345,13 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
-                   p      = YelmoParameters("tpo-smoke";
-                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
+                   p      = with_ported_options(YelmoParameters("tpo-smoke";
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                                ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"),
+                            )),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -415,9 +423,13 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smb_test_"),
                    alias  = "tpo-smb-test",
-                   p      = YelmoParameters("tpo-smb-test";
-                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
+                   p      = with_ported_options(YelmoParameters("tpo-smb-test";
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                                ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"),
+                            )),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -511,9 +523,13 @@ end
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_bmb_test_"),
                    alias  = "tpo-bmb-test",
-                   p      = YelmoParameters("tpo-bmb-test";
-                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
-                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed")),
+                   p      = with_ported_options(YelmoParameters("tpo-bmb-test";
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                                ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                                ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                                ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"),
+                            )),
                    groups = (:bnd, :dyn, :mat, :thrm, :tpo),
                    strict = false)
 
@@ -904,10 +920,14 @@ end
     # `ydyn.solver = "fixed"`: relaxation kernel only, no velocity solve.
     # `ytherm.method = "fixed"`: thrm decoupled — `therm_step!` runs as
     # a no-op alongside the other phases.
-    p = YelmoParameters("tpo-relax-test";
-                             ytopo  = p_ytopo,
-                             ydyn   = Yelmo.YelmoPar.ydyn_params(solver="fixed"),
-                             ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"))
+    p = with_ported_options(YelmoParameters("tpo-relax-test";
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             ytopo = p_ytopo,
+                             ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+                             ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+                             ymat = ymat_params(rf_method = -1, de_max = 2.0),
+                             ytherm = Yelmo.YelmoPar.ytherm_params(method="fixed"),
+                         ))
 
     y = YelmoModel(RESTART_PATH, 0.0;
                    p      = p,
@@ -1581,14 +1601,17 @@ end
     z_sl  = CenterField(g);  fill!(interior(z_sl),     0.0)
     smb_ref = CenterField(g); fill!(interior(smb_ref), 0.0)
 
-    p = YelmoParameters("calv-kill";
+    p = with_ported_options(YelmoParameters("calv-kill";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
-                             calv_grnd_method="zero", dt_lsf=0.0),
-        ydyn  = ydyn_params(solver="fixed"),
+                             calv_grnd_method="zero", dt_lsf=0.0,
+            H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+        ymat = ymat_params(rf_method = -1, de_max = 2.0),
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
     y = YelmoModel(RESTART_PATH, 0.0; alias="calv-kill", p=p, strict=false)
 
     # Replace state with the synthetic geometry: shelf cells i=1..4.
@@ -1640,13 +1663,15 @@ end
     # `topo_step!` called directly (so mat_step doesn't refresh
     # tau_eig_1 between zeroing and the calving phase), vm-m16 must
     # produce zero calving rate — the no-stress no-op path.
-    p_vm = YelmoParameters("calv-vm";
+    p_vm = with_ported_options(YelmoParameters("calv-vm";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
-        ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16"),
-        ydyn  = ydyn_params(solver="fixed"),
+        ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
+        ymat = ymat_params(rf_method = -1, de_max = 2.0),
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
     y_vm = YelmoModel(RESTART_PATH, 0.0; alias="calv-vm",
                       p=p_vm, strict=false)
     lsf_init!(y_vm.tpo.lsf, y_vm.tpo.H_ice, y_vm.bnd.z_bed, y_vm.bnd.z_sl)
@@ -2116,7 +2141,7 @@ end
 # Fractional ice fraction, surface elevation, ice-front mask
 # ------------------------------------------------------------------
 
-@testset "tpo: calc_f_ice! — binary (flt_subgrid=false)" begin
+@testset "tpo: calc_f_ice! — binary" begin
     Nx = 5
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, 50e3), y=(0.0, 50e3),
@@ -2133,66 +2158,10 @@ end
     # Single ice-covered cell at centre.
     interior(H_ice)[3, 3, 1] = 200.0
 
-    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
-                flt_subgrid = false)
+    calc_f_ice!(f_ice, H_ice)
     F = interior(f_ice)
     @test F[3, 3, 1] == 1.0
     @test all(F[i, j, 1] == 0.0 for j in 1:Nx, i in 1:Nx if !(i == 3 && j == 3))
-end
-
-@testset "tpo: calc_f_ice! — fractional floating margin" begin
-    # 5x5 grid with a 3x3 thick floating block surrounded by ocean.
-    # Margin cells are the 8 outer cells of the 3x3 block; the centre
-    # is fully interior. With flt_subgrid=true, the margin cells
-    # should get f_ice < 1 because their thickness is less than the
-    # interior, while a thinner margin = 100 m vs interior = 200 m
-    # gives f_ice = 100/200 = 0.5.
-    Nx = 5
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, 50e3), y=(0.0, 50e3),
-                        topology=(Bounded, Bounded, Flat))
-    f_ice = CenterField(g)
-    H_ice = CenterField(g)
-    z_bed = CenterField(g)
-    z_sl  = CenterField(g)
-
-    fill!(interior(z_bed), -500.0)
-    fill!(interior(z_sl),  0.0)
-    fill!(interior(H_ice), 0.0)
-
-    # Centre cell: fully covered (interior). Eight surrounding cells:
-    # margin with thinner ice. Ocean cells (corners outside 3x3 block)
-    # remain at 0.
-    @inbounds for j in 2:4, i in 2:4
-        interior(H_ice)[i, j, 1] = 100.0   # margin thickness
-    end
-    interior(H_ice)[3, 3, 1] = 200.0       # interior fully-covered cell
-
-    calc_f_ice!(f_ice, H_ice, z_bed, z_sl, 910.0, 1028.0;
-                flt_subgrid = true)
-    F = interior(f_ice)
-
-    # Centre cell is fully interior (n_ice = 4) → f_ice = 1.
-    @test F[3, 3, 1] == 1.0
-
-    # Direct margin neighbours of centre: (2,3), (4,3), (3,2), (3,4)
-    # — each has H = 100 with at least one ice-free neighbour.
-    # Their upstream-fully-covered neighbour is (3,3) with H=200,
-    # so f_ice = 100/200 = 0.5.
-    @test F[2, 3, 1] ≈ 0.5
-    @test F[4, 3, 1] ≈ 0.5
-    @test F[3, 2, 1] ≈ 0.5
-    @test F[3, 4, 1] ≈ 0.5
-
-    # Corner cells of the 3x3 block (e.g. (2,2)): H=100, no upstream
-    # *fully-covered* (n_ice=4) neighbour — falls back on H_lim=100 m,
-    # giving f_ice = min(100/max(100, 100), 1) = 1.0.
-    @test F[2, 2, 1] ≈ 1.0
-    @test F[4, 4, 1] ≈ 1.0
-
-    # Ocean cells stay 0.
-    @test F[1, 1, 1] == 0.0
-    @test F[5, 5, 1] == 0.0
 end
 
 @testset "tpo: calc_z_srf! — grounded vs floating vs ice-free" begin
@@ -2502,29 +2471,6 @@ end
     @test interior(dvardx_a) == interior(dvardx_b)
 end
 
-@testset "tpo: calc_gradient_acx! — margin2nd + offset rejected" begin
-    # 2nd-order margin extrapolation reaches one cell further across
-    # the periodic wrap and needs a wrap-aware reach-2 stencil. Until
-    # that is implemented, the combination is rejected with a clear
-    # error.
-    Nx = 6
-    dx = 1.0
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, Nx*dx), y=(0.0, Nx*dx),
-                        topology=(Periodic, Bounded, Flat))
-    var    = CenterField(g)
-    f_ice  = CenterField(g)
-    dvardx = CenterField(g)
-    fill!(interior(f_ice), 1.0)
-
-    @test_throws ErrorException calc_gradient_acx!(dvardx, var, f_ice, dx;
-                                                    margin2nd = true,
-                                                    periodic_offset = 1.0)
-    @test_throws ErrorException calc_gradient_acy!(dvardx, var, f_ice, dx;
-                                                    margin2nd = true,
-                                                    periodic_offset = 1.0)
-end
-
 @testset "tpo: calc_f_grnd_subgrid_linear!" begin
     Nx = 5
     g = RectilinearGrid(size=(Nx, Nx),
@@ -2725,53 +2671,7 @@ end
 # Dynamics-only thickness/cover fields (ssa_lat_bc dispatch)
 # ------------------------------------------------------------------
 
-@testset "tpo: extend_floating_slab! — single-cell seed" begin
-    # 7x7 grid; one grounded cell at (4, 4) surrounded by ocean.
-    # After 2 iterations the slab should reach 2 cells in each
-    # direction (a 5x5 cross / square).
-    Nx = 7
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, 7.0), y=(0.0, 7.0),
-                        topology=(Bounded, Bounded, Flat))
-    H_ice  = CenterField(g)
-    f_grnd = CenterField(g)
-
-    fill!(interior(H_ice), 0.0)
-    fill!(interior(f_grnd), 0.0)
-
-    # Seed: grounded ice cell at (4, 4).
-    interior(H_ice)[4, 4, 1]  = 1000.0
-    interior(f_grnd)[4, 4, 1] = 1.0
-
-    extend_floating_slab!(H_ice, f_grnd; H_slab=1.0, n_ext=2)
-    H = interior(H_ice)
-
-    # Direct neighbours of (4,4) get the slab in iter 1.
-    @test H[3, 4, 1] == 1.0
-    @test H[5, 4, 1] == 1.0
-    @test H[4, 3, 1] == 1.0
-    @test H[4, 5, 1] == 1.0
-
-    # Two cells out (in iter 2): direct neighbours of slab cells.
-    @test H[2, 4, 1] == 1.0
-    @test H[6, 4, 1] == 1.0
-    @test H[4, 2, 1] == 1.0
-    @test H[4, 6, 1] == 1.0
-
-    # Diagonal of seed: not direct, but adjacent to a slab cell after
-    # iter 1, so iter 2 picks it up.
-    @test H[3, 3, 1] == 1.0
-    @test H[5, 5, 1] == 1.0
-
-    # Cells > 2 from seed stay 0.
-    @test H[1, 4, 1] == 0.0
-    @test H[7, 4, 1] == 0.0
-
-    # The seed itself unchanged.
-    @test H[4, 4, 1] == 1000.0
-end
-
-@testset "tpo: calc_dynamic_ice_fields! — default (pass-through)" begin
+@testset "tpo: calc_dynamic_ice_fields! — H_eff at partial cells" begin
     Nx = 4
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, 4.0), y=(0.0, 4.0),
@@ -2793,10 +2693,7 @@ end
     interior(H_ice)[2, 3, 1] = 50.0
     interior(f_ice)[2, 3, 1] = 0.5
 
-    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
-                             H_ice, f_ice, f_grnd,
-                             z_bed, z_sl, 910.0, 1028.0,
-                             "floating")
+    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn, H_ice, f_ice)
 
     # Fully-covered cell: pass-through.
     @test interior(H_ice_dyn)[2, 2, 1] == 100.0
@@ -2809,85 +2706,3 @@ end
     @test interior(f_ice_dyn)[1, 1, 1] == 0.0
 end
 
-@testset "tpo: calc_dynamic_ice_fields! — slab" begin
-    Nx = 4
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, 4.0), y=(0.0, 4.0),
-                        topology=(Bounded, Bounded, Flat))
-    H_ice_dyn = CenterField(g)
-    f_ice_dyn = CenterField(g)
-    H_ice     = CenterField(g)
-    f_ice     = CenterField(g)
-    f_grnd    = CenterField(g)
-    z_bed     = CenterField(g)
-    z_sl      = CenterField(g)
-
-    fill!(interior(z_sl), 0.0)
-    fill!(interior(z_bed), -500.0)
-
-    # (2,2): fully covered, 100 m. (2,3): partial cover (f<1) but
-    # H_ice = 50. (3,3): ice-free.
-    interior(H_ice)[2, 2, 1] = 100.0
-    interior(f_ice)[2, 2, 1] = 1.0
-    interior(H_ice)[2, 3, 1] = 50.0
-    interior(f_ice)[2, 3, 1] = 0.5
-
-    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
-                             H_ice, f_ice, f_grnd,
-                             z_bed, z_sl, 910.0, 1028.0,
-                             "slab")
-    Hd = interior(H_ice_dyn)
-
-    # Fully-covered cell unchanged.
-    @test Hd[2, 2, 1] == 100.0
-    # Partial-cover cell bumped to 1.0.
-    @test Hd[2, 3, 1] == 1.0
-    # Ice-free cells (f_ice = 0) get f_ice < 1 → also bumped to 1.0.
-    @test Hd[1, 1, 1] == 1.0
-    @test Hd[3, 3, 1] == 1.0
-
-    # f_ice_dyn binary from H_ice_dyn — every cell now has H > 0 → 1.
-    @test all(interior(f_ice_dyn) .== 1.0)
-end
-
-@testset "tpo: calc_dynamic_ice_fields! — slab-ext" begin
-    Nx = 5
-    g = RectilinearGrid(size=(Nx, Nx),
-                        x=(0.0, 5.0), y=(0.0, 5.0),
-                        topology=(Bounded, Bounded, Flat))
-    H_ice_dyn = CenterField(g)
-    f_ice_dyn = CenterField(g)
-    H_ice     = CenterField(g)
-    f_ice     = CenterField(g)
-    f_grnd    = CenterField(g)
-    z_bed     = CenterField(g)
-    z_sl      = CenterField(g)
-
-    fill!(interior(z_sl), 0.0)
-    fill!(interior(z_bed), -500.0)
-
-    # Single grounded ice cell at (3, 3); rest is ocean.
-    interior(H_ice)[3, 3, 1] = 1000.0
-    interior(f_ice)[3, 3, 1] = 1.0
-    interior(f_grnd)[3, 3, 1] = 1.0
-
-    calc_dynamic_ice_fields!(H_ice_dyn, f_ice_dyn,
-                             H_ice, f_ice, f_grnd,
-                             z_bed, z_sl, 910.0, 1028.0,
-                             "slab-ext";
-                             H_slab=1.0, n_ext=1)
-    Hd = interior(H_ice_dyn)
-
-    # Seed unchanged.
-    @test Hd[3, 3, 1] == 1000.0
-
-    # Direct neighbours got the slab from extend_floating_slab!.
-    @test Hd[2, 3, 1] == 1.0
-    @test Hd[4, 3, 1] == 1.0
-    @test Hd[3, 2, 1] == 1.0
-    @test Hd[3, 4, 1] == 1.0
-
-    # 2 cells away (n_ext=1): unchanged.
-    @test Hd[1, 3, 1] == 0.0
-    @test Hd[5, 3, 1] == 0.0
-end

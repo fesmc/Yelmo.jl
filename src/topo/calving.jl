@@ -10,7 +10,8 @@
 #   5. `merge_calving_rates!` → `cr_acx, cr_acy`.
 #   6. `lsf_update!` advances `lsf` at `w = u_bar + cr`.
 #   7. Above-SL pin: `lsf = -1` over land.
-#   8. Periodic `lsf_redistance!` per `ycalv.dt_lsf`.
+#   8. `lsf_redistance!` with `ycalv.lsf_redist_n_iter` iterations
+#      (Fortran `lsf_method = "redist"`, every step).
 #   9. Build kill-rate `cmb = -H/dt` where `lsf > 0`; populate the
 #      aa-stagger magnitude diagnostics `cmb_flt`, `cmb_grnd`.
 #   10. `apply_tendency!(H, cmb, dt; adjust_mb=true)`; refresh `f_ice`.
@@ -29,17 +30,6 @@
 using Oceananigans.Fields: interior
 
 export calving_step!
-
-# Decide whether redistancing fires on this step.
-#   dt_lsf < 0  → every step
-#   dt_lsf == 0 → never
-#   dt_lsf > 0  → fire when [time, time+dt] crosses an integer multiple
-#                 of dt_lsf. Robust to non-integer dt.
-@inline function _redist_trigger(time::Real, dt::Real, dt_lsf::Real)
-    dt_lsf < 0 && return true
-    dt_lsf == 0 && return false
-    return floor((time + dt) / dt_lsf) > floor(time / dt_lsf)
-end
 
 # Dispatch table for one direction (floating or grounded).
 function _dispatch_calving!(cr_x, cr_y, method::AbstractString,
@@ -115,7 +105,7 @@ function calving_step!(y::YelmoModel, dt::Float64)
                            y.p.ycalv.calv_flt_method,
                            y.dyn.ux_bar, y.dyn.uy_bar,
                            y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
-                           y.p.ycalv.Hc_ref_flt, y.p.ycalv.tau_ice,
+                           y.p.ycalv.Hc_ref_flt, y.p.ycalv.tau_ice_flt,
                            "calv_flt_method")
     end
     if y.hooks.calv_grnd !== nothing
@@ -130,7 +120,7 @@ function calving_step!(y::YelmoModel, dt::Float64)
                            y.p.ycalv.calv_grnd_method,
                            y.dyn.ux_bar, y.dyn.uy_bar,
                            y.tpo.H_ice, y.tpo.f_ice, y.mat.strs2D_tau_eig_1,
-                           y.p.ycalv.Hc_ref_grnd, y.p.ycalv.tau_ice,
+                           y.p.ycalv.Hc_ref_grnd, y.p.ycalv.tau_ice_grnd,
                            "calv_grnd_method")
     end
 
@@ -167,16 +157,18 @@ function calving_step!(y::YelmoModel, dt::Float64)
         end
     end
 
-    # 8. Optional redistancing.
-    if _redist_trigger(y.time, dt, y.p.ycalv.dt_lsf)
-        # lsf is in normalized ±1 units, so redistance in grid-cell units
-        # (dx=1) so that the PDE drives |∇lsf| → 1 cell⁻¹ near the
-        # zero level set, producing lsf ≈ ±0.5 at adjacent cells.
-        # Passing physical dx (25 km) would make the smoothed sign
-        # function ≈ ±lsf/25000 ≈ 0 and cause the lsf to diverge to
-        # ±(1 + n_iter*0.5) ≈ ±3.5 every call.
-        lsf_redistance!(y.tpo.lsf, 1.0, 1.0)
-    end
+    # 8. Redistancing (Fortran `lsf_method = "redist"`, every step;
+    #    `check_ported` rejects "snap").
+    #    lsf is in normalized ±1 units, so redistance in grid-cell units
+    #    (dx=1) so that the PDE drives |∇lsf| → 1 cell⁻¹ near the
+    #    zero level set, producing lsf ≈ ±0.5 at adjacent cells.
+    #    Passing physical dx (25 km) would make the smoothed sign
+    #    function ≈ ±lsf/25000 ≈ 0 and cause the lsf to diverge to
+    #    ±(1 + n_iter*0.5) ≈ ±3.5 every call.
+    n_iter = y.p.ycalv.lsf_redist_n_iter
+    n_iter > 0 || error("calving_step!: lsf_method = \"redist\" requires " *
+                        "ycalv.lsf_redist_n_iter > 0; got $n_iter")
+    lsf_redistance!(y.tpo.lsf, 1.0, 1.0; n_iter)
 
     # 9. Kill-rate cmb + aa-stagger magnitude diagnostics.
     H  = interior(y.tpo.H_ice)

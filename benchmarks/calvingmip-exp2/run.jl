@@ -156,7 +156,7 @@ function _build_from_exp1_restart()
         "first.")
 
     b = CalvingMIPBenchmark(:exp2; dx_km = DX_KM)
-    p = YelmoParameters(NAMELIST_PATH, "calvingmip_exp2")
+    p = with_ported_options(YelmoParameters(NAMELIST_PATH, "calvingmip_exp2"))
     y = YelmoModel(b, 0.0; p = p, boundaries = :bounded)
 
     NCDataset(EXP1_RESTART, "r") do ds

@@ -38,7 +38,7 @@ and relaxation. The full sequence:
 | 5 | Merge             | `merge_calving_rates!` | `tpo.cr_acx`, `tpo.cr_acy` |
 | 6 | Advect lsf        | `lsf_update!` (uses `advect_tracer!`) | `tpo.lsf` |
 | 7 | Above-SL pin      | inline | `tpo.lsf` (set to −1 over land) |
-| 8 | Redistance        | `lsf_redistance!` (per `dt_lsf`) | `tpo.lsf` |
+| 8 | Redistance        | `lsf_redistance!` (`lsf_redist_n_iter`) | `tpo.lsf` |
 | 9 | Build kill cmb    | inline | `tpo.cmb`, `tpo.cmb_flt`, `tpo.cmb_grnd` |
 | 10 | Apply tendency   | `apply_tendency!`, `calc_f_ice!` | `tpo.H_ice`, `tpo.f_ice`, `tpo.cmb` |
 | 11 | Post-kill consistency | inline | `tpo.lsf` |
@@ -140,18 +140,10 @@ with
 - Pseudo-timestep `dτ = 0.5 · min(dx, dy)`.
 - Zero-gradient (Neumann) boundaries — clamped index reads.
 
-The trigger is controlled by `ycalv.dt_lsf`:
-
-| `dt_lsf` | Behaviour |
-|---|---|
-| `< 0`  | Redistance every step. |
-| `== 0` | Never. |
-| `> 0`  | Fire when `[t, t+dt]` crosses an integer multiple of `dt_lsf`. Robust to non-integer `dt`. |
-
-The Fortran semantics (`dt_lsf > 0` ⇒ periodic ±1 re-flag) are
-intentionally replaced — `dt_lsf` in Yelmo.jl now controls the
-cadence of a real signed-distance restoration, not a destructive
-flag.
+Redistancing runs every step with `ycalv.lsf_redist_n_iter`
+iterations — Fortran's `lsf_method = "redist"`. Fortran's other mode,
+`"snap"` (neighbour snap plus the periodic `dt_lsf` ±1 re-flag), is not
+ported; `check_ported` requires `lsf_method = "redist"`.
 
 ## Kill (steps 9–11)
 
@@ -187,8 +179,8 @@ transient external thinning.
    `mb-form` path) is not ported.
 2. **No neighbour-based reset** of `lsf` after advection (Fortran
    `lsf_module.f90:808-818`). Redistancing handles the slope.
-3. **Real redistancing** instead of periodic `±1` re-flag (Fortran
-   `dt_lsf` block). Same parameter controls the cadence.
+3. **Redistancing only** (Fortran `lsf_method = "redist"`); the
+   `"snap"` mode with its periodic `±1` re-flag (`dt_lsf`) is not ported.
 4. **Single-pass extrapolation** of the front velocity into the
    ocean. Fortran iterates a `do while` until convergence; Yelmo.jl
    does forward + backward sweep in O(N).
@@ -221,14 +213,14 @@ Per [`YelmoPar.YcalvParams`](https://github.com/fesmc/Yelmo.jl/blob/main/src/Yel
 
 | Field | Default | Meaning |
 |---|---|---|
-| `use_lsf`          | `false`     | Master switch for the calving phase. |
-| `calv_flt_method`  | `"vm-l19"`* | One of `"none"`/`"zero"`, `"equil"`, `"threshold"`, `"vm-m16"`. |
-| `calv_grnd_method` | `"zero"`    | Same set as `calv_flt_method`. |
-| `dt_lsf`           | `-1.0`      | Redistancing cadence (see table above). |
+| `use_lsf`          | `true`      | Master switch for the calving phase. |
+| `calv_flt_method`  | `"vm-m16"`  | One of `"none"`/`"zero"`, `"equil"`, `"threshold"`, `"vm-m16"`. |
+| `calv_grnd_method` | `"vm-m16"`  | Same set as `calv_flt_method`. |
+| `lsf_method`       | `"snap"`    | `"redist"` is the ported mode (see above). |
+| `lsf_redist_n_iter`| `5`         | Redistancing iterations per step. |
 | `Hc_ref_flt`       | `200.0`     | Threshold thickness for floating, m. |
 | `Hc_ref_grnd`      | `200.0`     | Threshold thickness for grounded, m. |
-| `tau_ice`          | `250e3`     | Ice fracture strength for vm-m16, Pa. |
+| `tau_ice_flt`      | `250e3`     | Ice fracture strength for vm-m16 at floating fronts, Pa. |
+| `tau_ice_grnd`     | `1e6`       | Ice fracture strength for vm-m16 at marine-grounded fronts, Pa. |
 
-*The default carries over from Fortran's nameset, but `vm-l19` is an
-aa-form law not ported in Yelmo.jl. Set explicitly when enabling
-`use_lsf`.
+Defaults are Fortran Yelmo's (`yelmo_defaults.nml`).

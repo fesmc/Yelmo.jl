@@ -34,7 +34,7 @@ using Statistics
 using NCDatasets
 using Yelmo
 using Yelmo.YelmoPar: YelmoParameters, ymat_params, ydyn_params,
-                           ytill_params, yneff_params, ytopo_params,
+                           ytill_params, yhyd_params, ytopo_params,
                            ytherm_params
 using Oceananigans.Fields: interior
 using Oceananigans.Grids: znodes, Center
@@ -81,15 +81,19 @@ end
 # Arrhenius constants.
 function _rf1_params(; use_eismint2::Bool, with_water::Bool,
                      enh_uniform::Float64 = 1.0)
-    return YelmoParameters("mat_rf_method1";
-        ydyn  = ydyn_params(solver = "sia",
+    return with_ported_options(YelmoParameters("mat_rf_method1";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ytopo = ytopo_params(solver = "expl"),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(solver = "sia",
                             uz_method = 3,
                             visc_method = 1,
-                            eps_0 = 1e-6),
-        yneff = yneff_params(method = 0, const_ = 1.0),
+                            eps_0 = 1e-6,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
         ytill = ytill_params(method = -1),
-        ytopo = ytopo_params(solver = "expl"),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             rf_method       = 1,
             rf_use_eismint2 = use_eismint2,
             rf_with_water   = with_water,
@@ -105,7 +109,7 @@ function _rf1_params(; use_eismint2::Bool, with_water::Bool,
         # explicitly below so the test does not depend on the therm
         # path producing a specific profile.
         ytherm = ytherm_params(method = "fixed"),
-    )
+    ))
 end
 
 # Build a YelmoModel from the EISMINT-moving fixture, then overwrite

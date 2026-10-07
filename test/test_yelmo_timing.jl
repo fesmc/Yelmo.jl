@@ -19,13 +19,13 @@ include("benchmarks/harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params, ytherm_params
 
 # Same EISMINT-1 moving setup as test/benchmarks/test_eismint_moving.jl,
 # parameterised on the timing flag.
 function _eismint_moving_params(; timing::Bool)
-    return YelmoParameters("eismint_moving";
+    return with_ported_options(YelmoParameters("eismint_moving";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = "HEUN",
@@ -36,19 +36,24 @@ function _eismint_moving_params(; timing::Bool)
             dt_min        = 0.01,
             cfl_max       = 0.5,
             timing        = timing,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
-        ydyn = ydyn_params(solver="sia", uz_method=3, visc_method=1,
-                           eps_0=1e-6, taud_lim=2e5),
         ytopo = ytopo_params(solver="expl", use_bmb=false),
-        yneff = yneff_params(method=0, const_=1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
+        ydyn = ydyn_params(solver="sia", uz_method=3, visc_method=1,
+                           eps_0=1e-6, taud_lim=2e5,
+            ssa_solver = SSASolver(method = :residual),
+            ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
         ytill = ytill_params(method=-1),
-        ymat  = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3,
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3,
                             de_max=0.5, enh_method="shear3D",
-                            enh_shear=1.0, enh_stream=1.0, enh_shlf=1.0),
+                            enh_shear=1.0, enh_stream=1.0, enh_shlf=1.0,
+            rf_method = -1),
         # therm decoupled — `therm_step!` lands incrementally; the
         # timing scaffold doesn't exercise thermodynamics.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 function _build_eismint_moving(b, p)

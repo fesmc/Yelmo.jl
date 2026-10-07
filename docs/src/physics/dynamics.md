@@ -54,10 +54,8 @@ otherwise collapse the driving stress to half its physical value
 exactly where it matters.
 
 `H_ice_dyn` and `f_ice_dyn` are the dynamic-ice fields produced by
-[`calc_dynamic_ice_fields!`](@ref) and
-[`extend_floating_slab!`](@ref) — these extend a thin floating slab
-under the ice front so the SIA pressure gradient does not collapse
-to zero one cell upstream of the calving front. The surface
+[`calc_dynamic_ice_fields!`](@ref) — the in-cell effective thickness
+`H_ice / f_ice` at partially covered margin cells, with a binary cover. The surface
 gradients `dzsdx`, `dzsdy` come from the `tpo` group and are
 themselves computed by [`calc_gradient_acx!`](@ref) /
 [`calc_gradient_acy!`](@ref) in the topography diagnostic phase.
@@ -108,26 +106,25 @@ Port of `velocity_general.f90:1450 calc_lateral_bc_stress_2D`.
 ## 3. Effective basal pressure
 
 [`calc_ydyn_neff!`](@ref) writes `dyn.N_eff` at aa-cell centres,
-dispatching on `y.p.yneff.method`:
+dispatching on the N closure `y.p.yhyd.bkt_N_closure` (FastHydrology's
+`closures.f90`):
 
-| `method` | Formula |
+| `bkt_N_closure` | Formula |
 |---|---|
-| `-1` | No-op (assume `N_eff` is set externally). |
-| `0`  | Constant: `N_eff = neff_const`. |
-| `1`  | Overburden: `N_eff = ρ_i · g · H_eff`. |
-| `2`  | Marine connectivity (Leguy et al. 2014, Eq. 14). |
-| `3`  | Till basal pressure (van Pelt & Bueler 2015, Eq. 23). |
-| `4`  | As method 3 but with constant till saturation `H_w = H_w_max · s_const`. |
-| `5`  | Two-valued blend `f_pmp · (δ P_0) + (1 - f_pmp) · P_0`. |
+| `-1` | EXTERNAL: no-op (`N_eff` is set externally). |
+| `0`  | CONST: `N_eff = const_N`. |
+| `1`  | OVERBURDEN: `N_eff = ρ_i · g · H_eff`. |
+| `2`  | MARINE: marine connectivity (Leguy et al. 2014, Eq. 14). |
+| `3`  | TILL: till basal pressure (van Pelt & Bueler 2015, Eq. 23), with the bucket capacity `W_til_max`. |
+| `4`  | TWO_VALUE: `f_pmp · (δ P_0) + (1 - f_pmp) · P_0`, `δ = two_value_delta`. |
 
-All methods scale `H_ice` to "effective" thickness (zero for
+All closures scale `H_ice` to "effective" thickness (zero for
 partially-covered cells, full thickness for fully-covered) before
 computing the overburden, mirroring `calc_H_eff(set_frac_zero=true)`
 in the Fortran. Floating cells (`f_grnd == 0`) get `N_eff = 0`
-(except method 0).
+(except CONST).
 
-Method 2 (marine connectivity) is the most commonly used for marine
-ice sheets:
+The MARINE closure is the most commonly used for marine ice sheets:
 
 ```math
 N_\mathit{eff} = \rho_i g\,H_\mathrm{eff} - p_w,
@@ -138,16 +135,16 @@ p_w = \rho_i g\,H_\mathrm{eff}\,
 x = \min\!\bigl(1,\,H_\mathrm{float} / H_\mathrm{eff}\bigr).
 ```
 
-`p` is `yneff.p` (typically 1 or 2). At `H_eff = H_float` the
+`p` is `yhyd.marine_p` (typically 1 or 2). At `H_eff = H_float` the
 formula collapses to the floating-pressure limit (`N_eff = 0`).
 
-**Subgrid sampling is not yet ported** — `yneff.nxi > 0` errors with
-a deferral pointer (the Fortran reference samples `H_w` over the
-cell using either Gaussian quadrature or a uniform grid; the Julia
-port plugs in `FastGaussQuadrature.jl` later).
+**Subgrid sampling is not yet ported** — `ydyn.neff_nxi > 0` is
+rejected by `check_ported` (the Fortran reference samples the water
+thickness over the cell using either Gaussian quadrature or a uniform
+grid).
 
-Port of `yelmo_dynamics.f90:832 calc_ydyn_neff` plus the four
-`calc_effective_pressure_*` helpers from `basal_dragging.f90`.
+Port of `yelmo_dynamics.f90 calc_ydyn_neff` (v1.15) and the
+`calc_effective_pressure_*` closures.
 
 ## 4. Bed-roughness chain
 
@@ -183,10 +180,10 @@ c = \begin{cases}
 ```
 
 (the `is_angle` branch is the Bueler & van Pelt 2015 till-strength
-angle formulation). Optional thermal scaling (`scale_T = 1`) blends
-toward a frozen-bed reference value as `T'_b` drops below `T_frz`
-— this is what gives `c_bed` its temperature-dependent kick in
-mixed-base regions.
+angle formulation). Frozen beds act on β instead, through the
+sliding factor of `ydyn.frz_scale` (Fortran `calc_f_slide`; not ported
+yet). The v1.15 `scale_T` / `T_frz` blend of `c_bed` was removed in
+yelmo dev.
 
 If `ytill.method == 1`, the orchestrator copies `cb_tgt → cb_ref`
 each step; other `till_method` values leave `cb_ref` at its restart-

@@ -75,7 +75,7 @@ p = YelmoPar.read_nml("Yelmo_GRL.nml")
 
 A `YelmoParameters` is an immutable nested struct: the top level
 holds one struct per namelist group (`yelmo`, `ytopo`, `ycalv`,
-`ydyn`, `ytill`, `yneff`, `ymat`, `ytherm`, `yelmo_masks`,
+`ydyn`, `ytill`, `yhyd`, `ymat`, `ytrc`, `ytherm`, `yelmo_masks`,
 `yelmo_init_topo`, `yelmo_data`). To "edit" a single field of an
 already-built parameter set, build a fresh group with overrides:
 

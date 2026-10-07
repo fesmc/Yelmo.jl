@@ -59,7 +59,7 @@ end
     b = ones(n)
 
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-10, itmax = 100)   # default precond = :jacobi
+    ssa = SSASolver(method = :residual, rtol = 1e-10, itmax = 100)   # default precond = :jacobi
     x_dest = Vector{Float64}(undef, length(b))
     x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
@@ -75,7 +75,7 @@ end
     b = ones(n)
 
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-10, itmax = 100, precond = :amg_sa)
+    ssa = SSASolver(method = :residual, rtol = 1e-10, itmax = 100, precond = :amg_sa)
     x_dest = Vector{Float64}(undef, length(b))
     x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
@@ -91,7 +91,7 @@ end
     b = ones(n)
 
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-10, itmax = 200, precond = :none)
+    ssa = SSASolver(method = :residual, rtol = 1e-10, itmax = 200, precond = :none)
     x_dest = Vector{Float64}(undef, length(b))
     x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
@@ -118,7 +118,7 @@ end
     b = ones(n)
 
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-10, itmax = 100)
+    ssa = SSASolver(method = :residual, rtol = 1e-10, itmax = 100)
     x_dest = Vector{Float64}(undef, length(b))
     x = _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 
@@ -136,7 +136,7 @@ end
     A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
     b = ones(n)
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :amg_sa, smoother = :jacobi)
+    ssa = SSASolver(method = :residual, rtol = 1e-6, itmax = 50, precond = :amg_sa, smoother = :jacobi)
     x_dest = Vector{Float64}(undef, length(b))
     @test_throws ErrorException _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 end
@@ -146,7 +146,7 @@ end
     A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
     b = ones(n)
     scratch = _build_solver_scratch(n)
-    ssa = SSASolver(rtol = 1e-6, itmax = 50, precond = :ilu0)
+    ssa = SSASolver(method = :residual, rtol = 1e-6, itmax = 50, precond = :ilu0)
     x_dest = Vector{Float64}(undef, length(b))
     @test_throws ErrorException _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
 end
@@ -315,7 +315,7 @@ end
 
 using Yelmo: YelmoConstants
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                            yneff_params, ytill_params
+                            yhyd_params, ytill_params
 
 # Write a minimal SSA-friendly restart fixture: uniform slab,
 # all-grounded, taud_acx prescribed.
@@ -386,7 +386,9 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
     _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
-    p = YelmoParameters("slab-ssa";
+    p = with_ported_options(YelmoParameters("slab-ssa";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,                # constant viscosity
@@ -396,14 +398,17 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
             beta_gl_scale  = 0,                # no GL scaling
             beta_min       = 0.0,
             ssa_lat_bc     = "none",           # no calving fronts
-            ssa_solver     = SSASolver(rtol = 1e-10, itmax = 200,
-                                        picard_tol = ssa_tol,
-                                        picard_iter_max = picard_iter_max),
+            ssa_solver     = SSASolver(method = :residual, rtol = 1e-10, itmax = 200),
+            ssa_iter_conv = ssa_tol, ssa_iter_max = picard_iter_max,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),  # external N_eff
-        ytill = ytill_params(method = -1),               # external cb_ref
-        ymat  = ymat_params(n_glen = 3.0),
-    )
+        # external N_eff
+        ytill = ytill_params(method = -1),
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
+        # external cb_ref
+        ymat = ymat_params(n_glen = 3.0, rf_method = -1, de_max = 2.0),
+        ytherm = ytherm_params(method = "temp"),
+    ))
     y = YelmoModel(path, 0.0;
                    rundir = tdir,
                    alias  = "slab-ssa",
@@ -512,7 +517,9 @@ function _run_uniform_slab(solver_name::String;
     _write_ssa_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
-    p = YelmoParameters("slab-$(solver_name)";
+    p = with_ported_options(YelmoParameters("slab-$(solver_name)";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = solver_name,
             visc_method    = 0,
@@ -523,14 +530,15 @@ function _run_uniform_slab(solver_name::String;
             beta_gl_scale  = 0,
             beta_min       = 0.0,
             ssa_lat_bc     = "none",
-            ssa_solver     = SSASolver(rtol = 1e-12, itmax = 500,
-                                        picard_tol = picard_tol,
-                                        picard_iter_max = picard_iter_max),
+            ssa_solver     = SSASolver(method = :residual, rtol = 1e-12, itmax = 500),
+            ssa_iter_conv = picard_tol, ssa_iter_max = picard_iter_max,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(n_glen = n_glen),
-    )
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
+        ymat = ymat_params(n_glen = n_glen, rf_method = -1, de_max = 2.0),
+        ytherm = ytherm_params(method = "temp"),
+    ))
     y = YelmoModel(path, 0.0;
                    rundir = tdir,
                    alias  = "slab-$(solver_name)",
@@ -788,7 +796,9 @@ end
     _write_floating_slab_fixture!(path; Nx=Nx, Ny=Ny, dx=dx,
                                   H_const=H, Nz=Nz)
 
-    p = YelmoParameters("slab-floating-ssa";
+    p = with_ported_options(YelmoParameters("slab-floating-ssa";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 0,
@@ -798,15 +808,14 @@ end
             beta_min       = 0.0,
             ssa_lat_bc     = "floating",
             ssa_vel_max    = ssa_vel_max,
-            ssa_solver     = SSASolver(rtol = 1e-6, itmax = 200,
-                                        picard_tol = 1e-3,
-                                        picard_iter_max = 5,
-                                        picard_relax = 0.7),
+            ssa_solver     = SSASolver(method = :residual, rtol = 1e-6, itmax = 200),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 5
         ),
-        yneff = yneff_params(method = -1, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(n_glen = 3.0),
-    )
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1.0),
+        ymat = ymat_params(n_glen = 3.0, rf_method = -1, de_max = 2.0),
+        ytherm = ytherm_params(method = "temp"),
+    ))
     y = YelmoModel(path, 0.0;
                    rundir = tdir,
                    alias  = "slab-floating-ssa",

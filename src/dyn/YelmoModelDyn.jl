@@ -199,8 +199,8 @@ function dyn_step!(y::YelmoModel, dt::Float64)
                                y.tpo.z_srf, y.bnd.z_sl,
                                y.c.rho_ice, y.c.rho_sw, y.c.g)
 
-    # 5a. Effective pressure N_eff. Dispatches on `yneff.method`
-    #     ∈ [-1, 5]. Subgrid sampling (`nxi > 0`) is deferred.
+    # 5a. Effective pressure N_eff. Dispatches on `yhyd.bkt_N_closure`
+    #     ∈ [-1, 4]. Subgrid sampling (`ydyn.neff_nxi > 0`) is deferred.
     calc_ydyn_neff!(y)
 
     # 5b. Reference till-friction coefficient `cb_tgt`.
@@ -221,10 +221,7 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     end
 
     # 5d. Basal drag coefficient `c_bed = c · N_eff`.
-    calc_c_bed!(y.dyn.c_bed,
-                y.dyn.cb_ref, y.dyn.N_eff, y.thrm.T_prime_b,
-                y.p.ytill.is_angle, y.p.ytill.cf_ref,
-                y.p.ydyn.T_frz, y.p.ydyn.scale_T)
+    calc_c_bed!(y.dyn.c_bed, y.dyn.cb_ref, y.dyn.N_eff, y.p.ytill.is_angle)
 
     # 6. Solver dispatch. 3d handles "fixed", "sia", "ssa", "hybrid".
     solver = y.p.ydyn.solver
@@ -333,10 +330,9 @@ function dyn_step!(y::YelmoModel, dt::Float64)
         # Mirrors `yelmo_dynamics.f90:455-547` (DIVA branch of
         # `calc_ydyn_diva`).
         #
-        # `"diva-noslip"` forces the no-slip variant (basal sliding
-        # zeroed, `beta_eff = 1/F2`); `"diva"` falls back to
-        # `y.p.ydyn.no_slip`. Mirrors Fortran `yelmo_dynamics.f90:477-480`.
-        calc_velocity_diva!(y; no_slip = solver == "diva-noslip" ? true : nothing)
+        # `"diva-noslip"` is the no-slip variant (basal sliding zeroed,
+        # `beta_eff = 1/F2`). Mirrors Fortran `yelmo_dynamics.f90`.
+        calc_velocity_diva!(y)
 
         # `ux_i_bar / uy_i_bar` (depth-averaged shear) are SIA-specific
         # diagnostics not used by DIVA's matrix solve (which gives

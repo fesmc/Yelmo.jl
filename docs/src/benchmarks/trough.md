@@ -79,9 +79,10 @@ y = YelmoModel("fixtures/trough_f17_t1000.nc", 1000.0; boundaries=:periodic_y, .
 
 ## Notes on N_eff
 
-The trough namelist uses `yneff.method = 3` with `nxi = 5` subgrid
-sampling, but subgrid sampling is deferred in Yelmo.jl.  The lockstep
-test therefore uses `yneff.method = −1` (external) so the fixture's
-`N_eff` field is loaded as-is, preserving agreement with the Fortran
-reference.  Switching to `method = 3` with `nxi = 0` would compute a
-slightly different `N_eff` than Fortran's `nxi = 5` result.
+The trough namelist uses the till closure (`yhyd.bkt_N_closure = 3`)
+with `ydyn.neff_nxi = 5` subgrid sampling, but subgrid sampling is
+deferred in Yelmo.jl.  The lockstep test therefore uses
+`bkt_N_closure = −1` (external) so the fixture's `N_eff` field is loaded
+as-is, preserving agreement with the Fortran reference.  Switching to the
+till closure with `neff_nxi = 0` would compute a slightly different
+`N_eff` than Fortran's `neff_nxi = 5` result.

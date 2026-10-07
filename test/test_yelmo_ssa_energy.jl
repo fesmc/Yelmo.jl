@@ -30,7 +30,7 @@ using Oceananigans.Grids: Bounded
 using NCDatasets
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params,
-                            yneff_params, ytill_params
+                            yhyd_params, ytill_params
 
 # SLAB-S06 fixture writer — duplicated from test_yelmo_ssa_slab.jl
 # rather than included to keep this test self-contained.
@@ -78,7 +78,9 @@ function _build_slab_model(path; method::Symbol, linear_method::Symbol,
                                   precond::Symbol = :jacobi,
                                   boundaries::Symbol = :bounded,
                                   solver::String = "ssa")
-    p = YelmoParameters("ssa_slab_energy";
+    p = with_ported_options(YelmoParameters("ssa_slab_energy";
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = solver,
             visc_method    = 0,
@@ -88,19 +90,15 @@ function _build_slab_model(path; method::Symbol, linear_method::Symbol,
             beta_gl_scale  = 0,
             beta_min       = 0.0,
             ssa_lat_bc     = "none",
-            ssa_solver     = SSASolver(method          = method,
-                                       linear_method   = linear_method,
-                                       precond         = precond,
-                                       rtol            = 1e-10,
-                                       itmax           = 1000,
-                                       picard_tol      = 1e-6,
-                                       picard_iter_max = 100,
-                                       picard_relax    = 0.7),
+            ssa_solver     = SSASolver(method          = method, linear_method   = linear_method, precond         = precond, rtol            = 1e-10, itmax           = 1000),
+            ssa_iter_conv = 1e-6, ssa_iter_rel = 0.7, ssa_iter_max = 100,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = -1, const_ = 1e7),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(n_glen = 3.0),
-    )
+        yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
+        ymat = ymat_params(n_glen = 3.0, rf_method = -1, de_max = 2.0),
+        ytherm = ytherm_params(method = "temp"),
+    ))
     tdir = mktempdir(; prefix="ssa_slab_energy_$(method)_")
     y = YelmoModel(path, 0.0;
                    rundir     = tdir,

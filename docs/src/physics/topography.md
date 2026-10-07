@@ -54,8 +54,7 @@ Mass-conservation invariant: `dHidt = dHidt_dyn + mb_net` to within
 
 - Phase 14 — level-set flux calving via `calving_step!`. Three laws
   ported (`equil`, `threshold`, `vm-m16` stub). Sussman/Osher
-  redistancing replaces the Fortran neighbour-snap reset and `dt_lsf`
-  re-flag. Full pipeline documented in [the calving page](calving.md).
+  redistancing (Fortran `lsf_method = "redist"`). Full pipeline documented in [the calving page](calving.md).
 
 **Deferred to later milestones**
 

@@ -20,32 +20,24 @@ using Yelmo.YelmoPar: YdynParams, ydyn_params, YelmoParameters
 
 @testset "SSASolver: default field values" begin
     s = SSASolver()
-    @test s.method          === :residual
+    @test s.method          === :energy_quadratic   # Fortran ssa_solver = "energy"
     @test s.linear_method   === :auto
     @test s.precond         === :jacobi
     @test s.smoother        === :gauss_seidel
     @test s.rtol            == 1e-6
     @test s.itmax           == 200
-    @test s.picard_tol      == 1e-2
-    @test s.picard_relax    == 0.7
-    @test s.picard_iter_max == 50
 end
 
 @testset "SSASolver: kwarg overrides" begin
     s = SSASolver(method = :energy_quadratic, linear_method = :gmres,
                    precond = :amg_sa, smoother = :jacobi,
-                   rtol = 1e-8, itmax = 500,
-                   picard_tol = 5e-3, picard_relax = 0.5,
-                   picard_iter_max = 100)
+                   rtol = 1e-8, itmax = 500)
     @test s.method          === :energy_quadratic
     @test s.linear_method   === :gmres
     @test s.precond         === :amg_sa
     @test s.smoother        === :jacobi
     @test s.rtol            == 1e-8
     @test s.itmax           == 500
-    @test s.picard_tol      == 5e-3
-    @test s.picard_relax    == 0.5
-    @test s.picard_iter_max == 100
 end
 
 @testset "SSASolver: method/linear_method validation + auto resolution" begin
@@ -56,6 +48,7 @@ end
     @test resolve_linear_method(SSASolver(method = :energy_quadratic)) === :cg
     # Explicit override returns unchanged
     @test resolve_linear_method(SSASolver(linear_method = :bicgstab))  === :bicgstab
+    @test resolve_linear_method(SSASolver(method = :residual, linear_method = :cg)) === :cg
     @test resolve_linear_method(SSASolver(method = :energy_quadratic,
                                           linear_method = :bicgstab))  === :bicgstab
 end
@@ -86,14 +79,21 @@ end
 end
 
 @testset "YdynParams: ssa_solver kwarg override" begin
-    custom = SSASolver(picard_tol = 5e-3)
+    custom = SSASolver(rtol = 5e-3)
     yd = YdynParams(ssa_solver = custom)
     @test yd.ssa_solver === custom
-    @test yd.ssa_solver.picard_tol == 5e-3
+    @test yd.ssa_solver.rtol == 5e-3
 end
 
-@testset "YdynParams: ssa_lis_opt removed" begin
+@testset "YdynParams: Picard settings are the Fortran ssa_iter_* keys" begin
+    yd = YdynParams()
+    @test (yd.ssa_iter_max, yd.ssa_iter_rel, yd.ssa_iter_conv) == (20, 0.7, 1e-2)
+    @test !any(startswith(string(f), "picard") for f in fieldnames(SSASolver))
+end
+
+@testset "YdynParams: Lis options are the Fortran keys (unused by YelmoModel)" begin
     @test !(:ssa_lis_opt in fieldnames(YdynParams))
+    @test :ssa_lis_opt_residual in fieldnames(YdynParams)
     @test :ssa_solver in fieldnames(YdynParams)
 end
 

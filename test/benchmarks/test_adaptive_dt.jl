@@ -38,14 +38,14 @@ include("harness.jl")
 using .YelmoBenchmarkHarness
 
 using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
-                           yneff_params, ytill_params, ytopo_params,
+                           yhyd_params, ytill_params, ytopo_params,
                            yelmo_params
 
 # Same params as `test_mismip3d_stnd_lockstep.jl::_mismip3d_lockstep_params`,
 # but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC),
 # `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
 function _adaptive_params(; pc_method::String = "FE-SBE")
-    return YelmoParameters("mismip3d_stnd_adaptive";
+    return with_ported_options(YelmoParameters("mismip3d_stnd_adaptive";
         yelmo = yelmo_params(
             dt_method     = 2,
             pc_method     = pc_method,
@@ -55,7 +55,10 @@ function _adaptive_params(; pc_method::String = "FE-SBE")
             pc_n_redo     = 5,
             dt_min        = 0.01,
             cfl_max       = 0.1,
+            domain = "Greenland", grid_name = "GRL-16KM"
         ),
+        ytopo = ytopo_params(),
+        ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
             visc_method    = 1,
@@ -68,16 +71,13 @@ function _adaptive_params(; pc_method::String = "FE-SBE")
             ssa_lat_bc     = "floating",
             eps_0          = 1e-6,
             taud_lim       = 1e6,
-            ssa_solver     = SSASolver(precond         = :jacobi,
-                                       picard_tol      = 1e-3,
-                                       picard_iter_max = 20,
-                                       picard_relax    = 0.7,
-                                       rtol            = 1e-6,
-                                       itmax           = 500),
+            ssa_solver     = SSASolver(method = :residual, precond         = :jacobi, rtol            = 1e-6, itmax           = 500),
+            ssa_iter_conv = 1e-3, ssa_iter_rel = 0.7, ssa_iter_max = 20,
+            ssa_vel_max = 5000.0
         ),
-        yneff = yneff_params(method = 0, const_ = 1.0),
         ytill = ytill_params(method = -1),
-        ymat  = ymat_params(
+        yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
+        ymat = ymat_params(
             n_glen     = 3.0,
             rf_const   = 3.1536e-18,
             visc_min   = 1e3,
@@ -85,23 +85,27 @@ function _adaptive_params(; pc_method::String = "FE-SBE")
             enh_shear  = 1.0,
             enh_stream = 1.0,
             enh_shlf   = 1.0,
+            rf_method = -1
         ),
-        ytopo = ytopo_params(),
         # Mirror MISMIP3D namelist: `ytherm.method = "fixed"` keeps
         # `therm_step!` a no-op for the adaptive-dt benchmark too.
         ytherm = ytherm_params(method="fixed"),
-    )
+    ))
 end
 
 function _fixed_params()
     p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
-    return YelmoParameters(p.name;
-        yelmo  = yelmo_params(dt_method = 0),
-        ydyn   = p.ydyn, yneff = p.yneff, ytill = p.ytill,
-        ymat   = p.ymat, ytopo = p.ytopo,
+    return with_ported_options(YelmoParameters(p.name;
+        yelmo = yelmo_params(dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        ytopo = p.ytopo,
+        ycalv = p.ycalv,
+        ydyn = p.ydyn,
+        ytill = p.ytill,
+        yhyd = p.yhyd,
+        ymat = p.ymat,
         ytherm = p.ytherm,
-    )
+    ))
 end
 
 function _build(b, p)
