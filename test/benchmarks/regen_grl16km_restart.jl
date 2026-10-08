@@ -35,8 +35,9 @@ function deflate_copy(src::AbstractString, dst::AbstractString; level::Int = 4)
                 attrib = [k => a for (k, a) in v.attrib if k != "_FillValue"]
                 fill = get(v.attrib, "_FillValue", nothing)
                 kw = fill === nothing ? (;) : (; fillvalue = fill)
-                dv = defVar(d, name, eltype(v.var), dimnames(v); attrib = attrib,
-                            deflatelevel = level, shuffle = true, kw...)
+                # Scalars (e.g. the grid mapping) cannot be compressed.
+                isempty(dimnames(v)) || (kw = (; kw..., deflatelevel = level, shuffle = true))
+                dv = defVar(d, name, eltype(v.var), dimnames(v); attrib = attrib, kw...)
                 # Raw values (no CF transform); explicit ranges extend `time`.
                 ndims(data) == 0 ? (dv.var[] = data[]) : (dv.var[axes(data)...] = data)
             end
