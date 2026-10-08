@@ -13,6 +13,7 @@
 # ----------------------------------------------------------------------
 
 using NCDatasets
+using Oceananigans.Grids: xnodes, ynodes, Center
 
 export TimestepLog, init_timestep_log!, write_timestep_row!
 
