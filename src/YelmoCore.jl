@@ -1436,7 +1436,11 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                     end
                     _apply_boundary_slice!(group_nt[k], slab, boundary_slice_kind(meta.name))
                 else
+                    # A name in more than one group is written as
+                    # `<group>_<name>` by `write_output!` (e.g. `bnd_tau_relax`).
                     name_str = String(meta.name)
+                    prefixed = "$(gname)_$(name_str)"
+                    haskey(ds, prefixed) && (name_str = prefixed)
                     if !haskey(ds, name_str)
                         strict && error(
                             "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
