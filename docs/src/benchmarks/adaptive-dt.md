@@ -55,13 +55,14 @@ The adaptive and fixed-FE runs need not produce bit-identical output — they
 converge to the same attractor but via different trajectories.  The ±10%
 tolerance confirms they land in the same neighbourhood.
 
-Observed (albedo, yelmo dev time loop):
+Observed (albedo, yelmo dev time loop and controller, MISMIP3D spec pc settings):
 
 | Quantity | Fixed dt (`dt_method = 0`) | FE-SBE | HEUN | AB-SAM |
 |---|---|---|---|---|
-| `max(H)` | 1576.27 m | 1576.29 m | 1576.29 m | 1576.27 m |
-| `mean(H)` | 840.63 m | 841.26 m | 841.25 m | 841.20 m |
+| `max(H)` | 1576.24 m | 1576.27 m | 1576.27 m | 1576.25 m |
+| `mean(H)` | 840.73 m | 841.16 m | 841.15 m | 841.08 m |
 | `mean(f_grnd)` | 0.4902 | 0.4902 | 0.4902 | 0.4902 |
+| steps (500 yr) | — | 570 | 542 | 520 |
 
 ### 3. Rollback path actually fires on the cliff IC
 
