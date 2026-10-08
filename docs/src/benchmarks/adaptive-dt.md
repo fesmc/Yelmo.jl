@@ -31,7 +31,7 @@ the `pc_eta_trim` fraction of largest ones (Fortran `set_pc_mask`,
 
 ## What it tests
 
-Three test sets:
+Four test sets:
 
 ### 1. Redo reference round-trip
 
@@ -71,6 +71,16 @@ The MISMIP3D thicker IC produces a velocity cliff on the first step
 `ssa_vel_max` clips it).  The first outer step should trigger at least one
 adaptive rejection or sub-step.  The test asserts
 `n_rejections > 0` OR `n_steps_taken > 1` OR `min(pc_dt) < 1 yr`.
+
+### 4. Restart history and timestep log
+
+Five AB-SAM years of MISMIP3D Stnd with `log_timestep = true`. Checks the
+log (`yelmo_timesteps.nc`): a first row with the controller state, one row
+per step, the cold-start step `dt_min`, `Σ iter_redo` = rejections, and
+non-zero speeds and solver counters. A file written before the first step
+loads without a history; one written after 5 yr loads with it, and its
+first step equals the next step of the uninterrupted run instead of a
+`dt_min` cold start.
 
 ## Step-size controller details
 

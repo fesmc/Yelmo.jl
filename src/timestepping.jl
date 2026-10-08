@@ -32,7 +32,8 @@ using Oceananigans.Grids: topology, Periodic
 
 # Extend `YelmoCore._select_step!` (declared as a stub there) with the
 # time loop below.
-import .YelmoCore: _select_step!
+import .YelmoCore: _select_step!, pc_history, set_pc_history!
+using .YelmoCore: PC_HISTORY, YelmoModel
 
 using .YelmoTiming: @timed_section
 using .YelmoModelTopo: PCPredictor, PCCorrector, PCAdvance, H_grnd_point
@@ -306,8 +307,6 @@ end
 
 # ===== Per-model state of the time loop =====
 
-const PC_HISTORY = 3
-
 """
     PCScratch
 
@@ -355,6 +354,20 @@ function _ensure_pc_scratch!(y)
     s = _alloc_pc_scratch(y)
     y.dyn.scratch.pc_scratch[] = s
     return s
+end
+
+function pc_history(y::YelmoModel)
+    s = y.dyn.scratch.pc_scratch[]
+    (s === nothing || !s.pc_active) && return nothing
+    return (copy(s.pc_dt), copy(s.pc_eta))
+end
+
+function set_pc_history!(y::YelmoModel, pc_dt::AbstractVector, pc_eta::AbstractVector)
+    s = _ensure_pc_scratch!(y)
+    copyto!(s.pc_dt, pc_dt)
+    copyto!(s.pc_eta, pc_eta)
+    s.pc_active = true
+    return y
 end
 
 # Latest dt and eta first (Fortran `cshift(…, shift=-1)`).
@@ -535,6 +548,7 @@ function _pc_loop!(y, dt_outer::Float64, scheme::PCScheme,
     # The controller uses the order of the scheme (Fortran sets it at the
     # start of each `yelmo_update`; a cold-start AB-SAM step leaves 1).
     scratch.pc_k = pc_order(scheme)
+    log = _timestep_log!(y, scratch)
 
     while true
         dt_max = max(target - y.time, 0.0)
@@ -548,15 +562,15 @@ function _pc_loop!(y, dt_outer::Float64, scheme::PCScheme,
         # Nothing to do on an already-active trajectory.
         (dt_now == 0.0 && scratch.pc_active) && break
 
+        ns_step0 = time_ns()
         pc_n_redo > 1 && save!(scratch.ref, y)
         t_n = y.time
 
         eta = 0.0
         iter_redo = 0
-        wallclock_s = 0.0
+        ns_tpo = ns_dyn = UInt64(0)     # topography / dynamics wall time of the last attempt
         for iter in 1:pc_n_redo
             iter_redo = iter
-            t0 = time()
             time_now = t_n + dt_now
             abs(target - time_now) < _TIME_TOL && (time_now = target)
             y.time = time_now
@@ -567,18 +581,23 @@ function _pc_loop!(y, dt_outer::Float64, scheme::PCScheme,
             β1, β2, β3, β4 = β
             scratch.pc_k = k
 
+            ns0 = time_ns()
             @timed_section y :topo @timed_section y :topo_pred begin
                 _transport_velocity!(y, p.pc_filter_vel)
                 Yelmo.topo_step!(y, dt_now, PCPredictor(); β1 = β1, β2 = β2)
             end
+            ns1 = time_ns()
             @timed_section y :dyn Yelmo.dyn_step!(y, dt_now)
+            ns2 = time_ns()
             @timed_section y :topo @timed_section y :topo_corr begin
                 _transport_velocity!(y, p.pc_filter_vel)
                 Yelmo.topo_step!(y, dt_now, PCCorrector(); β3 = β3, β4 = β4)
             end
+            ns3 = time_ns()
+            ns_tpo = (ns1 - ns0) + (ns3 - ns2)
+            ns_dyn = ns2 - ns1
 
             eta = _pc_eta!(scratch, y, pc_tau_factor(s, ζ), dt_now)
-            wallclock_s += time() - t0
 
             if iter < pc_n_redo && dt_now > dt_min && eta > pc_tol
                 # Redo with a smaller step (Fortran yelmo_ice.f90:385-397).
@@ -591,18 +610,25 @@ function _pc_loop!(y, dt_outer::Float64, scheme::PCScheme,
         end
 
         # Accepted: the other components at H_n, then advance the topography.
-        t0 = time()
         @timed_section y :mat  Yelmo.mat_step!(y, dt_now)
         @timed_section y :thrm Yelmo.therm_step!(y, dt_now)
+        ns4 = time_ns()
         @timed_section y :topo @timed_section y :topo_adv Yelmo.topo_step!(y, dt_now, PCAdvance();
                                                                            use_H_pred = p.pc_use_H_pred)
-        wallclock_s += time() - t0
+        ns5 = time_ns()
+        ns_tpo += ns5 - ns4
 
         _push_history!(scratch, max(dt_now, dt_min), eta)
         scratch.pc_active = true
         scratch.n_steps_taken += 1
         scratch.n_dtmin_run = abs(dt_now - dt_min) < dt_min * 1e-3 ? scratch.n_dtmin_run + 1 : 0
-        _maybe_log_timestep!(y, dt_now, eta, iter_redo, wallclock_s)
+        log === nothing || _write_timestep_row!(log, y, scratch;
+                                                dt_now    = dt_now,
+                                                pc_eta    = eta,
+                                                speed     = _model_speed(dt_now, ns5 - ns_step0),
+                                                speed_tpo = _model_speed(dt_now, ns_tpo),
+                                                speed_dyn = _model_speed(dt_now, ns_dyn),
+                                                iter_redo = iter_redo - 1)
 
         _check_kill(y, scratch)
         # Stuck at a small dt_min (Fortran yelmo_ice.f90:521-539).
@@ -669,26 +695,42 @@ end
 
 # ===== Timestep log =====
 
-# When `y.p.yelmo.log_timestep == true`, lazily create a `TimestepLog`
-# at `<rundir>/yelmo_timesteps.nc` and append one row per step. The log
-# is cached on `y.dyn.scratch.timestep_log[]`.
-function _maybe_log_timestep!(y, dt_now::Real, eta::Real,
-                              iter_redo::Integer, wallclock_s::Real)
+# Model speed [kyr/hr] of `dt` model years in `ns` nanoseconds of wall
+# time; 0 if no time elapsed (Fortran `yelmo_calc_speed`).
+_model_speed(dt::Float64, ns::Integer) = ns > 0 ? (dt * 1e-3) / (ns * 1e-9 / 3600.0) : 0.0
+
+# The timestep log of `y` (`yelmo.log_timestep`), else `nothing`. Created
+# on the first call, cached in `y.dyn.scratch.timestep_log[]`, with a
+# first row of the controller state at the current time (Fortran
+# `yelmo_init`).
+function _timestep_log!(y, scratch::PCScratch)
     y.p.yelmo.log_timestep || return nothing
     cached = y.dyn.scratch.timestep_log[]
-    log = if cached === nothing
-        new_log = init_timestep_log!(y)
-        y.dyn.scratch.timestep_log[] = new_log
-        new_log
-    else
-        cached::TimestepLog
-    end
-    write_timestep_row!(log, y;
-                        dt_now      = dt_now,
-                        eta         = eta,
-                        iter_redo   = iter_redo,
-                        wallclock_s = wallclock_s)
-    return nothing
+    cached === nothing || return cached::TimestepLog
+    log = init_timestep_log!(y)
+    y.dyn.scratch.timestep_log[] = log
+    _write_timestep_row!(log, y, scratch; dt_now = 0.0, dt_adv = 0.0, dt_pi = scratch.pc_dt[1],
+                         pc_eta = scratch.pc_eta[1], speed = 0.0, speed_tpo = 0.0,
+                         speed_dyn = 0.0, iter_redo = 0, ssa_lin_iter = 0, ssa_lin_fail = 0,
+                         adv_lin_iter = 0, adv_lin_fail = 0)
+    return log
+end
+
+# A row of the log at `y.time`: the Courant and controller timesteps of
+# the step and the solver counters of the model, unless given.
+function _write_timestep_row!(log::TimestepLog, y, scratch::PCScratch; kwargs...)
+    sd, st = y.dyn.scratch, y.tpo.scratch
+    write_timestep_row!(log, y.time;
+                        dt_adv       = scratch.dt_adv,
+                        dt_pi        = scratch.dt_pi,
+                        ssa_iter     = sd.ssa_iter_now[],
+                        ssa_lin_iter = sd.ssa_lin_iter[],
+                        ssa_lin_fail = sd.ssa_lin_fail[],
+                        ssa_lim_n    = sd.ssa_lim_n[],
+                        adv_lin_iter = st.adv_lin_iter[],
+                        adv_lin_fail = st.adv_lin_fail[],
+                        kwargs...)
+    return log
 end
 
 # ===== Entry: dispatch on dt_method =====

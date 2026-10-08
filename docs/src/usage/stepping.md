@@ -33,8 +33,21 @@ The β coefficients come from `yelmo.pc_method` (`"AB-SAM"`, `"HEUN"`,
 `"FE-SBE"`). `yelmo.dt_method = 0` takes the whole `dt` as one step (more
 if a step is redone); `dt_method = 2` chooses the steps with the PI
 controller (`pc_controller`, `pc_eps`, `pc_tol`, `pc_n_redo`). The first
-step of a model is `dt_min`. The topography stages are described on the
+step of a model is `dt_min` (cold start), unless the model was loaded from
+a file with the controller history `pc_dt`, `pc_eta` (see
+[Restarts](io.md#restarts)): it then continues the trajectory. The
+topography stages are described on the
 [topography page](../physics/topography.md).
+
+With `yelmo.log_timestep = true`, the model buffers one row per step and
+`close(y.dyn.scratch.timestep_log[])` writes them to
+`<rundir>/yelmo_timesteps.nc`, with the variables of the Fortran log:
+`dt_now`, `dt_adv` (Courant), `dt_pi` (controller), `pc_eta`, `iter_redo`
+(redos of the step), `speed`, `speed_tpo`, `speed_dyn` [kyr/hr],
+`ssa_iter`, `ssa_lin_iter`/`ssa_lin_fail` (linear solves of the velocity
+solve), `ssa_lim_n` (faces at `ssa_vel_max`) and
+`adv_lin_iter`/`adv_lin_fail` (implicit advection solves). The first row
+holds the controller state at the start.
 
 `init_state!(y::YelmoModel, time)` is currently a thin wrapper that
 sets `y.time = time`; per-component initialisation will land as

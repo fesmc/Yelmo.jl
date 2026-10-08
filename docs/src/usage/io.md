@@ -70,6 +70,17 @@ Spatial dimensions are written based on each field's location:
 (0–9, default 4). Coordinates are written as `Float64` with `units`
 and `long_name` attributes.
 
+## Restarts
+
+A `YelmoModel` file also holds the timestep-controller history
+([`pc_history`](@ref)): `pc_dt` [yr] and `pc_eta` [1/yr] of the last
+three steps (dimension `pc_steps`, latest first), as in Fortran restart
+files. `YelmoModel(file, time; p)` reads it from the first time slice and
+continues the trajectory ([`set_pc_history!`](@ref)) instead of starting
+cold with a `dt_min` step. Slices written before the first step hold
+NaN, and so do not count as a history; restart files of `YelmoMirror`
+(Fortran) carry one.
+
 ## Name-collision handling
 
 Some field names appear in more than one group — `tau_relax` is in

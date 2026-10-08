@@ -1145,6 +1145,7 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
         # Copy the workspace solution into the caller-supplied buffer
         # (in-place — was `copy(workspace.x)` returning a fresh Vector).
         copyto!(x_dest, workspace.x)
+        _count_ssa_lin_solve!(scratch, workspace.stats)
         if !workspace.stats.solved
             res = norm(A * x_dest .- b)
             @warn "SSA BiCGStab did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
@@ -1169,6 +1170,7 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
                 history = false)
         end
         copyto!(x_dest, workspace.x)
+        _count_ssa_lin_solve!(scratch, workspace.stats)
         if !workspace.stats.solved
             res = norm(A * x_dest .- b)
             @warn "SSA CG did not converge" precond=ssa.precond niter=workspace.stats.niter residual=res rtol=ssa.rtol itmax=ssa.itmax
@@ -1178,6 +1180,43 @@ function _solve_ssa_linear!(x_dest::Vector{Float64},
         error("_solve_ssa_linear!: linear_method=$(linmeth) not yet implemented. " *
               "Currently only :bicgstab and :cg are supported.")
     end
+end
+
+# Linear solver iterations and failures (breakdown or iteration limit) of
+# a velocity solve, summed over its Picard iterations (Fortran
+# `ssa_lin_iter`, `ssa_lin_fail`; reset by `_reset_ssa_lin_counts!`).
+function _count_ssa_lin_solve!(scratch, stats)
+    scratch.ssa_lin_iter[] += stats.niter
+    stats.solved || (scratch.ssa_lin_fail[] += 1)
+    return nothing
+end
+
+function _reset_ssa_lin_counts!(scratch)
+    scratch.ssa_lin_iter[] = 0
+    scratch.ssa_lin_fail[] = 0
+    return nothing
+end
+
+"""
+    count_vel_lim_faces(ux, uy, ssa_mask_acx, ssa_mask_acy, u_max) -> Int
+
+Number of free ssa faces (`ssa_mask ≥ 1`) where the velocity limit acts:
+a component at the clip value `u_max` (Fortran `count_vel_lim_faces`,
+`ssa_vel_lim_method = "clip"`; the "drag" limit is not ported).
+"""
+function count_vel_lim_faces(ux, uy, ssa_mask_acx, ssa_mask_acy, u_max::Float64)
+    Ux, Uy = interior(ux), interior(uy)
+    Mx, My = interior(ssa_mask_acx), interior(ssa_mask_acy)
+    Nx, Ny = size(ux.grid, 1), size(ux.grid, 2)
+    Tx, Ty = topology(ux.grid, 1), topology(uy.grid, 2)
+    n_lim = 0
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ie = _ip1_modular(i, Nx, Tx)     # east face of cell i
+        jn = _jp1_modular(j, Ny, Ty)     # north face of cell j
+        (Mx[ie, j, 1] >= 1 && abs(Ux[ie, j, 1]) >= u_max) && (n_lim += 1)
+        (My[i, jn, 1] >= 1 && abs(Uy[i, jn, 1]) >= u_max) && (n_lim += 1)
+    end
+    return n_lim
 end
 
 # ----------------------------------------------------------------------
@@ -1575,6 +1614,7 @@ function calc_velocity_ssa!(y)
     converged = false
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
+    _reset_ssa_lin_counts!(sc)
 
     for iter in 1:p_ydyn.ssa_iter_max
         iter_now = iter
@@ -1802,6 +1842,8 @@ function calc_velocity_ssa!(y)
     end
 
     sc.ssa_iter_now[] = iter_now
+    sc.ssa_lim_n[] = count_vel_lim_faces(y.dyn.ux_b, y.dyn.uy_b, y.dyn.ssa_mask_acx,
+                                         y.dyn.ssa_mask_acy, Float64(p_ydyn.ssa_vel_max))
 
     if !converged
         @warn "SSA Picard did not converge" iter = iter_now resid = (iter_now > 0 && iter_now <= n_resid_max ? sc.ssa_residuals[iter_now] : NaN) tol = p_ydyn.ssa_iter_conv

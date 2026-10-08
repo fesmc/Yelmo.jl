@@ -21,7 +21,7 @@ using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 using ..YelmoHooks: YelmoHooks
 
 export AbstractYelmoModel, YelmoModel
-export init_state!, step!, load_state!
+export init_state!, step!, load_state!, pc_history, set_pc_history!
 export topo_step!, dyn_step!, mat_step!, therm_step!
 export load_grids_from_restart, load_grids_with_regrid, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
@@ -1053,6 +1053,12 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_b_vec                  = Vector{Float64}(undef, N_rows),
         ssa_x_vec                  = Vector{Float64}(undef, N_rows),
         ssa_iter_now               = Ref{Int}(0),
+        # Linear solver iterations / failures of the last velocity solve
+        # (summed over Picard iterations) and faces at the velocity limit
+        # after it (Fortran `ssa_lin_iter`, `ssa_lin_fail`, `ssa_lim_n`).
+        ssa_lin_iter               = Ref{Int}(0),
+        ssa_lin_fail               = Ref{Int}(0),
+        ssa_lim_n                  = Ref{Int}(0),
         ssa_solver_workspace       = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
         # CG workspace for `method = :energy_quadratic` (Hessian-of-energy
         # assembly produces a symmetric positive-definite matrix). Allocated
@@ -1162,7 +1168,10 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
           H_tmp         = zeros(Float64, size(interior(tpo.H_ice))),
           ux_t          = XFaceField(g),
           uy_t          = YFaceField(g))
-    tpo_scratch = (adv_cache = Ref{Any}(nothing), pc = pc)
+    # `adv_lin_iter` / `adv_lin_fail`: linear solver iterations and failures
+    # of the thickness advection of the step, predictor + corrector (Fortran).
+    tpo_scratch = (adv_cache = Ref{Any}(nothing), pc = pc,
+                   adv_lin_iter = Ref{Int}(0), adv_lin_fail = Ref{Int}(0))
     tpo = merge(tpo, (scratch = tpo_scratch,))
 
     # `dta.rmse`: scalar comparison metrics filled by `data_compare!`
@@ -1272,6 +1281,7 @@ function YelmoModel(restart_file::String, time::Float64;
     fill!(interior(y.bnd.mask_ice), Float64(MASK_ICE_DYNAMIC))
 
     load_state!(y, restart_file; groups=groups, strict=strict, mps=mps)
+    _load_pc_history!(y, p, restart_file)
 
     return y
 end
@@ -1426,7 +1436,11 @@ function load_state!(y::YelmoModel, restart_file::AbstractString;
                     end
                     _apply_boundary_slice!(group_nt[k], slab, boundary_slice_kind(meta.name))
                 else
+                    # A name in more than one group is written as
+                    # `<group>_<name>` by `write_output!` (e.g. `bnd_tau_relax`).
                     name_str = String(meta.name)
+                    prefixed = "$(gname)_$(name_str)"
+                    haskey(ds, prefixed) && (name_str = prefixed)
                     if !haskey(ds, name_str)
                         strict && error(
                             "Variable `$(name_str)` (group `$(gname)`) not found in restart " *
@@ -1952,6 +1966,48 @@ end
 # the symbol here keeps `step!` self-contained even though the
 # time-stepping backend is added by a later include.
 function _select_step! end
+
+# Number of past steps in the timestep-controller history (Fortran `pc_steps`).
+const PC_HISTORY = 3
+
+"""
+    pc_history(y) -> (pc_dt, pc_eta) or nothing
+
+Timestep-controller history of `y`, latest step first: the dt [yr] and the
+error norm [1/yr] of the last `PC_HISTORY` steps (Fortran `pc_dt`,
+`pc_eta`). `nothing` until the first step and for models without one.
+Written to output files for a continuous restart; methods in
+src/timestepping.jl.
+"""
+pc_history(::AbstractYelmoModel) = nothing
+
+"""
+    set_pc_history!(y, pc_dt, pc_eta) -> y
+
+Continue the time loop of `y` from the history `pc_dt`, `pc_eta` (see
+[`pc_history`](@ref)) instead of a cold start. Methods in
+src/timestepping.jl.
+"""
+function set_pc_history! end
+
+# Read the history of time slice 1 of `restart_file`, if it has a complete
+# one (files written before the first step of a run hold NaN): with it the
+# model continues the trajectory (Fortran sets `pc_active` on every restart),
+# without it the first step is a cold start. Only a model with
+# `YelmoParameters` has a time loop.
+function _load_pc_history!(y::YelmoModel, ::YelmoParameters, restart_file::AbstractString)
+    pc_dt, pc_eta = NCDataset(restart_file) do ds
+        (haskey(ds, "pc_dt") && haskey(ds, "pc_eta")) || return (nothing, nothing)
+        (ds["pc_dt"][:, 1], ds["pc_eta"][:, 1])
+    end
+    pc_dt === nothing && return y
+    all(v -> !ismissing(v) && isfinite(v), vcat(pc_dt, pc_eta)) || return y
+    length(pc_dt) == length(pc_eta) == PC_HISTORY ||
+        error("$(restart_file): pc_dt / pc_eta have $(length(pc_dt)) / $(length(pc_eta)) " *
+              "steps, expected $(PC_HISTORY).")
+    return set_pc_history!(y, Float64.(pc_dt), Float64.(pc_eta))
+end
+_load_pc_history!(y::YelmoModel, p, restart_file::AbstractString) = y
 
 # ---------------------------------------------------------------------------
 # compare_state — backend-agnostic field-wise diff for regression tests

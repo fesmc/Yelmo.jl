@@ -110,7 +110,7 @@ export compare
 
 # YelmoCore
 export AbstractYelmoModel, YelmoModel, YelmoHooks
-export init_state!, step!, load_state!
+export init_state!, step!, load_state!, pc_history, set_pc_history!
 export load_grids_from_restart, load_fields_from_restart
 export load_field_from_dataset_2D, load_field_from_dataset_3D
 export make_field, matches_patterns, yelmo_define_grids, calc_zeta

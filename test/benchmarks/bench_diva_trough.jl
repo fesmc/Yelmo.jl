@@ -180,12 +180,12 @@ end
 
 function read_eta_stats(log_path; eta_var = "pc_eta", dt_var = "dt_now")
     NCDataset(log_path, "r") do ds
-        eta = Array{Float64}(ds[eta_var][:])
         dt  = Array{Float64}(ds[dt_var][:])
-        wc  = haskey(ds, "wallclock_s") ? Array{Float64}(ds["wallclock_s"][:]) : Float64[]
-        ssa = haskey(ds, "ssa_iter")    ? Array{Int}(ds["ssa_iter"][:])      : Int[]
-        redo = haskey(ds, "iter_redo")  ? Array{Int}(ds["iter_redo"][:])     : Int[]
-        (n=length(eta), eta=eta, dt=dt, wc=wc, ssa=ssa, redo=redo)
+        k   = dt .> 0                  # drop the initial row
+        eta = Array{Float64}(ds[eta_var][:])[k]
+        ssa  = Array{Int}(ds["ssa_iter"][:])[k]
+        redo = Array{Int}(ds["iter_redo"][:])[k]
+        (n=count(k), eta=eta, dt=dt[k], ssa=ssa, redo=redo)
     end
 end
 
@@ -228,8 +228,8 @@ for (label, y, wc, log_path) in (
         println("  mean eta           = $(round(mean(s.eta), sigdigits=4)) m/yr")
         println("  median eta         = $(round(median(s.eta), sigdigits=4)) m/yr")
         println("  max  eta           = $(round(maximum(s.eta), sigdigits=4)) m/yr")
-        println("  mean ssa_iter      = $(isempty(s.ssa) ? "N/A" : round(mean(s.ssa), digits=2))")
-        println("  PC retries (>1)    = $(isempty(s.redo) ? "N/A" : count(>(1), s.redo))")
+        println("  mean ssa_iter      = $(round(mean(s.ssa), digits=2))")
+        println("  steps with redos   = $(count(>(0), s.redo))")
     else
         println("  (timestep log disabled for this run)")
     end
@@ -257,7 +257,7 @@ if isfile(MIRROR_TS_LOG)
         eta = Array{Float64}(ds["pc_eta"][:])
         redo = Array{Int}(ds["iter_redo"][:])
         ssa  = Array{Int}(ds["ssa_iter"][:])
-        mask = (t .>= 0.0) .& (t .< T_END + 1e-6)
+        mask = (t .>= 0.0) .& (t .< T_END + 1e-6) .& (dt .> 0)
         n = count(mask)
         println("\n--- Mirror Fortran timestep log (cold-start window t∈[0,1000]) ---")
         println("  PC steps           = $n")
@@ -266,7 +266,7 @@ if isfile(MIRROR_TS_LOG)
         println("  median eta         = $(round(median(eta[mask]), sigdigits=4)) m/yr")
         println("  max  eta           = $(round(maximum(eta[mask]), sigdigits=4)) m/yr")
         println("  mean ssa_iter      = $(round(mean(ssa[mask]), digits=2))")
-        println("  PC retries (>1)    = $(count(>(1), redo[mask]))")
+        println("  steps with redos   = $(count(>(0), redo[mask]))")
     end
 else
     println("\n(Mirror Fortran timestep log not present — run regen_trough_diva.jl first.)")

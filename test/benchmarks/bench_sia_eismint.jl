@@ -132,11 +132,12 @@ end
 
 function read_eta_stats(log_path)
     NCDataset(log_path, "r") do ds
-        eta = Array{Float64}(ds["pc_eta"][:])
         dt  = Array{Float64}(ds["dt_now"][:])
-        ssa = haskey(ds, "ssa_iter")  ? Array{Int}(ds["ssa_iter"][:])  : Int[]
-        redo = haskey(ds, "iter_redo") ? Array{Int}(ds["iter_redo"][:]) : Int[]
-        (n=length(eta), eta=eta, dt=dt, ssa=ssa, redo=redo)
+        k   = dt .> 0                  # drop the initial row
+        eta = Array{Float64}(ds["pc_eta"][:])[k]
+        ssa  = Array{Int}(ds["ssa_iter"][:])[k]
+        redo = Array{Int}(ds["iter_redo"][:])[k]
+        (n=count(k), eta=eta, dt=dt[k], ssa=ssa, redo=redo)
     end
 end
 
@@ -177,7 +178,7 @@ for (label, y, wc, log_path) in runs_to_report
         println("  mean eta           = $(round(mean(s.eta), sigdigits=4)) m/yr")
         println("  median eta         = $(round(median(s.eta), sigdigits=4)) m/yr")
         println("  max  eta           = $(round(maximum(s.eta), sigdigits=4)) m/yr")
-        println("  PC retries (>1)    = $(isempty(s.redo) ? "N/A" : count(>(1), s.redo))")
+        println("  steps with redos   = $(count(>(0), s.redo))")
     else
         println("  (timestep log disabled for this run; pass --with-log to enable)")
     end
