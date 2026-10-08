@@ -75,8 +75,9 @@ function _eismint_moving_params()
             dt_method     = 2,
             pc_method     = "HEUN",
             pc_controller = "PI42",
-            pc_tol        = 5.0,
-            pc_eps        = 1.0,
+            pc_filter_vel = false,      # EISMINT spec values
+            pc_tol        = 2.0,
+            pc_eps        = 1e-3,
             pc_n_redo     = 5,
             dt_min        = 0.01,
             cfl_max       = 0.5,

@@ -27,17 +27,9 @@ dynamic ice to Greenland.
 Selecting `backend = :mirror` runs the Fortran model instead. The same
 canonical `YelmoParameters` is translated to a `YelmoMirrorParameters`
 via `to_mirror`, the namelist is written under `output-mirror/`, and the
-Fortran model is initialised from it. Backend-divergent timestepping
-options (`MIRROR_DIVERGENT_YELMO`, e.g. `pc_method`) are **not** carried
-over — the Mirror keeps its Fortran-native values, while shared controls
-(`dt_method`, `dt_min`, `cfl_*`) are copied through.
-
-> `pc_method` differs by backend on purpose: the Julia default is
-> `"HEUN"` (fewer adaptive sub-steps on margin-heavy domains), while the
-> Mirror uses Fortran's native `"AB-SAM"`. Yelmo.jl's `"HEUN"` is not the
-> same scheme as Fortran's `"HEUN"`, so the two are configured
-> independently. Setting a divergent parameter on the Julia side and
-> requesting `to_mirror` is an error.
+Fortran model is initialised from it. Both backends run the same
+predictor-corrector timestepping (Fortran `yelmo_update`) with the same
+settings.
 
 ## How to run
 

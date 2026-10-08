@@ -60,13 +60,13 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
     return with_ported_options(YelmoParameters("trough_f17_$(dt_method)";
         yelmo = yelmo_params(phys_const = "TROUGH",
             dt_method     = dt_method,
-            pc_method     = "HEUN",
+            pc_method     = "AB-SAM",     # TROUGH spec values
             pc_controller = "PI42",
-            pc_tol        = 5.0,
-            pc_eps        = 1.0,
+            pc_tol        = 1.0,
+            pc_eps        = 0.01,
             pc_n_redo     = 5,
             dt_min        = 0.01,
-            cfl_max       = 0.5,
+            cfl_max       = 0.1,
             log_timestep  = log_timestep,
             domain = "Greenland", grid_name = "GRL-16KM"
         ),

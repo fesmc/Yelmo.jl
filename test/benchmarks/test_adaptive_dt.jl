@@ -42,18 +42,19 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
                            yelmo_params
 
 # Same params as `test_mismip3d_stnd_lockstep.jl::_mismip3d_lockstep_params`,
-# but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC),
-# `pc_method = "HEUN"`, `pc_controller = "PI42"`, plus tolerances.
+# but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC) and
+# the pc settings of the Mirror spec (`specs/yelmo_MISMIP3D.nml`).
 function _adaptive_params(; pc_method::String = "FE-SBE")
     return with_ported_options(YelmoParameters("mismip3d_stnd_adaptive";
         yelmo = yelmo_params(phys_const = "MISMIP3D",
             dt_method     = 2,
             pc_method     = pc_method,
             pc_controller = "PI42",
-            pc_tol        = 5.0,        # rejection threshold (m/yr)
-            pc_eps        = 1.0,        # controller floor
-            pc_n_redo     = 5,
-            dt_min        = 0.01,
+            pc_filter_vel = false,      # MISMIP3D spec values
+            pc_tol        = 1.0,
+            pc_eps        = 0.01,
+            pc_n_redo     = 10,
+            dt_min        = 0.1,
             cfl_max       = 0.1,
             domain = "Greenland", grid_name = "GRL-16KM"
         ),
@@ -97,7 +98,7 @@ function _fixed_params()
     p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
     return with_ported_options(YelmoParameters(p.name;
-        yelmo = yelmo_params(phys_const = "MISMIP3D", dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(phys_const = "MISMIP3D", dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_filter_vel = false, pc_n_redo = 10, pc_eps = 0.01),
         ytopo = p.ytopo,
         ycalv = p.ycalv,
         ydyn = p.ydyn,
@@ -159,6 +160,32 @@ end
     @test interior(y.tpo.H_ice)  == H_pre
     @test interior(y.dyn.ux_b)   == Ux_pre
     @test interior(y.tpo.f_grnd) == fg_pre
+end
+
+
+@testset "Adaptive PC: controller, step limits and parameter checks" begin
+    # Fortran `limit_adaptive_timestep`.
+    lim = Yelmo._limit_adaptive_timestep
+    @test lim(0.95, 0.1, 1.0) == 0.5          # big + tiny → two equal steps
+    @test lim(2.0, 0.1, 1.0)  == 1.0          # at most the time left
+    @test lim(0.5, 0.1, 1.0)  == 0.5
+    @test lim(0.123456, 0.01, 1.0) ≈ 0.1234   # rounded down to 4 decimals
+    @test lim(1e-6, 1e-7, 1.0) ≈ 1e-4         # at least 1e-4
+    @test lim(0.05, 0.1, 1.0) == 0.1          # at least dt_min
+    @test lim(0.3, 0.1, 0.0) == 0.0           # nothing left
+
+    # Every controller keeps dt when eta stays at the target pc_eps.
+    eps = 0.02
+    for c in (Yelmo.PI42(), Yelmo.H312b(), Yelmo.H312PID(), Yelmo.H321PID(), Yelmo.PID1())
+        @test Yelmo._dt_ratio(c, (eps, eps, eps), (1.0, 1.0, 1.0), eps, 2) ≈ 1.0
+    end
+    # PI42 grows dt when the error is below the target.
+    @test Yelmo._dt_ratio(Yelmo.PI42(), (eps / 10, eps, eps), (1.0, 1.0, 1.0), eps, 2) > 1.0
+
+    # Fortran `yelmo_par_load` checks.
+    @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_eps = 2.0, pc_tol = 1.0))
+    @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_rho_max = 1.0))
+    @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_controller = "PI43"))
 end
 
 

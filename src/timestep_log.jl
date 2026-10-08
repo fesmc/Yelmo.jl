@@ -113,8 +113,8 @@ function Base.close(log::TimestepLog)
             dv[r] = log.dt_now
 
             ev = defVar(ds, "pc_eta", Float64, ("time",))
-            ev.attrib["units"]     = "m yr^-1"
-            ev.attrib["long_name"] = "PC truncation-error proxy (eta)"
+            ev.attrib["units"]     = "yr^-1"
+            ev.attrib["long_name"] = "Norm of the pc truncation error (eta)"
             ev[r] = log.pc_eta
 
             sv = defVar(ds, "ssa_iter", Int64, ("time",))

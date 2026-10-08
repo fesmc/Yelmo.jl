@@ -27,7 +27,7 @@ reference `yelmo/tests/yelmo_initmip.f90` (`set_grl_pd` case).
 | Solver | DIVA (`ydyn.solver = "diva"`) |
 | Calving | von Mises (`vm-l19`) |
 | Effective pressure | till pressure (`yhyd.bkt_N_closure = 3`) |
-| Time-stepping | adaptive PC, `dt_method = 2` (HEUN on `YelmoModel`, AB-SAM on Mirror) |
+| Time-stepping | adaptive PC, `dt_method = 2` (AB-SAM + PI42, both backends) |
 | Default `t_end` | 20 yr (functional check; raise for spin-up) |
 
 ## Design: pure-Julia-first
@@ -44,11 +44,8 @@ init_topo_load!  →  init_masks!  →  apply_forcing!  →  init_state!(robin-c
 Selecting `backend = :mirror` runs the Fortran model: the same
 `YelmoParameters` is translated to a `YelmoMirrorParameters` via
 `to_mirror`, the namelist is written under `output-mirror/`, and Fortran
-is initialised from it. Backend-divergent timestepping options
-(`MIRROR_DIVERGENT_YELMO`, e.g. `pc_method`) keep their Fortran-native
-values rather than being copied from the Julia config; shared controls
-(`dt_method`, `dt_min`, `cfl_*`) are carried over. `pc_method` is
-therefore HEUN on `YelmoModel` and AB-SAM on the Mirror by design.
+is initialised from it. Both backends run the same predictor-corrector
+timestepping (Fortran `yelmo_update`) with the same settings.
 
 ## Running
 
@@ -88,8 +85,7 @@ fails at load time. The pure-Julia backend has no such dependency.
 - I/O writer round-trips for both storage conventions: `YelmoModel`'s
   split-boundary file (`Nz_file = Nz + 2`) and `YelmoMirror`'s
   interior-extended (`Nz_file = Nz`).
-- `YelmoParameters → YelmoMirrorParameters` translation via `to_mirror`,
-  including the backend-divergent timestepping map.
+- `YelmoParameters → YelmoMirrorParameters` translation via `to_mirror`.
 
 ## Outputs (per backend)
 

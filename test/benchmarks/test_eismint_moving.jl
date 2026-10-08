@@ -52,17 +52,17 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
 
 # Adaptive HEUN+PI42 + SIA-only parameters. Mirrors the Fortran
 # `par-gmd/yelmo_EISMINT_moving.nml` where the relevant subset overlaps
-# (solver = "sia", uz_method = 3, n_glen = 3, rf_const = 1e-16). Pinned
-# to `pc_method = "HEUN"` here for reproducibility of the committed
-# reference values (the package default is `"AB-SAM"`).
+# (solver = "sia", uz_method = 3, n_glen = 3, rf_const = 1e-16). The pc
+# settings are those of the Mirror spec (specs/yelmo_EISMINT_moving.nml).
 function _eismint_moving_params()
     return with_ported_options(YelmoParameters("eismint_moving";
         yelmo = yelmo_params(phys_const = "EISMINT",
             dt_method     = 2,
             pc_method     = "HEUN",
             pc_controller = "PI42",
-            pc_tol        = 5.0,
-            pc_eps        = 1.0,
+            pc_filter_vel = false,      # EISMINT spec values
+            pc_tol        = 2.0,
+            pc_eps        = 1e-3,
             pc_n_redo     = 5,
             dt_min        = 0.01,
             cfl_max       = 0.5,

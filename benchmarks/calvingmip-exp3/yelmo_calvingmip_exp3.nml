@@ -49,8 +49,8 @@
     pc_use_H_pred   = False
     pc_filter_vel   = False
     pc_n_redo       = 10
-    pc_tol          = 5.0
-    pc_eps          = 1.0
+    pc_tol          = 1.0
+    pc_eps          = 1e-2
 /
 
 &ytopo

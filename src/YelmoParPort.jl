@@ -47,11 +47,6 @@ reproducing the current Julia behaviour (tuning of unported schemes).
 """
 const NOT_PORTED_KNOBS = Dict{Tuple{Symbol,Symbol}, String}(
     (:yelmo,  :mask_border)   => "border ice mask is set by the boundary conditions",
-    (:yelmo,  :pc_cfl_max)    => "no Courant cap on the pc timestep",
-    (:yelmo,  :pc_rho_max)    => "dt growth limited by the controller's (0.2, 10) clamp",
-    (:yelmo,  :pc_eta_H_min)  => "pc mask thickness threshold is hard-coded",
-    (:yelmo,  :pc_eta_u_min)  => "no speed threshold in the pc mask",
-    (:yelmo,  :pc_eta_trim)   => "no trimming of the pc error norm",
     (:ycalv,  :H_min_tau)     => "margin ice below H_min_* is removed in one step",
     (:ytherm, :advecxy_cfl)   => "no horizontal-advection sub-stepping",
     (:ytherm, :advecxy_nmax)  => "no horizontal-advection sub-stepping",
