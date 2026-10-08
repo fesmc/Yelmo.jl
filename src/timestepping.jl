@@ -33,7 +33,7 @@ using Oceananigans.Grids: topology, Periodic
 # Extend `YelmoCore._select_step!` (declared as a stub there) with the
 # time loop below.
 import .YelmoCore: _select_step!, pc_history, set_pc_history!
-using .YelmoCore: PC_HISTORY
+using .YelmoCore: PC_HISTORY, YelmoModel
 
 using .YelmoTiming: @timed_section
 using .YelmoModelTopo: PCPredictor, PCCorrector, PCAdvance, H_grnd_point
