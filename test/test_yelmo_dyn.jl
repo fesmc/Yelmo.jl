@@ -473,16 +473,19 @@ end
     # BCs (Dirichlet H = 0 on the eastern / northern edge for `H_ice`).
     for k in (:taud_acx, :taud_acy)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
     for k in (:taul_int_acx, :taul_int_acy)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
 
     # Ice flux (deterministic from u_bar · H_face · dx).
     for k in (:qq_acx, :qq_acy)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
 
@@ -491,6 +494,7 @@ end
     for k in (:taud, :taub, :qq,
               :uxy_bar, :uxy_b, :uxy_s, :uxy_i_bar)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
 
@@ -506,6 +510,7 @@ end
     # meaningful agreement.
     for k in (:ux_s, :uy_s)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
     f_ice_mask = interior(y.tpo.f_ice) .> 0
@@ -538,6 +543,7 @@ end
     # tan(cb_ref°) · N_eff`.
     for k in (:N_eff, :cb_tgt, :cb_ref, :c_bed)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        @info "dyn diagnostic vs Fortran" k err
         @test err < 1e-3
     end
 end
