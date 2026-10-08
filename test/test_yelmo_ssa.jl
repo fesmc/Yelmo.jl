@@ -44,12 +44,15 @@ _bounded_2d(Nx, Ny; dx=1.0) = RectilinearGrid(size=(Nx, Ny),
 # ======================================================================
 
 # Build a minimal scratch struct — only needs the Krylov workspace,
-# AMG cache, and Jacobi d_inv buffer fields used by `_solve_ssa_linear!`.
+# AMG cache, Jacobi d_inv buffer and linear-solve counters used by
+# `_solve_ssa_linear!`.
 function _build_solver_scratch(N_rows)
     return (
         ssa_solver_workspace = BicgstabWorkspace(N_rows, N_rows, Vector{Float64}),
         ssa_amg_cache        = Ref{Any}(nothing),
         ssa_jacobi_d_inv     = Vector{Float64}(undef, N_rows),
+        ssa_lin_iter         = Ref{Int}(0),
+        ssa_lin_fail         = Ref{Int}(0),
     )
 end
 
@@ -67,6 +70,11 @@ end
     @test norm(A * x .- b) / norm(b) < 1e-8
     # :jacobi precond does NOT populate the AMG cache (cache stays nothing).
     @test scratch.ssa_amg_cache[] === nothing
+    # Linear-solve counters (Fortran ssa_lin_iter / ssa_lin_fail) accumulate.
+    @test scratch.ssa_lin_iter[] == scratch.ssa_solver_workspace.stats.niter > 0
+    @test scratch.ssa_lin_fail[] == 0
+    _solve_ssa_linear!(x_dest, scratch, A, b, ssa)
+    @test scratch.ssa_lin_iter[] == 2 * scratch.ssa_solver_workspace.stats.niter
 end
 
 @testset "_solve_ssa_linear!: SPD tridiagonal converges (:amg_sa opt-in)" begin
