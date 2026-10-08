@@ -3,6 +3,7 @@ yelmo
 Manifest.toml
 plots
 *.nml
+!test/benchmarks/fixtures/*.nml
 .claude/worktrees
 docs/build
 logs
