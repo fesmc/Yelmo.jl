@@ -5,9 +5,8 @@
 # The configuration is a native `YelmoParameters` built in `build_params`
 # (no namelist input file). The pure-Julia `YelmoModel` is initialised
 # directly from it. Selecting `backend = :mirror` instead derives a
-# `YelmoMirrorParameters` via `to_mirror` (which keeps Fortran-native
-# values for backend-divergent timestepping options) and runs the
-# Fortran model through `YelmoMirror`.
+# `YelmoMirrorParameters` via `to_mirror` and runs the Fortran model
+# through `YelmoMirror`.
 #
 # Forcing: MAR (smb, T_srf), topography from Morlighem 2017 (M17), GHF
 # from Shapiro & Ritzwoller 2004 (S04), bmb_shlf = -0.5 m/yr. Initialised
@@ -34,12 +33,9 @@ const BMB_SHLF_CONST = -0.5         # [m/yr] constant basal melt under shelves
 # ----------------------------------------------------------------------
 # Canonical configuration — pure-Julia YelmoParameters.
 # Anything left unset keeps its Yelmo.jl default; only non-default values
-# appear here. The pc settings (HEUN, pc_tol 5, pc_eps 1) are YelmoModel's
-# (`backend = :yelmo`); the Mirror backend keeps its Fortran-native values
-# (`MIRROR_DIVERGENT_YELMO`).
+# appear here. Both backends use the same timestepping (dev defaults).
 # ----------------------------------------------------------------------
 function build_params(backend::Symbol = :yelmo)
-    pc = backend === :yelmo ? (pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0) : (;)
     return with_ported_options(YelmoParameters("initmip_grl";
         yelmo = yelmo_params(;
             domain       = "Greenland",
@@ -48,7 +44,6 @@ function build_params(backend::Symbol = :yelmo)
             dt_method    = 2,             # adaptive predictor-corrector
             timing       = true,
             log_timestep = true,
-            pc...,
         ),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),

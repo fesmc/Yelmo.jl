@@ -91,10 +91,6 @@ Base.@kwdef struct YelmoParams
     write_metrics       ::Bool    = false       # Write numerics/speed metrics to yelmo_metrics.nc
     write_metrics_dt    ::Float64 = 100.0       # [yr] Output cadence for yelmo_metrics.nc
     # --- Julia-only (see JULIA_ONLY_KEYS) ---
-    # Mask ice-margin / grounding-line / floating / thin-ice cells out of
-    # the pc truncation error `eta` (Fortran `set_pc_mask` + `calc_pc_eta`).
-    # `false` gives the unmasked global error (pre-2026-05-10 Yelmo.jl).
-    pc_eta_masked       ::Bool    = true
     # Per-section wall-clock timing (`y.timer`, `src/timing.jl`).
     timing              ::Bool    = false
 end
@@ -502,7 +498,6 @@ keys next to the Fortran `ssa_solver` choice).
 """
 const JULIA_ONLY_KEYS = Dict(
     "yelmo" => Dict(
-        "pc_eta_masked" => "switch off the Fortran pc error mask (diagnostics)",
         "timing"        => "per-section wall-clock timing of YelmoModel"),
     "ydyn" => Dict(
         "ssa_solver_linear_method" => "Krylov method of the SSA linear solve (Fortran: Lis options)",
@@ -534,6 +529,35 @@ struct YelmoParameters
     yelmo_masks     ::YelmoMasksParams
     yelmo_init_topo ::YelmoInitTopoParams
     yelmo_data      ::YelmoDataParams
+
+    function YelmoParameters(name, yelmo, ytopo, ycalv, ydyn, ytill, yhyd, ymat, ytrc,
+                             ytherm, yelmo_masks, yelmo_init_topo, yelmo_data)
+        _check_yelmo_params(yelmo)
+        return new(name, yelmo, ytopo, ycalv, ydyn, ytill, yhyd, ymat, ytrc, ytherm,
+                   yelmo_masks, yelmo_init_topo, yelmo_data)
+    end
+end
+
+# The checks of `&yelmo` that Fortran `yelmo_par_load` makes
+# (yelmo_ice.f90:1723-1757): option names and value ranges.
+function _check_yelmo_params(p::YelmoParams)
+    bad = String[]
+    _enum(k, v, ok) = v in ok || push!(bad, "$(k) = $(repr(v)) (options: $(join(ok, ", ")))")
+    _enum("zeta_scale",    p.zeta_scale,    ("linear", "exp", "tanh"))
+    _enum("pc_method",     p.pc_method,     ("FE-SBE", "AB-SAM", "HEUN"))
+    _enum("pc_controller", p.pc_controller, ("PI42", "H312b", "H312PID", "H321PID", "PID1"))
+    _enum("experiment",    p.experiment,    ("None", "EISMINT", "MISMIP3D", "MISMIP+", "TROUGH-F17",
+                                             "SLAB", "ISMIPHOM", "slab", "periodic", "periodic-xy",
+                                             "periodic-x", "periodic-y", "infinite", "MASK_ICE"))
+    p.pc_eps <= p.pc_tol || push!(bad, "pc_eps = $(p.pc_eps) must not exceed pc_tol = $(p.pc_tol)")
+    0 < p.cfl_max <= 1    || push!(bad, "cfl_max = $(p.cfl_max) must be in (0, 1]")
+    0 < p.pc_cfl_max <= 1 || push!(bad, "pc_cfl_max = $(p.pc_cfl_max) must be in (0, 1]")
+    p.pc_rho_max > 1      || push!(bad, "pc_rho_max = $(p.pc_rho_max) must be > 1")
+    (p.pc_eta_H_min >= 0 && p.pc_eta_u_min >= 0) ||
+        push!(bad, "pc_eta_H_min = $(p.pc_eta_H_min), pc_eta_u_min = $(p.pc_eta_u_min) must be >= 0")
+    0 <= p.pc_eta_trim < 0.5 || push!(bad, "pc_eta_trim = $(p.pc_eta_trim) must be in [0, 0.5)")
+    isempty(bad) || error("YelmoParameters: invalid &yelmo parameters:\n  " * join(bad, "\n  "))
+    return nothing
 end
 
 # Namelist group order (= Fortran yelmo_defaults.nml).

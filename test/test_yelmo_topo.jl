@@ -151,7 +151,7 @@ end
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
                    p      = with_ported_options(YelmoParameters("tpo-mask-test";
-                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                                 ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                                 ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                                 ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -357,7 +357,7 @@ end
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
                    p      = with_ported_options(YelmoParameters("tpo-smoke";
-                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                                 ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                                 ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                                 ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -437,7 +437,7 @@ end
                    rundir = mktempdir(; prefix="tpo_smb_test_"),
                    alias  = "tpo-smb-test",
                    p      = with_ported_options(YelmoParameters("tpo-smb-test";
-                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                                 ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                                 ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                                 ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -535,7 +535,7 @@ end
                    rundir = mktempdir(; prefix="tpo_bmb_test_"),
                    alias  = "tpo-bmb-test",
                    p      = with_ported_options(YelmoParameters("tpo-bmb-test";
-                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                                yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                                 ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                                 ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                                 ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -930,7 +930,7 @@ end
     # `ytherm.method = "fixed"`: thrm decoupled — `therm_step!` runs as
     # a no-op alongside the other phases.
     p = with_ported_options(YelmoParameters("tpo-relax-test";
-                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                              ytopo = p_ytopo,
                              ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                              ydyn = Yelmo.YelmoPar.ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
@@ -1611,7 +1611,7 @@ end
     smb_ref = CenterField(g); fill!(interior(smb_ref), 0.0)
 
     p = with_ported_options(YelmoParameters("calv-kill";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
@@ -1668,7 +1668,7 @@ end
     # between zeroing and the calving phase), vm-m16 must produce zero
     # calving rate — the no-stress no-op path.
     p_vm = with_ported_options(YelmoParameters("calv-vm";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
                              dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),

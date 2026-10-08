@@ -38,7 +38,7 @@ const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.
     # physics — leaving the solver at its default `"diva"` would error
     # in `dyn_step!`.
     p = with_ported_options(YelmoParameters("ymodel-v0";
-                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                              ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                              ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                              ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -127,7 +127,7 @@ end
     out_path = joinpath(rundir, "yelmo_scratch.nc")
 
     p = with_ported_options(YelmoParameters("ymodel-scratch";
-                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+                             yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
                              ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
                              ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
                              ymat = ymat_params(rf_method = -1, de_max = 2.0),

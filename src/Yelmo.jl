@@ -79,7 +79,7 @@ export YelmoConstants, yelmo_constants, earth_constants,
 # YelmoMirrorPar (mirror-specific params; constructors/read_nml stay namespaced
 # under `YelmoMirrorPar.*`, generics are shared with YelmoPar below)
 export YelmoMirrorParameters
-export to_mirror, MIRROR_DIVERGENT_YELMO
+export to_mirror
 
 # YelmoUtils
 export solve_tridiag!

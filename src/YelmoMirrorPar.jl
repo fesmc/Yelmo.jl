@@ -35,7 +35,7 @@ import ..YelmoPar: write_nml, compare
 import ..YelmoPar
 
 export YelmoMirrorParameters
-export to_mirror, MIRROR_DIVERGENT_YELMO
+export to_mirror
 
 # ---------------------------------------------------------------------------
 # Fortran schema: yelmo/input/yelmo_defaults.nml and yelmo_phys_const.nml
@@ -255,28 +255,6 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    MIRROR_DIVERGENT_YELMO
-
-`&yelmo` parameters whose meaning or valid options differ between the
-pure-Julia `YelmoModel` timestepping and the Fortran (Mirror)
-timestepping. `to_mirror` never copies these from a `YelmoParameters`
-into the generated Mirror configuration — the Mirror keeps the Fortran
-defaults (e.g. `pc_method = "AB-SAM"`, since Julia's
-"HEUN" ≠ Fortran's "HEUN" despite the shared name). The shared adaptive
-controls (`dt_method`, `dt_min`, `cfl_max`) are NOT in
-this set — they have identical meaning on both backends and are copied.
-
-Setting any parameter listed here to a non-default value on the Julia
-side and then requesting a Mirror translation is an error: the intent
-cannot be honored on the Mirror backend, so it must be configured
-explicitly on the Mirror side instead.
-"""
-const MIRROR_DIVERGENT_YELMO = (
-    :pc_method, :pc_controller, :pc_use_H_pred, :pc_filter_vel,
-    :pc_n_redo, :pc_tol, :pc_eps,
-)
-
-"""
     to_mirror(p::YelmoParameters) -> YelmoMirrorParameters
 
 Translate a pure-Julia `YelmoParameters` (the canonical configuration
@@ -285,28 +263,9 @@ backend. Every namelist entry of a `YelmoParameters` group (as written
 by `write_nml`) that is a parameter of the Fortran group of the same
 name is copied — `ydyn.ssa_solver::SSASolver` becomes Fortran's
 `ssa_solver` string; Julia-only keys (`YelmoPar.JULIA_ONLY_KEYS`) are
-skipped, and backend-divergent timestepping options
-(`MIRROR_DIVERGENT_YELMO`) are left at the Fortran defaults.
-
-Errors if any divergent parameter was changed away from its
-`YelmoParameters` default, since that intent cannot be carried to the
-Mirror backend — configure it on the Mirror side explicitly instead.
+skipped.
 """
 function to_mirror(p::YelmoPar.YelmoParameters)
-    jdef = YelmoPar.YelmoParameters("")   # all-default reference
-    violations = Symbol[]
-    for f in MIRROR_DIVERGENT_YELMO
-        if getfield(p.yelmo, f) != getfield(jdef.yelmo, f)
-            push!(violations, f)
-        end
-    end
-    isempty(violations) || error(
-        "to_mirror: these &yelmo parameters are backend-divergent " *
-        "(pure-Julia vs Fortran timestepping) and cannot be translated " *
-        "to the Mirror backend: $(join(violations, ", ")). Leave them at " *
-        "their YelmoParameters defaults — the Mirror uses its own " *
-        "Fortran-native values. See `MIRROR_DIVERGENT_YELMO`.")
-
     s = schema()
     overrides = Dict{String, Dict{String, Any}}()
     for gname in fieldnames(YelmoPar.YelmoParameters)
@@ -315,7 +274,6 @@ function to_mirror(p::YelmoPar.YelmoParameters)
         jgroup = getfield(p, gname)
         d = Dict{String, Any}()
         for f in fieldnames(typeof(jgroup))
-            g == "yelmo" && f in MIRROR_DIVERGENT_YELMO && continue
             for (key, v) in YelmoPar._nml_entries(f, getfield(jgroup, f))
                 haskey(s.defaults[g], key) || continue
                 _check_key(g, key, v)

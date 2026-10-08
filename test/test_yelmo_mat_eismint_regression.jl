@@ -72,7 +72,7 @@ const FIXTURE_PATH = joinpath(FIXTURES_DIR, "eismint_moving_t25000.nc")
 # visc_int, and strs2D_* from the loaded Mirror state.
 function _mat_regression_params()
     return with_ported_options(YelmoParameters("mat_eismint_regression";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
         ytopo = ytopo_params(solver = "expl"),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(solver = "sia",

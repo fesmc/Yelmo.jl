@@ -2,7 +2,7 @@
 #
 # Three runs:
 #   - default:  dt_method = 2 (adaptive Heun + PI42), dt_outer = 100 yr,
-#               pc_tol = 5.0 (matches the Fortran fixture config)
+#               pc settings of the Mirror spec (specs/yelmo_EISMINT_moving.nml)
 #   - tight:    dt_method = 0 (fixed Heun, no controller), dt_outer = 1 yr.
 #               Reference: many small Heun steps approximate the converged
 #               solution well enough for an accuracy comparison.
@@ -52,8 +52,9 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
             dt_method     = dt_method,
             pc_method     = "HEUN",
             pc_controller = "PI42",
-            pc_tol        = 5.0,
-            pc_eps        = 1.0,
+            pc_filter_vel = false,      # EISMINT spec values
+            pc_tol        = 2.0,
+            pc_eps        = 1e-3,
             pc_n_redo     = 5,
             dt_min        = 0.01,
             cfl_max       = 0.5,

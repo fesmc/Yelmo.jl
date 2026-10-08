@@ -408,7 +408,7 @@ function _run_slab_sia(; Nx::Int, Ny::Int, dx::Float64,
                          H_const=H, slope_x=slope_x, Nz=Nz)
 
     p = with_ported_options(YelmoParameters("slab-sia";
-            yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
+            yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
             ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
             ydyn = ydyn_params(solver = "sia", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
             ymat = ymat_params(n_glen = n_glen, rf_method = -1, de_max = 2.0),
