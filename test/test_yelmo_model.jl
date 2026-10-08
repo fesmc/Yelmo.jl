@@ -161,9 +161,12 @@ end
         @test haskey(ds, "dyn_scratch_sia_tau_xz")
         @test haskey(ds, "dyn_scratch_sia_tau_yz")
 
-        # Pattern survives the round-trip (within Float32 cast).
+        # Pattern survives the round-trip (within Float32 cast) on the
+        # interior levels; the bed and surface levels of the file's
+        # `zeta` axis are NaN-padded (split-boundary storage).
         slab = ds["dyn_scratch_sia_tau_xz"][:, :, :, 1]
-        @test all(==(Float32(-42.0)), slab)
+        @test all(==(Float32(-42.0)), slab[:, :, 2:end-1])
+        @test all(ismissing, slab[:, :, [1, end]])
 
         # Sanity: regular dyn fields still get written.
         @test haskey(ds, "ux_bar")
