@@ -28,7 +28,8 @@ function _load_log(path::AbstractString; window = nothing)
             dt  = dt[mask]
             eta = eta[mask]
         end
-        (t = t, dt = dt, eta = eta)
+        k = dt .> 0                      # drop the initial row
+        (t = t[k], dt = dt[k], eta = eta[k])
     end
 end
 

@@ -31,6 +31,7 @@ import Pkg; Pkg.activate("..")
 
 using Test
 using Statistics
+using NCDatasets
 using Yelmo
 using Oceananigans: interior
 
@@ -44,9 +45,10 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
 # Same params as `test_mismip3d_stnd_lockstep.jl::_mismip3d_lockstep_params`,
 # but with the `&yelmo` block carrying `dt_method = 2` (adaptive PC) and
 # the pc settings of the Mirror spec (`specs/yelmo_MISMIP3D.nml`).
-function _adaptive_params(; pc_method::String = "FE-SBE")
+function _adaptive_params(; pc_method::String = "FE-SBE", log_timestep::Bool = false)
     return with_ported_options(YelmoParameters("mismip3d_stnd_adaptive";
         yelmo = yelmo_params(phys_const = "MISMIP3D",
+            log_timestep  = log_timestep,
             dt_method     = 2,
             pc_method     = pc_method,
             pc_controller = "PI42",
@@ -109,9 +111,9 @@ function _fixed_params()
     ))
 end
 
-function _build(b, p)
+function _build(b, p; rundir::String = "./")
     Nx, Ny = length(b.xc), length(b.yc)
-    y = YelmoModel(b, 0.0; p=p, boundaries = :periodic_y)
+    y = YelmoModel(b, 0.0; p=p, boundaries = :periodic_y, rundir = rundir)
     fill!(interior(y.mat.ATT),    p.ymat.rf_const)
     fill!(interior(y.dyn.cb_ref), b.cf_ref)
     H_int     = interior(y.tpo.H_ice)
@@ -186,6 +188,71 @@ end
     @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_eps = 2.0, pc_tol = 1.0))
     @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_rho_max = 1.0))
     @test_throws ErrorException YelmoParameters("bad"; yelmo = yelmo_params(pc_controller = "PI43"))
+end
+
+
+@testset "Adaptive PC: restart history and timestep log" begin
+    b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
+    p = _adaptive_params(; pc_method = "AB-SAM", log_timestep = true)
+    dt_min, pc_eps = p.yelmo.dt_min, p.yelmo.pc_eps
+    rundir = mktempdir(; prefix = "adaptive_restart_")
+    y = _build(b, p; rundir = rundir)
+
+    # Before the first step there is no history: a file of that state
+    # holds NaN and gives a cold start.
+    @test pc_history(y) === nothing
+    f0 = joinpath(rundir, "state_t0.nc")
+    out = init_output(y, f0); write_output!(out, y); close(out)
+    @test all(v -> ismissing(v) || isnan(v), NCDataset(ds -> ds["pc_dt"][:, 1], f0))
+    @test pc_history(YelmoModel(f0, 0.0; p = p, boundaries = :periodic_y)) === nothing
+
+    for _ in 1:5
+        Yelmo.step!(y, 1.0)
+    end
+    s = y.dyn.scratch.pc_scratch[]
+    h = pc_history(y)
+    @test h == (s.pc_dt, s.pc_eta)
+
+    # Timestep log: a first row with the controller state, then one row
+    # per step.
+    close(y.dyn.scratch.timestep_log[])
+    NCDataset(joinpath(rundir, "yelmo_timesteps.nc")) do ds
+        for (name, _, _, _) in Yelmo.TIMESTEP_LOG_VARS
+            @test haskey(ds, String(name))
+        end
+        @test ds["pc_eps"][1] == pc_eps
+        @test length(ds["xc"]) == length(b.xc)
+        @test length(ds["time"]) == s.n_steps_taken + 1
+        dt = ds["dt_now"][:]
+        @test (dt[1], ds["dt_pi"][1], ds["pc_eta"][1]) == (0.0, dt_min, pc_eps)
+        @test dt[2] == dt_min                               # cold start
+        @test sum(dt) ≈ y.time
+        @test sum(ds["iter_redo"][:]) == s.n_rejections
+        @test all(>(0), ds["speed"][2:end]) && all(>(0), ds["speed_dyn"][2:end])
+        @test all(>(0), ds["ssa_lin_iter"][2:end])          # SSA solves
+        @test all(>(0), ds["adv_lin_iter"][2:end])          # impl-lis advection
+        @test all(>=(0), ds["ssa_lim_n"][:])
+    end
+
+    # A file written after a step carries the history: the model loaded
+    # from it continues the trajectory (first step as in the uninterrupted
+    # run, not a dt_min cold start).
+    f1 = joinpath(rundir, "state_t5.nc")
+    out = init_output(y, f1); write_output!(out, y); close(out)
+    rundir2 = mktempdir(; prefix = "adaptive_restart2_")
+    y2 = YelmoModel(f1, y.time; p = p, boundaries = :periodic_y, rundir = rundir2)
+    @test pc_history(y2) == h
+    n5 = s.n_steps_taken
+    Yelmo.step!(y, 1.0)
+    Yelmo.step!(y2, 1.0)
+    close(y.dyn.scratch.timestep_log[])
+    close(y2.dyn.scratch.timestep_log[])
+    dt_next = NCDataset(ds -> ds["dt_now"][n5 + 2], joinpath(rundir, "yelmo_timesteps.nc"))
+    NCDataset(joinpath(rundir2, "yelmo_timesteps.nc")) do ds
+        @test (ds["dt_pi"][1], ds["pc_eta"][1]) == (h[1][1], h[2][1])
+        @test ds["dt_now"][2] ≈ dt_next rtol = 1e-3
+        @info "Restart: first step $(ds["dt_now"][2]) yr, uninterrupted $(dt_next) yr, cold start $(dt_min) yr"
+    end
 end
 
 

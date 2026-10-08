@@ -1,141 +1,121 @@
 # ----------------------------------------------------------------------
-# Per-PC-step timestep log (NetCDF), enabled by `y.p.yelmo.log_timestep`.
+# Per-step timestep log (NetCDF), enabled by `y.p.yelmo.log_timestep`.
 #
-# Mirrors Fortran Yelmo's `yelmo_timestep_write` family at
-# `yelmo_timesteps.f90:1214-1308`. Records one row per accepted PC
-# attempt with: `time`, `dt_now`, `pc_eta`, `ssa_iter`, `iter_redo`,
-# and per-step `wallclock_s`. Used by the comparison-vs-Fortran
-# benchmarks to dump the controller's dt + eta history alongside the
-# Mirror reference.
+# Port of Fortran `yelmo_timestep_write_init` / `yelmo_timestep_write`
+# (yelmo_timesteps.f90): same dimensions (`pt`, `xc`/`yc` in km,
+# unlimited `time`), `pc_eps` on `pt`, and one row per accepted step
+# with the variables of `TIMESTEP_LOG_VARS`. A first row at the start
+# time holds the controller state (`dt_pi = pc_dt[1]`, `pc_eta[1]`).
 #
-# **Buffered writes**: each `write_timestep_row!` push only appends
-# to in-memory vectors (essentially free). The NetCDF file is created
-# and populated in one go by `Base.close(log)` — call this when the
-# benchmark is done. Per-row write to NetCDF (the previous design)
-# costs ~28 ms apiece (open / nc_put_vara / close per access), which
-# dominated the wallclock for adaptive runs with many sub-steps. With
-# buffering, log overhead drops to negligible.
-#
-# File layout: `<y.rundir>/yelmo_timesteps.nc`. Created on the first
-# `close(log)` call.
-#
-# This is a Yelmo.jl port of the Fortran scaffolding only — Yelmo.jl
-# does not yet plumb `dt_adv` (CFL-based limit) or `dt_pi` (PI's
-# pre-clamp recommendation) separately, so those columns are omitted.
-# Add later if the comparison needs them.
+# Rows are buffered in memory and written to `<rundir>/yelmo_timesteps.nc`
+# by `close(log)` (one NetCDF access per row would cost ~28 ms each).
+# `close` can be called repeatedly: later calls append.
 # ----------------------------------------------------------------------
 
 using NCDatasets
 
 export TimestepLog, init_timestep_log!, write_timestep_row!
 
+# (name, type, units, long_name), in the order of the Fortran writer.
+const TIMESTEP_LOG_VARS = (
+    (:speed,        Float64, "kyr/hr", "Yelmo model speed"),
+    (:speed_tpo,    Float64, "kyr/hr", "Yelmo topo speed"),
+    (:speed_dyn,    Float64, "kyr/hr", "Yelmo dyn speed"),
+    (:dt_now,       Float64, "yr",     "Timestep"),
+    (:dt_adv,       Float64, "yr",     "Timestep (CFL criterion)"),
+    (:dt_pi,        Float64, "yr",     "Timestep (PI controller)"),
+    (:pc_eta,       Float64, "1/yr",   "eta (pc error norm: RMS of pc_tau/(1 m + 0.01 H))"),
+    (:ssa_iter,     Int64,   "",       "Picard iterations for SSA convergence"),
+    (:iter_redo,    Int64,   "",       "Number of redo iterations needed"),
+    (:ssa_lin_iter, Int64,   "",       "Linear solver iterations of the SSA solve (summed over Picard iterations)"),
+    (:ssa_lin_fail, Int64,   "",       "SSA linear solves at breakdown or the iteration limit"),
+    (:ssa_lim_n,    Int64,   "",       "SSA faces at the velocity limit (drag active or clipped)"),
+    (:adv_lin_iter, Int64,   "",       "Linear solver iterations of the thickness advection (predictor + corrector)"),
+    (:adv_lin_fail, Int64,   "",       "Advection linear solves at breakdown or the iteration limit"),
+)
+
+const _TIMESTEP_LOG_NAMES = map(first, TIMESTEP_LOG_VARS)
+
 mutable struct TimestepLog
     path::String
     pc_eps::Float64
-    times::Vector{Float64}
-    dt_now::Vector{Float64}
-    pc_eta::Vector{Float64}
-    ssa_iter::Vector{Int64}
-    iter_redo::Vector{Int64}
-    wallclock_s::Vector{Float64}
+    xc::Vector{Float64}          # [m]
+    yc::Vector{Float64}          # [m]
+    time::Vector{Float64}
+    cols::NamedTuple             # one buffer per `TIMESTEP_LOG_VARS` entry
 end
 
-# Lazily initialise the in-memory log buffer. The NetCDF file is NOT
-# created here — that happens at `close(log)` time. Returns the
-# `TimestepLog` handle. Caller is expected to cache it on
-# `y.dyn.scratch.timestep_log[]`.
+"""
+    init_timestep_log!(y; filename = "yelmo_timesteps.nc") -> TimestepLog
+
+Empty log buffer for `<y.rundir>/filename`; the file is written by
+`close(log)`.
+"""
 function init_timestep_log!(y; filename::String = "yelmo_timesteps.nc")
-    rundir = y.rundir
-    isempty(rundir) && (rundir = ".")
+    rundir = isempty(y.rundir) ? "." : y.rundir
     isdir(rundir) || mkpath(rundir)
-    path = joinpath(rundir, filename)
-    pc_eps = y.p === nothing ? 0.0 : Float64(y.p.yelmo.pc_eps)
-    return TimestepLog(path, pc_eps,
-                       Float64[], Float64[], Float64[],
-                       Int64[],   Int64[],   Float64[])
+    cols = NamedTuple{_TIMESTEP_LOG_NAMES}(map(v -> v[2][], TIMESTEP_LOG_VARS))
+    return TimestepLog(joinpath(rundir, filename), Float64(y.p.yelmo.pc_eps),
+                       collect(Float64, xnodes(y.g, Center())),
+                       collect(Float64, ynodes(y.g, Center())),
+                       Float64[], cols)
 end
 
-# Append one accepted-PC-step row to the in-memory buffer.
-function write_timestep_row!(log::TimestepLog, y;
-                             dt_now::Real, eta::Real,
-                             iter_redo::Integer, wallclock_s::Real)
-    ssa_iter = try
-        Int(y.dyn.scratch.ssa_iter_now[])
-    catch
-        0
+"""
+    write_timestep_row!(log, time; kwargs...) -> log
+
+Buffer one row at `time`; the keywords are the variables of
+`TIMESTEP_LOG_VARS`, all required.
+"""
+function write_timestep_row!(log::TimestepLog, time::Real; kwargs...)
+    Set(keys(kwargs)) == Set(_TIMESTEP_LOG_NAMES) ||
+        error("write_timestep_row!: expected the keywords $(_TIMESTEP_LOG_NAMES), got $(keys(kwargs)).")
+    push!(log.time, Float64(time))
+    for (name, T, _, _) in TIMESTEP_LOG_VARS
+        push!(log.cols[name], T(kwargs[name]))
     end
-    push!(log.times,       Float64(y.time))
-    push!(log.dt_now,      Float64(dt_now))
-    push!(log.pc_eta,      Float64(eta))
-    push!(log.ssa_iter,    Int64(ssa_iter))
-    push!(log.iter_redo,   Int64(iter_redo))
-    push!(log.wallclock_s, Float64(wallclock_s))
     return log
 end
 
-# Flush the buffered rows to NetCDF and clear the buffer. Safe to
-# call multiple times — subsequent calls append to the existing file
-# and clear the buffer between calls (so a long-running session can
-# checkpoint partial logs without losing data).
+# Write the buffered rows to NetCDF (creating the file on the first call)
+# and empty the buffers.
 function Base.close(log::TimestepLog)
-    n = length(log.times)
+    n = length(log.time)
     n == 0 && return log
-
-    if isfile(log.path)
-        # Append to existing file: open, find current length, extend.
-        NCDataset(log.path, "a") do ds
-            tv = ds["time"]
-            n_existing = length(tv)
-            range = (n_existing + 1):(n_existing + n)
-            tv[range]              = log.times
-            ds["dt_now"][range]    = log.dt_now
-            ds["pc_eta"][range]    = log.pc_eta
-            ds["ssa_iter"][range]  = log.ssa_iter
-            ds["iter_redo"][range] = log.iter_redo
-            ds["wallclock_s"][range] = log.wallclock_s
-        end
-    else
-        NCDataset(log.path, "c") do ds
-            defDim(ds, "time", Inf)
-            ds.attrib["pc_eps"] = log.pc_eps
-            # NCDatasets won't grow an unlimited dim of current size 0
-            # via `tv[:] = data`; index explicitly so the dim extends.
-            r = 1:n
-
-            tv = defVar(ds, "time", Float64, ("time",))
-            tv.attrib["units"]     = "yr"
-            tv.attrib["long_name"] = "model time at end of accepted PC step"
-            tv[r] = log.times
-
-            dv = defVar(ds, "dt_now", Float64, ("time",))
-            dv.attrib["units"]     = "yr"
-            dv.attrib["long_name"] = "PC sub-step dt taken"
-            dv[r] = log.dt_now
-
-            ev = defVar(ds, "pc_eta", Float64, ("time",))
-            ev.attrib["units"]     = "yr^-1"
-            ev.attrib["long_name"] = "Norm of the pc truncation error (eta)"
-            ev[r] = log.pc_eta
-
-            sv = defVar(ds, "ssa_iter", Int64, ("time",))
-            sv.attrib["units"]     = "1"
-            sv.attrib["long_name"] = "Picard iterations the SSA / DIVA solver took on this step"
-            sv[r] = log.ssa_iter
-
-            rv = defVar(ds, "iter_redo", Int64, ("time",))
-            rv.attrib["units"]     = "1"
-            rv.attrib["long_name"] = "PC retry count (1 = accepted on first try)"
-            rv[r] = log.iter_redo
-
-            wv = defVar(ds, "wallclock_s", Float64, ("time",))
-            wv.attrib["units"]     = "s"
-            wv.attrib["long_name"] = "wall-clock seconds for this PC sub-step"
-            wv[r] = log.wallclock_s
+    isfile(log.path) || _create_timestep_file(log)
+    NCDataset(log.path, "a") do ds
+        n0 = length(ds["time"])
+        r = (n0 + 1):(n0 + n)
+        ds["time"][r] = log.time
+        for name in _TIMESTEP_LOG_NAMES
+            ds[String(name)][r] = log.cols[name]
         end
     end
-
-    # Clear the buffer so subsequent close() calls don't double-write.
-    empty!(log.times); empty!(log.dt_now); empty!(log.pc_eta)
-    empty!(log.ssa_iter); empty!(log.iter_redo); empty!(log.wallclock_s)
+    empty!(log.time)
+    foreach(empty!, log.cols)
     return log
+end
+
+function _create_timestep_file(log::TimestepLog)
+    NCDataset(log.path, "c") do ds
+        defDim(ds, "pt", 1)
+        defDim(ds, "xc", length(log.xc))
+        defDim(ds, "yc", length(log.yc))
+        defDim(ds, "time", Inf)
+        v = defVar(ds, "pt", Float64, ("pt",)); v[:] = [1.0]; v.attrib["units"] = "point"
+        for (name, x, axis) in (("xc", log.xc, "GeoX"), ("yc", log.yc, "GeoY"))
+            v = defVar(ds, name, Float64, (name,))
+            v[:] = x .* 1e-3
+            v.attrib["units"] = "kilometers"
+            v.attrib["_CoordinateAxisType"] = axis
+        end
+        v = defVar(ds, "time", Float64, ("time",)); v.attrib["units"] = "years"
+        v = defVar(ds, "pc_eps", Float64, ("pt",)); v[:] = [log.pc_eps]
+        for (name, T, units, long_name) in TIMESTEP_LOG_VARS
+            v = defVar(ds, String(name), T, ("time",))
+            v.attrib["units"] = units
+            v.attrib["long_name"] = long_name
+        end
+    end
+    return nothing
 end

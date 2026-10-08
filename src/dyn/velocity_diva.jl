@@ -657,6 +657,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
 
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
+    _reset_ssa_lin_counts!(sc)
 
     # Effective-pressure hook (see YelmoHooks.jl): N from the iteration's own u_b.
     neff_hook = y.hooks.neff_from_ub
@@ -933,6 +934,8 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
     end
 
     sc.ssa_iter_now[] = iter_now
+    sc.ssa_lim_n[] = count_vel_lim_faces(y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ssa_mask_acx,
+                                         y.dyn.ssa_mask_acy, Float64(p_ydyn.ssa_vel_max))
 
     # Post-Picard reconstruction.
     # 1. Basal stress at faces from β_eff and the converged depth-averaged

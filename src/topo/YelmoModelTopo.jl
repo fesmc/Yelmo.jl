@@ -136,7 +136,9 @@ function topo_step!(y::YelmoModel, dt::Float64, ::PCPredictor;
     copyto!(interior(tpo.lsf_n),   interior(tpo.lsf))
     if _topo_active(y, dt)
         f_n = tpo.scratch.pc.dHidt_dyn_raw
-        _advection_rate!(f_n, y, dt)
+        lin_iter, lin_fail = _advection_rate!(f_n, y, dt)
+        tpo.scratch.adv_lin_iter[] = lin_iter
+        tpo.scratch.adv_lin_fail[] = lin_fail
         _mix_rates!(interior(tpo.dHidt_dyn), β1, f_n, β2, interior(tpo.dHidt_dyn_raw_n))
         _apply_transport!(y, dt)
         _topo_mb_cascade!(y, dt)
@@ -155,7 +157,9 @@ function topo_step!(y::YelmoModel, dt::Float64, ::PCCorrector;
         copyto!(interior(tpo.lsf),   tpo.scratch.pc.pred.lsf)
         calc_f_ice!(y)
         D = interior(tpo.dHidt_dyn)
-        _advection_rate!(D, y, dt)
+        lin_iter, lin_fail = _advection_rate!(D, y, dt)
+        tpo.scratch.adv_lin_iter[] += lin_iter
+        tpo.scratch.adv_lin_fail[] += lin_fail
         _mix_rates!(D, β3, D, β4, tpo.scratch.pc.dHidt_dyn_raw)
         copyto!(interior(tpo.H_ice), interior(tpo.H_ice_n))
         copyto!(interior(tpo.lsf),   interior(tpo.lsf_n))
@@ -191,14 +195,14 @@ function _advection_rate!(dHdt::AbstractArray, y::YelmoModel, dt::Float64)
     scheme = parse_advection_scheme(y.p.ytopo.solver)
     if scheme === :none
         fill!(dHdt, 0.0)
-        return dHdt
+        return (0, 0)
     end
     advection_tendency!(dHdt, y.tpo.H_ice, y.tpo.scratch.pc.ux_t, y.tpo.scratch.pc.uy_t, dt,
                         y.tpo.scratch.pc.H_tmp;
                         scheme     = scheme,
                         cache      = y.tpo.scratch.adv_cache,
                         cfl_safety = y.p.yelmo.cfl_max)
-    return dHdt
+    return advection_solve_stats(scheme, y.tpo.scratch.adv_cache[])
 end
 
 # D = a·X + b·Y (X may be D).

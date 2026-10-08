@@ -431,6 +431,19 @@ function advection_tendency!(dHdt::AbstractArray, H_ice, ux_bar, uy_bar, dt::Rea
 end
 
 """
+    advection_solve_stats(scheme, cache) -> (lin_iter, lin_fail)
+
+Linear solver iterations of the last advection solve and whether it
+ended at breakdown or the iteration limit (1) or not (0). The explicit
+scheme has no linear solve: `(0, 0)` (Fortran `calc_advec2D`).
+"""
+function advection_solve_stats(scheme::Symbol, cache)
+    scheme === :upwind_implicit || return (0, 0)
+    stats = (cache::AdvectionCache).work.stats
+    return (stats.niter, stats.solved ? 0 : 1)
+end
+
+"""
     advect_tracer_upwind_explicit!(c, ux, uy, dt;
                                    cache, cfl_safety, fill_velocity_halos) -> c
 

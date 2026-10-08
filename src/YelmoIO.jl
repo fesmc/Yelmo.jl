@@ -4,7 +4,7 @@ using Oceananigans, Oceananigans.Grids, Oceananigans.Fields
 
 using NCDatasets
 using ..YelmoMeta
-using ..YelmoCore: AbstractYelmoModel, matches_patterns,
+using ..YelmoCore: AbstractYelmoModel, YelmoModel, matches_patterns, PC_HISTORY, pc_history,
                    BOUNDARY_FIELD_REGISTRY_ICE, is_boundary_field_registered,
                    boundary_slice_kind, uses_split_boundary_storage
 
@@ -399,7 +399,33 @@ function init_output(ylmo::AbstractYelmoModel, path::String;
         end
     end
 
+    _def_pc_history!(ds, ylmo)
+
     return YelmoOutput(ds, selection, active_groups, nc_names, scratch_nc_names)
+end
+
+# Timestep-controller history (`pc_dt`, `pc_eta` on `pc_steps`, see
+# `pc_history`) of a YelmoModel, for a continuous restart (Fortran
+# `yelmo_restart_write`). NaN before the first step of the model.
+_def_pc_history!(ds, ::AbstractYelmoModel) = nothing
+function _def_pc_history!(ds, ::YelmoModel)
+    defDim(ds, "pc_steps", PC_HISTORY)
+    _defcoord(ds, "pc_steps", Float64, ("pc_steps",), collect(1.0:PC_HISTORY), "1",
+              "timestep-controller history (1 = latest step)")
+    for (name, units) in (("pc_dt", "yr"), ("pc_eta", "1/yr"))
+        v = defVar(ds, name, Float64, ("pc_steps", "time"); fillvalue = NaN)
+        v.attrib["units"] = units
+    end
+    return nothing
+end
+
+function _write_pc_history!(ds, t_idx::Int, ylmo::AbstractYelmoModel)
+    haskey(ds, "pc_dt") || return nothing
+    h = pc_history(ylmo)
+    h === nothing && return nothing
+    ds["pc_dt"][:, t_idx]  = h[1]
+    ds["pc_eta"][:, t_idx] = h[2]
+    return nothing
 end
 
 # ---------------------------------------------------------------------------
@@ -479,6 +505,8 @@ function write_output!(out::YelmoOutput, ylmo::AbstractYelmoModel;
             end
         end
     end
+
+    _write_pc_history!(ds, t_idx, ylmo)
 
     if include_scratch
         for ((gname, sname), nc_name) in out.scratch_nc_names

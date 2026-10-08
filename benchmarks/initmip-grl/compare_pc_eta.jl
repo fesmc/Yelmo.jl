@@ -32,7 +32,7 @@ for (label, path) in FILES
     n  = length(c["time"])
     dt = c["dt_now"]
     eta = c["pc_eta"]
-    rj = haskey(c, "iter_redo") ? Int(sum(c["iter_redo"] .> 1)) : -1
+    rj = haskey(c, "iter_redo") ? Int(sum(c["iter_redo"] .> 0)) : -1
     @printf("%-22s %-9d %-12d %-10.4f %-10.4f %-10.4f %-12.3e %-12.3e\n",
             label, n, rj,
             mean(dt), minimum(dt), maximum(dt),

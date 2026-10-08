@@ -56,6 +56,8 @@ named-tuple of coordinate arrays.
 ```@docs
 load_grids_from_restart
 load_fields_from_restart
+pc_history
+set_pc_history!
 ```
 
 `load_field_from_dataset_2D(ds, varname, grid)` and
