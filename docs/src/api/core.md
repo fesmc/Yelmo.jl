@@ -17,11 +17,11 @@ YelmoModel
 `YelmoCore` declares the generic `step!` and the per-component
 `<comp>_step!` forwards (`topo_step!`, `dyn_step!`, `mat_step!`,
 `therm_step!`); each component module adds the actual method body.
-For the `YelmoModel` backend, `step!(y, dt)` runs the components in
-fixed phase order (`tpo` → `dyn` → `mat` → `therm`); `mat_step!` and
-`therm_step!` remain as forward stubs at the current milestone. For
-the `YelmoMirror` backend, `step!` delegates to the Fortran
-`yelmo_step` via `ccall`.
+For the `YelmoModel` backend, `step!(y, dt)` runs the predictor-corrector
+time loop of Fortran `yelmo_update` (see [Stepping](../usage/stepping.md)):
+topography predictor → `dyn_step!` → topography corrector → `mat_step!`
+→ `therm_step!` → topography advance. For the `YelmoMirror` backend,
+`step!` delegates to the Fortran `yelmo_step` via `ccall`.
 
 ```@docs
 load_state!
@@ -71,7 +71,8 @@ Oceananigans `Field` machinery as continuous-valued fields), but the
 constants themselves are `Int`.
 
 **Ice-evolution mask** (`bnd.mask_ice`) — selects how each cell's
-`H_ice` is updated by the post-advection mask pass in `topo_step!`:
+`H_ice` is treated by the residual step of the topography stages
+(`resid_tendency!`, Fortran `calc_G_boundaries`):
 
 | Constant | Value | Meaning |
 |---|---|---|

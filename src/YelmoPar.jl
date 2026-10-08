@@ -91,12 +91,6 @@ Base.@kwdef struct YelmoParams
     write_metrics       ::Bool    = false       # Write numerics/speed metrics to yelmo_metrics.nc
     write_metrics_dt    ::Float64 = 100.0       # [yr] Output cadence for yelmo_metrics.nc
     # --- Julia-only (see JULIA_ONLY_KEYS) ---
-    # Fortran's advective-only predictor-corrector (one `dyn_step!` per
-    # substep, β-mixing on `dHidt_dyn`) when `true`; the legacy Yelmo.jl
-    # path (two full `_step_fe!` cascades per substep) when `false`. Kept
-    # until the reject-path symmetry regression at large `dt_outer` is
-    # understood. See `src/timestepping.jl`.
-    pc_advective        ::Bool    = false
     # Mask ice-margin / grounding-line / floating / thin-ice cells out of
     # the pc truncation error `eta` (Fortran `set_pc_mask` + `calc_pc_eta`).
     # `false` gives the unmasked global error (pre-2026-05-10 Yelmo.jl).
@@ -508,7 +502,6 @@ keys next to the Fortran `ssa_solver` choice).
 """
 const JULIA_ONLY_KEYS = Dict(
     "yelmo" => Dict(
-        "pc_advective"  => "Fortran's advective-only PC vs. the legacy two-cascade Yelmo.jl PC (until the reject-path regression is understood)",
         "pc_eta_masked" => "switch off the Fortran pc error mask (diagnostics)",
         "timing"        => "per-section wall-clock timing of YelmoModel"),
     "ydyn" => Dict(

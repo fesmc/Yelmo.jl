@@ -15,7 +15,7 @@ using Yelmo
 using Yelmo.YelmoPar: YelmoParameters, yelmo_params
 
 p = YelmoParameters("my_run";
-    yelmo = yelmo_params(timing = true, dt_method = 2, pc_method = "HEUN", ...),
+    yelmo = yelmo_params(timing = true, dt_method = 2, pc_method = "AB-SAM", ...),
     # ...other groups...
 )
 
@@ -36,23 +36,24 @@ Print the breakdown:
 print_timings(y)
 ```
 
-Sample output (EISMINT-1 moving-margin, HEUN+PI42, 5 outer × 100 yr):
+Sample output (initmip-grl 16 km, `dt_method = 2`, HEUN + PI42, 20 × 1 yr, albedo):
 
 ```
 section                       calls   total[s]   mean[ms]    max[ms]   %tot
 ────────────────────────────────────────────────────────────────────────────────
-dyn                              30     0.9660     32.201     34.320   82.7
-  dyn_jacobian_uxy               30     0.3922     13.075     15.507   33.6
-  dyn_sia                        30     0.2531      8.436      9.263   21.7
-  dyn_uz                         30     0.1110      3.699      4.603    9.5
-  dyn_jacobian_uz                30     0.0800      2.668      3.541    6.9
-  dyn_strain                     30     0.0474      1.580      2.522    4.1
-topo                             30     0.1300      4.335      5.484   11.1
-mat                              30     0.0716      2.388      3.421    6.1
-  pc_corrector                   15     0.5883     39.218     40.695   50.4
-  pc_predictor                   15     0.5795     38.630     40.169   49.6
+topo                            311    39.1254    125.805   5426.143   51.9
+  topo_pred                     105    18.2638    173.941   5426.142   24.2
+  topo_corr                     105    14.1458    134.722   1141.850   18.8
+  topo_adv                      101     6.7154     66.489    103.371    8.9
+dyn                             105    32.4576    309.120    900.537   43.1
+  dyn_strain                    106     2.2852     21.559    553.695    3.0
+  dyn_uz                        106     1.4686     13.854    837.071    1.9
+  dyn_jacobian_uxy              106     1.1626     10.968    506.658    1.5
+  dyn_jacobian_uz               106     0.5936      5.600    353.738    0.8
+mat                             101     2.3253     23.023     38.858    3.1
+thrm                            101     1.4306     14.164    114.063    1.9
 ────────────────────────────────────────────────────────────────────────────────
-total (top-level)                       1.1677
+total (top-level)                      75.3389
 ```
 
 ## What gets measured
@@ -62,11 +63,12 @@ When `timing = true`, the model carries a `YelmoTimer` (accessible as
 
 | Section            | What it wraps                                                  |
 |--------------------|----------------------------------------------------------------|
-| `:topo`            | One full `topo_step!`                                          |
+| `:topo`            | One topography stage (`topo_step!(y, dt, ::PCStage)`)          |
+| `:topo_pred`       | The predictor stage (incl. the transport velocity)             |
+| `:topo_corr`       | The corrector stage (incl. the transport velocity)             |
+| `:topo_adv`        | The advance stage                                              |
 | `:dyn`             | One full `dyn_step!`                                           |
 | `:mat`             | One full `mat_step!`                                           |
-| `:pc_predictor`    | The HEUN predictor stage (one full FE pipeline)                |
-| `:pc_corrector`    | The HEUN corrector stage (one full FE pipeline)                |
 | `:dyn_sia`         | `calc_velocity_sia!` (SIA / hybrid solver branch)              |
 | `:dyn_jacobian_uxy`| `calc_jacobian_vel_3D_uxyterms!` (Jacobian Step 1)             |
 | `:dyn_uz`          | `calc_uz_3D_jac!` (vertical velocity from continuity)          |
@@ -97,11 +99,6 @@ A few subtleties:
   `dyn`'s "missing" % is unaccounted-for time inside `dyn` (e.g.
   driving stress, lateral BC, drag chain) — wrap those if you need
   to see them.
-- **`pc_predictor` and `pc_corrector` are wrappers**, not phases —
-  each one wraps a *whole* `_step_fe!` call. Their `%tot` is computed
-  against the same top-level total, so they will appear larger than
-  any single phase. They are listed separately at the bottom of the
-  table to make this visible.
 
 ## When to enable it
 

@@ -1,4 +1,4 @@
-# Calving (`topo_step!` phase 7)
+# Calving (topography stages, calving phase)
 
 Yelmo.jl uses a single calving formulation: the **level-set
 function (LSF) flux method**. A calving-front velocity field is
@@ -26,8 +26,8 @@ out of scope.
 
 ## Pipeline
 
-`calving_step!(y, dt)` runs as phase 7 of `topo_step!`, between DMB
-and relaxation. The full sequence:
+`calving_step!(y, dt)` runs in the mass-balance cascade of the predictor
+and corrector topography stages, between DMB and relaxation. The full sequence:
 
 | # | Step | Helper | Output |
 |---|---|---|---|

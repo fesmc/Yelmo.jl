@@ -48,7 +48,7 @@
 | 44 | mask_bed          | xc, yc      |             | Multi-valued bed mask                              |
 | 45 | mask_grz          | xc, yc      |             | Multi-valued grounding-line zone mask              |
 | 46 | mask_frnt         | xc, yc      |             | Multi-valued ice front mask                        |
-| 47 | dHidt_dyn_n       | xc, yc      | m/yr        | Ice thickness change due to advection (previous)   |
+| 47 | dHidt_dyn_raw_n   | xc, yc      | m/yr        | Ice thickness change due to advection (previous)   |
 | 48 | H_ice_n           | xc, yc      | m           | Ice thickness from previous timestep               |
 | 49 | z_srf_n           | xc, yc      | m           | Surface elevation from previous timestep           |
 | 50 | H_ice_dyn         | xc, yc      | m           | Dynamic ice thickness                              |
@@ -79,3 +79,4 @@
 | 75 | cmb_grnd_acy      | xc, yc      | m/yr        | Marine-terminating grounded calving rate (acy)     |
 | 76 | cr_acx            | xc, yc      | m/yr        | Merged calving-front velocity (acx nodes)          |
 | 77 | cr_acy            | xc, yc      | m/yr        | Merged calving-front velocity (acy nodes)          |
+| 78 | mb_clip           | xc, yc      | m/yr        | Clip of negative ice thickness after transport     |

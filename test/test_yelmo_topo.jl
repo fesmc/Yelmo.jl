@@ -10,21 +10,32 @@ import Pkg; Pkg.activate(".")
 #   2. Square-pulse advection — informational only; reports
 #      first-order-upwind diffusion characteristics. Always passes.
 #   3. mask_ice post-step pass — verifies the per-cell behavior of
-#      `topo_step!`'s mask handling. SMB is zeroed so the new 2b mass
+#      the mask handling of a step (`resid_tendency!`). SMB is zeroed so the new 2b mass
 #      balance stages don't perturb the FIXED-mask check.
 #   4. Real-restart 5-step smoke — volume conservation when SMB is
 #      zeroed (mb_resid may still trim margins, so the tolerance is
-#      loose; the only strict invariant is `dHidt = dHidt_dyn + mb_net`).
+#      loose; the only strict invariant is the budget
+#      `dHidt = dHidt_dyn + mb_clip + mb_net + cmb`).
 #   5. SMB conservation test (new for 2b) — slab geometry, prescribed
 #      melt rate; checks that `apply_tendency!` realises the requested
-#      thinning per step and that `mb_net = smb + mb_resid` and
-#      `dHidt = dHidt_dyn + mb_net` to within numerical tolerance.
+#      thinning per step and that `mb_net = smb + mb_resid` and the
+#      budget closes (`mb_err`) to within numerical tolerance.
 
 using Test
 using Yelmo
 using Oceananigans
 using Oceananigans: interior
 using Oceananigans.BoundaryConditions: fill_halo_regions!
+
+# One forward-Euler topography update (FE predictor + advance) with the
+# current velocity, without the velocity solve, mat and therm of `step!`.
+function _topo_fe_step!(y, dt)
+    Yelmo._transport_velocity!(y, false)
+    Yelmo.topo_step!(y, dt, PCPredictor(); β1 = 1.0, β2 = 0.0)
+    Yelmo.topo_step!(y, dt, PCAdvance(); use_H_pred = true)
+    y.time += dt
+    return y
+end
 
 const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
 
@@ -135,7 +146,7 @@ end
     @assert isfile(RESTART_PATH) "Restart fixture not found at $(RESTART_PATH)"
 
     # `ydyn.solver = "fixed"` so dyn_step! is a no-op; this test only
-    # exercises topo_step!'s mask handling. Other solvers error in 3a.
+    # exercises the mask handling of the topography step.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_mask_test_"),
                    alias  = "tpo-mask-test",
@@ -341,7 +352,7 @@ end
 @testset "tpo: real-restart 5-step smoke test" begin
     @assert isfile(RESTART_PATH)
 
-    # `ydyn.solver = "fixed"`: this smoke test only exercises topo_step!.
+    # `ydyn.solver = "fixed"`: this smoke test only exercises the topography.
     y = YelmoModel(RESTART_PATH, 0.0;
                    rundir = mktempdir(; prefix="tpo_smoke_"),
                    alias  = "tpo-smoke",
@@ -381,7 +392,8 @@ end
     @test (V0 - V5) / V0 < 0.01
 
     # Mass-conservation accounting on the *last* step, per cell.
-    # `dHidt` should equal `dHidt_dyn + mb_net` to within roundoff.
+    # `dHidt` should equal `dHidt_dyn + mb_clip + mb_net + cmb` to within
+    # roundoff (Fortran's budget; calving `cmb` is not in `mb_net`).
     H_now     = interior(y.tpo.H_ice)
     dHidt     = interior(y.tpo.dHidt)
     dHidt_dyn = interior(y.tpo.dHidt_dyn)
@@ -394,7 +406,8 @@ end
     dmb       = interior(y.tpo.dmb)
     mb_relax  = interior(y.tpo.mb_relax)
 
-    err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ mb_net)))
+    err_total = maximum(abs.(dHidt .- (dHidt_dyn .+ interior(y.tpo.mb_clip) .+
+                                       mb_net .+ interior(y.tpo.cmb))))
     err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
                                         mb_relax .+ mb_resid)))
     @test err_total < 1e-9
@@ -494,9 +507,7 @@ end
     dmb       = interior(y.tpo.dmb)
     mb_relax  = interior(y.tpo.mb_relax)
 
-    err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
-                             (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
-                              view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
+    err_total = maximum(abs, view(interior(y.tpo.mb_err), 2:Nx-1, 2:Ny-1, 1))
     err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
                                         mb_relax .+ mb_resid)))
     @test err_total < 1e-6
@@ -582,9 +593,7 @@ end
     dmb       = interior(y.tpo.dmb)
     mb_relax  = interior(y.tpo.mb_relax)
 
-    err_total = maximum(abs.(view(dHidt, 2:Nx-1, 2:Ny-1, 1) .-
-                             (view(dHidt_dyn, 2:Nx-1, 2:Ny-1, 1) .+
-                              view(mb_net,    2:Nx-1, 2:Ny-1, 1))))
+    err_total = maximum(abs, view(interior(y.tpo.mb_err), 2:Nx-1, 2:Ny-1, 1))
     err_net   = maximum(abs.(mb_net .- (smb .+ bmb .+ fmb .+ dmb .+
                                         mb_relax .+ mb_resid)))
     @test err_total < 1e-6
@@ -957,17 +966,17 @@ end
 
     step!(y, 1.0)
 
-    # After one step of 1 yr with tau = 5 yr toward H_ref = 1000 m:
-    # dt_method=0 → fixed-dt Heun (not forward Euler).
-    # k1 = (1000-500)/5 = 100, H_pred = 600
-    # k2 = (1000-600)/5 = 80,  H_**   = 680
-    # H_corr = 0.5*(500 + 680) = 590.
+    # One outer step of 1 yr with tau = 5 yr toward H_ref = 1000 m.
+    # dt_method = 0 from a cold start: a step of dt_min, then the rest.
+    # No transport, so both stages relax from H_n: H_{n+1} = H_n +
+    # dt·(1000 − H_n)/5, and mb_relax is the rate of the last step.
+    dt1 = p.yelmo.dt_min
+    H1  = 500.0 + dt1 * (1000.0 - 500.0) / 5.0
+    H2  = H1 + (1.0 - dt1) * (1000.0 - H1) / 5.0
     interior_view = view(H_ice, 2:Nx-1, 2:Ny-1, 1)
-    @test all(abs.(interior_view .- 590.0) .< 1e-9)
-
-    # mb_relax is the corrector-stage rate (at H_pred=600): 80 m/yr.
-    @test all(abs.(view(interior(y.tpo.mb_relax), 2:Nx-1, 2:Ny-1, 1) .- 80.0)
-              .< 1e-9)
+    @test all(abs.(interior_view .- H2) .< 1e-9)
+    @test all(abs.(view(interior(y.tpo.mb_relax), 2:Nx-1, 2:Ny-1, 1) .-
+                   (1000.0 - H1) / 5.0) .< 1e-9)
 
     # mb_net accounting still balances (smb=bmb=fmb=dmb=mb_resid=0).
     smb      = interior(y.tpo.smb)
@@ -1638,31 +1647,26 @@ end
         interior(y.tpo.lsf)[target_i, j, 1] = 1.0
     end
 
-    # Call topo_step! directly: this test is verifying the calving-kill
-    # physics (H→0, cmb recording) in a single forward-Euler pass.
-    # step!(y, 1.0) would go through Heun (dt_method=0 → Heun PC), whose
-    # H_corr = (H_n + H_**)/2 averaging softens the kill to H_corr=250,
-    # not the physically correct 0.
-    Yelmo.topo_step!(y, 1.0)
+    # A forward-Euler topography update: this test is verifying the
+    # calving-kill physics (H→0, cmb recording) in a single pass.
+    _topo_fe_step!(y, 1.0)
 
     # Column `target_i` had H = 500 with lsf > 0 ⇒ kill: H → 0, cmb < 0.
     @test all(interior(y.tpo.H_ice)[target_i, :, 1] .== 0.0)
     @test all(interior(y.tpo.cmb)[target_i, :, 1] .< 0.0)
     @test interior(y.tpo.cmb)[target_i, 1, 1] ≈ -500.0 atol = 1e-9
 
-    # Mass balance still closes.
-    err_total = maximum(abs.(interior(y.tpo.dHidt) .-
-                             (interior(y.tpo.dHidt_dyn) .+
-                              interior(y.tpo.mb_net))))
-    @test err_total < 1e-9
+    # Mass balance still closes (mb_err = dHidt − dHidt_dyn − mb_clip −
+    # mb_net − cmb).
+    @test maximum(abs, interior(y.tpo.mb_err)) < 1e-9
 end
 
 @testset "tpo: calving_step! method dispatch" begin
     # vm-m16 now resolves at runtime (mat's `strs2D_tau_eig_1` is
-    # threaded through). With `tau_eig_1` explicitly zeroed and
-    # `topo_step!` called directly (so mat_step doesn't refresh
-    # tau_eig_1 between zeroing and the calving phase), vm-m16 must
-    # produce zero calving rate — the no-stress no-op path.
+    # threaded through). With `tau_eig_1` explicitly zeroed and a
+    # topography-only update (so mat_step doesn't refresh tau_eig_1
+    # between zeroing and the calving phase), vm-m16 must produce zero
+    # calving rate — the no-stress no-op path.
     p_vm = with_ported_options(YelmoParameters("calv-vm";
         yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_method = "HEUN", pc_tol = 5.0, pc_eps = 1.0),
         ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
@@ -1677,7 +1681,7 @@ end
     lsf_init!(y_vm.tpo.lsf, y_vm.tpo.H_ice, y_vm.bnd.z_bed, y_vm.bnd.z_sl)
     fill!(interior(y_vm.bnd.smb_ref), 0.0)
     fill!(interior(y_vm.mat.strs2D_tau_eig_1), 0.0)
-    Yelmo.topo_step!(y_vm, 1.0)
+    _topo_fe_step!(y_vm, 1.0)
     # tau_1 = 0 everywhere ⇒ wv = 0 ⇒ cr = 0 on every face.
     @test all(interior(y_vm.tpo.cmb_flt_acx) .== 0.0)
     @test all(interior(y_vm.tpo.cmb_flt_acy) .== 0.0)

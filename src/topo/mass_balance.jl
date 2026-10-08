@@ -22,7 +22,7 @@ export apply_tendency!, mbal_tendency!, resid_tendency!
 const _APPLY_TOL = 1e-9
 
 """
-    apply_tendency!(H_ice, mb_dot, dt; adjust_mb=false) -> H_ice
+    apply_tendency!(H_ice, mb_dot, dt; adjust_mb=false, mb_clip=nothing) -> H_ice
 
 Apply the per-cell mass-balance tendency `mb_dot` [m/yr] to the ice
 thickness `H_ice` [m] over time interval `dt` [yr]. Per cell:
@@ -32,21 +32,26 @@ thickness `H_ice` [m] over time interval `dt` [yr]. Per cell:
   3. If `adjust_mb` is `true`, rewrite `mb_dot[i,j]` to the realized
      rate `(H_new - H_prev) / dt` so the tendency reflects what was
      actually applied (after the clamp / tolerance zeroing).
+  4. If `mb_clip` is given, write the rate added by the clamp /
+     zeroing into it (exactly zero where nothing was clipped).
 
-No-op when `dt ≤ 0`. Port of `apply_tendency` in
+No-op when `dt ≤ 0` (`mb_clip` is still zeroed). Port of `apply_tendency` in
 `yelmo/src/physics/mass_conservation.f90` (yelmo dev has no rate limit;
 `dHdt_dyn_lim` was removed).
 """
 function apply_tendency!(H_ice, mb_dot, dt::Real;
-                         adjust_mb::Bool = false)
+                         adjust_mb::Bool = false,
+                         mb_clip = nothing)
+    mb_clip === nothing || fill!(interior(mb_clip), 0.0)
     dt > 0 || return H_ice
 
     H = interior(H_ice)
     G = interior(mb_dot)
-    # Split on the `adjust_mb` switch so both branches present a
-    # straight-line loop body to @turbo. `adjust_mb` is a Bool kwarg —
-    # cheap to dispatch on once per call.
-    if adjust_mb
+    # Split on the switches so every branch presents a straight-line
+    # loop body to @turbo.
+    if mb_clip !== nothing
+        _apply_tendency_kernel_clip!(H, G, interior(mb_clip), Float64(dt), adjust_mb)
+    elseif adjust_mb
         _apply_tendency_kernel_adjust!(H, G, Float64(dt))
     else
         _apply_tendency_kernel!(H, G, Float64(dt))
@@ -65,6 +70,24 @@ end
         H_new = ifelse(H_new < 0.0,                  0.0, H_new)
         H_new = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
         H[i, j, 1] = H_new
+    end
+end
+
+# Same kernel, also booking the clip into C (Fortran `mb_clip`) and,
+# with `adjust`, writing back the realised tendency to G.
+@inline function _apply_tendency_kernel_clip!(H::AbstractArray{Float64},
+                                              G::AbstractArray{Float64},
+                                              C::AbstractArray{Float64},
+                                              dt::Float64, adjust::Bool)
+    inv_dt = 1.0 / dt
+    @turbo for j in axes(H, 2), i in axes(H, 1)
+        H_prev = H[i, j, 1]
+        H_raw  = H_prev + dt * G[i, j, 1]
+        H_new  = ifelse(H_raw < 0.0,                  0.0, H_raw)
+        H_new  = ifelse(abs(H_new) < _APPLY_TOL,      0.0, H_new)
+        H[i, j, 1] = H_new
+        C[i, j, 1] = (H_new - H_raw) * inv_dt
+        G[i, j, 1] = ifelse(adjust, (H_new - H_prev) * inv_dt, G[i, j, 1])
     end
 end
 

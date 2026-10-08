@@ -1,6 +1,6 @@
 # Relaxation
 
-Optional phase (15) of `topo_step!`. Pulls `H_ice` toward a reference
+Optional phase of the topography stages (after calving). Pulls `H_ice` toward a reference
 thickness `H_ref` on a per-cell timescale `tau_relax`. Useful for
 imposing a reference geometry in spinup runs, for nudging ice shelves
 toward observations, or for the standard "relax-toward-previous"
@@ -102,8 +102,8 @@ when `dt > 0` the formula `(H_ref - H) / dt` produces a tendency
 that, when applied with `apply_tendency!`, lands `H` exactly on
 `H_ref` (modulo the non-negativity clamp). When `dt ≤ 0` the formula
 falls back to `(H_ref - H) / 1.0` so the call is well-defined; this
-branch isn't normally exercised by `topo_step!` since the caller
-checks `dt > 0` upstream.
+branch isn't normally exercised by the topography stages since they
+only run with `dt > 0`.
 
 The output `dHdt` is fully overwritten by [`calc_G_relaxation!`](@ref),
 so the caller does not need to zero `tpo.mb_relax` beforehand. When

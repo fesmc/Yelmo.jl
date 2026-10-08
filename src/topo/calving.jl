@@ -1,9 +1,10 @@
 # ----------------------------------------------------------------------
-# Calving driver — phase 7 of `topo_step!`.
+# Calving driver — run in the mass-balance cascade of the predictor and
+# corrector topography stages (`_topo_mb_cascade!`).
 #
 # `calving_step!(y, dt)` orchestrates the full level-set calving phase:
 #
-#   1. Snapshot `lsf_n ← lsf` (for `dlsfdt`).
+#   1. (`lsf_n` and `dlsfdt` belong to the topography stages.)
 #   2. Refresh grounding fractions on aa/acx/acy nodes.
 #   3. Dispatch `calv_flt_method`  → `cmb_flt_acx, cmb_flt_acy`.
 #   4. Dispatch `calv_grnd_method` → `cmb_grnd_acx, cmb_grnd_acy`.
@@ -18,7 +19,6 @@
 #   11. Post-kill consistency: where `H ≤ 0` and bed is below SL, set
 #       `lsf = 1` (gated off for `calv_flt_method == "equil"` so the
 #       front stays pinned in equilibrium runs).
-#   12. `dlsfdt = (lsf - lsf_n) / dt`.
 #
 # Dispatch covers four laws: `"none"`/`"zero"`, `"equil"`,
 # `"threshold"`, and `"vm-m16"`. `"vm-m16"` reads the 1st principal
@@ -76,12 +76,8 @@ function calving_step!(y::YelmoModel, dt::Float64)
     fill!(interior(y.tpo.cmb),       0.0)
     fill!(interior(y.tpo.cmb_flt),   0.0)
     fill!(interior(y.tpo.cmb_grnd),  0.0)
-    fill!(interior(y.tpo.dlsfdt),    0.0)
 
     y.p.ycalv.use_lsf || return y
-
-    # 1. Snapshot lsf_n.
-    interior(y.tpo.lsf_n) .= interior(y.tpo.lsf)
 
     # 2. Refresh grounding fractions including ac-stagger.
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
@@ -209,13 +205,6 @@ function calving_step!(y::YelmoModel, dt::Float64)
                 L[i, j, 1] = 1.0
             end
         end
-    end
-
-    # 12. dlsfdt diagnostic.
-    Ln = interior(y.tpo.lsf_n)
-    D  = interior(y.tpo.dlsfdt)
-    @inbounds for k in eachindex(D)
-        D[k] = inv_dt * (L[k] - Ln[k])
     end
 
     return y

@@ -60,8 +60,8 @@ Open follow-ups (not blocking thrm closeout):
     Arrhenius) gating now has the upstream therm fields available;
     enabling it is a `mat` follow-up.
 
-`therm_step!` does NOT advance `y.time` — that is owned by
-`topo_step!`, matching the dyn/mat convention.
+`therm_step!` does NOT advance `y.time` — that is owned by the time
+loop (src/timestepping.jl), matching the dyn/mat convention.
 """
 module YelmoModelThrm
 

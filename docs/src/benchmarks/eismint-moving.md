@@ -33,8 +33,8 @@ benchmark exercises only the SIA velocity + advection pipeline.
 
 - SIA velocity solver producing finite `ux`, `uy`, `uz`.
 - Vertical velocity from continuity (`uz_method = 3`).
-- Explicit upwind advection of `H_ice` via `topo_step!`.
-- Adaptive HEUN + PI42 timestepping under `dt_method = 2`.
+- Explicit upwind advection of `H_ice` in the topography stages.
+- Adaptive predictor-corrector timestepping (PI42) under `dt_method = 2`.
 - Mass conservation: total volume positive and growing.
 - Dome forms at the geometric centre within 2 cells.
 

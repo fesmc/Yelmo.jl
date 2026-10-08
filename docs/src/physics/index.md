@@ -7,18 +7,19 @@ state groups `bnd`, `dta`, `dyn`, `mat`, `thrm`, `tpo`
 `step!(y, dt)` is, conceptually, an ordered phase chain:
 
 ```
-step!(y, dt)
-  ├─ topo_step! : ice-thickness + grounding + mass-balance bookkeeping
-  ├─ dyn_step!  : velocity solve (currently SIA; SSA / DIVA upcoming)
-  ├─ mat_step!  : strain rates, viscosity, anisotropy           [stub]
-  └─ therm_step!: temperature advection + diffusion + basal melt [stub]
+step!(y, dt)  — predictor-corrector time loop, per internal step:
+  ├─ topo_step!(…, PCPredictor()) : transport + mass balance → H_pred
+  ├─ dyn_step!                    : velocity solve at H_pred
+  ├─ topo_step!(…, PCCorrector()) : transport + mass balance → H_corr
+  │    (truncation error; redo with a smaller dt if too large)
+  ├─ mat_step!                    : strain rates, viscosity, rate factor
+  ├─ therm_step!                  : temperature / enthalpy, basal melt
+  └─ topo_step!(…, PCAdvance())   : H_{n+1}
 ```
 
-Coupling between the four components within a single step is handled
-by Yelmo's predictor / corrector wrapping (currently in `YelmoMirror`,
-not yet ported to `YelmoModel`). Each component reads the others' end-
-of-previous-step state from the shared `y.{bnd,dyn,mat,thrm,tpo}`
-groups.
+This is the Fortran `yelmo_update` loop (see [Stepping](../usage/stepping.md)).
+Each component reads the others' state from the shared
+`y.{bnd,dyn,mat,thrm,tpo}` groups.
 
 ## Status of the Julia port
 
@@ -29,7 +30,7 @@ land):
 
 | Phase | Module | Status | Notes |
 |---|---|---|---|
-| `topo_step!` | `Yelmo.YelmoModelTopo` | **Done** | See the [topography page](topography.md) for the full pipeline. |
+| `topo_step!` (stages) | `Yelmo.YelmoModelTopo` | **Done** | See the [topography page](topography.md) for the full pipeline. |
 | `dyn_step!`  | `Yelmo.YelmoModelDyn` | **Partial (SIA)** | Driving / lateral / basal stress, `N_eff`, bed-roughness, SIA solver dispatch. SSA / hybrid / DIVA deferred. See the [dynamics page](dynamics.md). |
 | `mat_step!`  | (future) | Deferred | Strain-rate / viscosity / anisotropy. |
 | `therm_step!`| (future) | Deferred | 3D advection-diffusion + basal melt. |

@@ -30,7 +30,7 @@ include("data/YelmoModelData.jl")
 # I/O. Loaded AFTER all per-phase modules since `calc_region_diagnostics!`
 # reads from `tpo`, `dyn`, `mat`, `thrm`, and `bnd` simultaneously.
 include("regions/YelmoRegions.jl")
-# Adaptive timestepping (predictor-corrector): must be loaded AFTER
+# Predictor-corrector time loop: must be loaded AFTER
 # topo + dyn + mat + thrm modules since it calls `topo_step!`,
 # `mat_step!`, `dyn_step!`, `therm_step!`, and `update_diagnostics!`.
 # Methods land into the top-level `Yelmo` namespace; `step!` (defined
@@ -127,7 +127,7 @@ export yelmo_get_var3D, yelmo_get_var3D!    # Mainly internally used
 export yelmo_set_var2D!, yelmo_set_var3D!   # Mainly internally used
 
 # YelmoModelTopo
-export topo_step!, topo_pc_step!, PCStageBuf, advect_tracer!
+export topo_step!, PCStage, PCPredictor, PCCorrector, PCAdvance, advect_tracer!
 export advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!
 export advection_tendency!
 export AdvectionCache, init_advection_cache,

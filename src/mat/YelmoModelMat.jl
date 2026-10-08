@@ -101,8 +101,8 @@ Scope ("mat 1" PR):
     (zero), matching Fortran which never fills it inside
     `calc_ymat`.
 
-`mat_step!` does NOT advance `y.time` — that is owned by
-`topo_step!`, matching the dyn convention.
+`mat_step!` does NOT advance `y.time` — that is owned by the time
+loop (src/timestepping.jl), matching the dyn convention.
 """
 function mat_step!(y::YelmoModel, dt::Float64)
     y.p === nothing && error(

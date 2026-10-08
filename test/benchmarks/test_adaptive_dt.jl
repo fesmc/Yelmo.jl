@@ -131,7 +131,7 @@ function _build(b, p)
 end
 
 
-@testset "Adaptive PC: snapshot/restore round-trip" begin
+@testset "Adaptive PC: redo reference round-trip" begin
     b = MISMIP3DBenchmark(:Stnd; dx_km = 16.0)
     p = _fixed_params()
     y = _build(b, p)
@@ -140,8 +140,8 @@ end
     Yelmo.step!(y, 1.0)
     Yelmo.step!(y, 1.0)
 
-    # Snapshot the state.
-    snap = Yelmo._alloc_pc_snapshot(y)
+    # Store the topography and dynamics (as at the start of a step).
+    ref = Yelmo.save!(Yelmo.RedoRef(y), y)
     H_pre  = copy(interior(y.tpo.H_ice))
     Ux_pre = copy(interior(y.dyn.ux_b))
     fg_pre = copy(interior(y.tpo.f_grnd))
@@ -153,15 +153,12 @@ end
     @test y.time != t_pre
     @test maximum(abs.(interior(y.tpo.H_ice) .- H_pre)) > 0  # really changed
 
-    # Restore — must land back at exactly the snapshotted state.
-    Yelmo.restore!(y, snap)
+    # Restore — all topography and dynamics fields are back exactly.
+    Yelmo.restore!(y, ref)
     @test y.time == t_pre
-    @test maximum(abs.(interior(y.tpo.H_ice) .- H_pre))   ≈ 0.0 atol = 1e-12
-    @test maximum(abs.(interior(y.dyn.ux_b)  .- Ux_pre))  ≈ 0.0 atol = 1e-12
-    # f_grnd is a diagnostic — recomputed by `update_diagnostics!`
-    # inside `restore!`; it should match because it's a pure
-    # function of the restored H_ice + boundaries.
-    @test maximum(abs.(interior(y.tpo.f_grnd) .- fg_pre)) ≈ 0.0 atol = 1e-12
+    @test interior(y.tpo.H_ice)  == H_pre
+    @test interior(y.dyn.ux_b)   == Ux_pre
+    @test interior(y.tpo.f_grnd) == fg_pre
 end
 
 
@@ -235,8 +232,8 @@ for pc_method in ("FE-SBE", "HEUN", "AB-SAM")
     @test scratch.n_steps_taken > 0
     @info "Adaptive PC: n_steps_taken=$(scratch.n_steps_taken)  " *
           "n_rejections=$(scratch.n_rejections)  " *
-          "last dt history=$(scratch.dt_history)  " *
-          "last eta history=$(round.(scratch.eta_history; sigdigits=3))"
+          "last dt history=$(scratch.pc_dt)  " *
+          "last eta history=$(round.(scratch.pc_eta; sigdigits=3))"
 end
 
 
@@ -266,7 +263,7 @@ end
     # either since pc_tol tuning may push behaviour into either
     # regime.)
     @test scratch.n_rejections > 0 || (scratch.n_steps_taken > 1) ||
-          (!isempty(scratch.dt_history) && minimum(scratch.dt_history) < 1.0)
+          minimum(scratch.pc_dt) < 1.0
 end
 
 end  # for pc_method

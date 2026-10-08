@@ -6,15 +6,10 @@ ice thickness `H_ice` via mass conservation and updates derived
 quantities (`z_srf`, `z_base`, `dHidt`, `dHidt_dyn`, `f_grnd`,
 `f_ice`).
 
-Public surface: `topo_step!(y::YelmoModel, dt)`, dispatched from
-`YelmoCore.step!(::YelmoModel, dt)` in fixed phase order alongside
-the other `<comp>_step!` generics.
-
-Milestone 2b: advection (from 2a) followed by surface mass balance
-(SMB) and a residual cleanup tendency (`mb_resid`) that handles
-margin/island regularisation. BMB, FMB, DMB, calving, the
-predictor-corrector wrapping, and the `impl-lis` solver land in
-subsequent milestones.
+Public surface: the predictor-corrector stages
+`topo_step!(y, dt, ::PCPredictor / ::PCCorrector / ::PCAdvance)` (port of
+Fortran `calc_ytopo_pc`), driven by the time loop in
+src/timestepping.jl, and `update_diagnostics!`.
 """
 module YelmoModelTopo
 
@@ -26,9 +21,8 @@ using ..YelmoCore: AbstractYelmoModel, YelmoModel,
 
 import ..YelmoCore: topo_step!, update_diagnostics!
 
-export topo_step!, topo_pc_step!, PCStageBuf,
-       _alloc_pc_stage_buf, _save_pc_stage!, _load_pc_stage!,
-       apply_mask_ice_pass!, advect_tracer!,
+export topo_step!, PCStage, PCPredictor, PCCorrector, PCAdvance,
+       advect_tracer!,
        advect_tracer_upwind_explicit!, advect_tracer_upwind_implicit!,
        advection_tendency!,
        AdvectionCache, init_advection_cache,
@@ -70,96 +64,195 @@ include("surface.jl")
 include("gradients.jl")
 include("dynamic_thickness.jl")
 
+# ---------------------------------------------------------------------------
+# Predictor-corrector topography stages — port of Fortran `calc_ytopo_pc`
+# (yelmo/src/yelmo_topography.f90:42-531). The time loop in
+# src/timestepping.jl calls, per step:
+#
+#   topo_step!(y, dt, PCPredictor(); β1, β2)    → H_pred (live state)
+#   dyn_step!(y, dt)                            → velocity at H_pred
+#   topo_step!(y, dt, PCCorrector(); β3, β4)    → H_corr (live state back to H_n)
+#   … error check, possibly a redo …
+#   mat_step!, therm_step!                      (at H_n)
+#   topo_step!(y, dt, PCAdvance(); use_H_pred)  → H_{n+1}
+#
+# Transport: the predictor and corrector advect with the transport
+# velocity `y.tpo.scratch.pc.ux_t/uy_t` (filled by the time loop before each of
+# them, Fortran `calc_transport_velocity`), mix the raw advective rates
+# with the β coefficients of the PC scheme,
+#
+#   predictor: dHidt_dyn = β1·f(H_n, u_n)   + β2·f_{n-1}
+#   corrector: dHidt_dyn = β3·f(H_pred, u*) + β4·f(H_n, u_n)
+#
+# (f(H_n, u_n) = `y.tpo.scratch.pc.dHidt_dyn_raw`, f_{n-1} = `dHidt_dyn_raw_n`) and
+# apply the mixed rate to H_n. The clip of negative thickness is booked
+# in `mb_clip`, so `dHidt_dyn` is the applied transport rate. The mass
+# balance cascade (smb, bmb, fmb, dmb, calving, relaxation, residual)
+# then acts on the transported thickness.
+# ---------------------------------------------------------------------------
+
 """
-    topo_step!(y::YelmoModel, dt) -> y
+    PCStage, PCPredictor, PCCorrector, PCAdvance
 
-Advance topography state by `dt` years. Phase order matches Fortran's
-`calc_ytopo_pc` predictor/corrector body (yelmo_topography.f90:172):
-
-1. Snapshot `H_ice` (used for the fixed-mask post-step and for the
-   total `dHidt` denominator).
-2. Advect `H_ice` by `(ux_bar, uy_bar)` from `y.dyn`, unless
-   `y.p.ytopo.topo_fixed` is `true`.
-3. Apply the `bnd.mask_ice` post-step pass (no-ice → 0; fixed →
-   prior value; dynamic → clamped non-negative).
-4. Recompute binary `f_ice` from the post-advection `H_ice`.
-5. SMB: `mbal_tendency!(smb, …, smb_ref)` + `apply_tendency!(adjust_mb)`.
-6. Refresh `f_ice`.
-7. BMB: refresh `H_grnd` and `f_grnd_bmb` from current state, combine
-   `thrm.bmb_grnd` and `bnd.bmb_shlf` into `tpo.bmb_ref` via
-   `calc_bmb_total!`, then realise via `mbal_tendency!` + `apply_tendency!`.
-   Skipped (`bmb = 0`) if `y.p.ytopo.use_bmb == false`.
-8. Refresh `f_ice`.
-9. FMB: `calc_fmb_total!` + `mbal_tendency!` + `apply_tendency!`.
-   Skipped (`fmb = 0`) if `y.p.ytopo.use_bmb == false` — Fortran
-   gates FMB on the same `use_bmb` flag.
-10. Refresh `f_ice`.
-11. DMB: `calc_mb_discharge!` (v1 stub: only `dmb_method = 0`) +
-    `mbal_tendency!` + `apply_tendency!`.
-12. Refresh `f_ice`.
-13. Optional relaxation toward `H_ref`/`H_ice_n` via `set_tau_relax!`
-    + `calc_G_relaxation!`. Skipped when `topo_rel == 0`. Errors on
-    `topo_rel == 4` (depends on un-ported `mask_grz`). When
-    `topo_rel == -1`, the timescale field is read from `bnd.tau_relax`.
-14. Refresh `f_ice` after relaxation.
-15. Residual cleanup: `resid_tendency!` + `apply_tendency!`.
-16. Refresh `f_ice`.
-17. `mb_net = smb + bmb + fmb + dmb + cmb + mb_relax + mb_resid`.
-18. Update diagnostics: refresh `H_grnd` and subgrid `f_grnd`, plus
-    `z_srf`/`z_base`/`dHidt`/`dHidt_dyn`.
-19. Advance `y.time`.
+Stages of a predictor-corrector topography step (Fortran `calc_ytopo_pc`
+with `pc_step` = "predictor", "corrector", "advance"); see `topo_step!`.
 """
-function topo_step!(y::YelmoModel, dt::Float64;
-                    ux_bar::Union{Nothing, AbstractField} = nothing,
-                    uy_bar::Union{Nothing, AbstractField} = nothing,
-                    advance_time::Bool = true)
-    # Optional `ux_bar` / `uy_bar` kwargs let the adaptive PC driver
-    # supply an explicit velocity Field for the advection sub-step
-    # while leaving everything else in the cascade unchanged. Default
-    # `nothing` means "read from `y.dyn`" (legacy behaviour). The
-    # `advance_time` flag is reserved for callers that want to run
-    # the full cascade without bumping `y.time` (PC predictor stage).
-    ux_bar_use = ux_bar === nothing ? y.dyn.ux_bar : ux_bar
-    uy_bar_use = uy_bar === nothing ? y.dyn.uy_bar : uy_bar
+abstract type PCStage end
+struct PCPredictor <: PCStage end
+struct PCCorrector <: PCStage end
+struct PCAdvance   <: PCStage end
 
-    H_prev = copy(interior(y.tpo.H_ice))
+"""
+    topo_step!(y, dt, ::PCPredictor; β1, β2) -> y
+    topo_step!(y, dt, ::PCCorrector; β3, β4) -> y
+    topo_step!(y, dt, ::PCAdvance; use_H_pred) -> y
 
-    # Snapshot the start-of-step thickness into `H_ice_n` so that
-    # `topo_rel_field == "H_ice_n"` (relax-toward-previous) has a
-    # meaningful target. Fortran does the same in calc_ytopo_pc.
-    interior(y.tpo.H_ice_n) .= H_prev
+One stage of the predictor-corrector topography update over `dt` (port of
+Fortran `calc_ytopo_pc`):
 
-    if !y.p.ytopo.topo_fixed
-        scheme = parse_advection_scheme(y.p.ytopo.solver)
-        if scheme !== :none
-            advect_tracer!(y.tpo.H_ice, ux_bar_use, uy_bar_use, dt;
-                           scheme = scheme,
-                           cache  = y.tpo.scratch.adv_cache,
-                           cfl_safety = y.p.yelmo.cfl_max)
-        end
+  - `PCPredictor`: store `H_ice_n`, `z_srf_n`, `lsf_n`; transport with
+    `β1·f_n + β2·f_{n-1}` (raw advective rates at `H_n` and of the previous
+    step) and run the mass-balance cascade. The live state and
+    `y.tpo.scratch.pc.pred` hold `H_pred`, for the velocity solve that follows.
+  - `PCCorrector`: transport `H_n` with `β3·f(H_pred) + β4·f_n` (`H_pred`
+    advected with the velocity just solved), run the cascade and record
+    the result in `y.tpo.scratch.pc.corr`, then return the live state to `H_n`
+    (for `mat_step!` and `therm_step!`).
+  - `PCAdvance`: load the predictor (`use_H_pred`) or corrector record and
+    shift `f_n` to `dHidt_dyn_raw_n`.
+
+The predictor and corrector advect with `y.tpo.scratch.pc.ux_t/uy_t`, which the
+caller fills with the transport velocity. Nothing changes when
+`ytopo.topo_fixed` or `dt ≤ 0` (the records then hold the current state).
+Each transporting stage ends with `dHidt = (H_ice − H_ice_n)/dt`,
+`dlsfdt` and `mb_err`; every stage ends with `update_diagnostics!`.
+`y.time` belongs to the time loop.
+"""
+function topo_step!(y::YelmoModel, dt::Float64, ::PCPredictor;
+                    β1::Float64, β2::Float64)
+    tpo = y.tpo
+    copyto!(interior(tpo.H_ice_n), interior(tpo.H_ice))
+    copyto!(interior(tpo.z_srf_n), interior(tpo.z_srf))
+    copyto!(interior(tpo.lsf_n),   interior(tpo.lsf))
+    if _topo_active(y, dt)
+        f_n = tpo.scratch.pc.dHidt_dyn_raw
+        _advection_rate!(f_n, y, dt)
+        _mix_rates!(interior(tpo.dHidt_dyn), β1, f_n, β2, interior(tpo.dHidt_dyn_raw_n))
+        _apply_transport!(y, dt)
+        _topo_mb_cascade!(y, dt)
+        _stage_rates!(y, dt)
     end
+    update_diagnostics!(y)
+    _save_pc_stage!(tpo.scratch.pc.pred, y)
+    return y
+end
 
-    _apply_mask_ice_pass!(y)
+function topo_step!(y::YelmoModel, dt::Float64, ::PCCorrector;
+                    β3::Float64, β4::Float64)
+    tpo = y.tpo
+    if _topo_active(y, dt)
+        copyto!(interior(tpo.H_ice), tpo.scratch.pc.pred.H_ice)
+        copyto!(interior(tpo.lsf),   tpo.scratch.pc.pred.lsf)
+        calc_f_ice!(y)
+        D = interior(tpo.dHidt_dyn)
+        _advection_rate!(D, y, dt)
+        _mix_rates!(D, β3, D, β4, tpo.scratch.pc.dHidt_dyn_raw)
+        copyto!(interior(tpo.H_ice), interior(tpo.H_ice_n))
+        copyto!(interior(tpo.lsf),   interior(tpo.lsf_n))
+        _apply_transport!(y, dt)
+        _topo_mb_cascade!(y, dt)
+        _save_pc_stage!(tpo.scratch.pc.corr, y)
+        copyto!(interior(tpo.H_ice), interior(tpo.H_ice_n))
+        copyto!(interior(tpo.lsf),   interior(tpo.lsf_n))
+        _stage_rates!(y, dt)
+    else
+        _save_pc_stage!(tpo.scratch.pc.corr, y)
+    end
+    update_diagnostics!(y)
+    return y
+end
 
-    # Snapshot after dynamics + mask pass; used for `dHidt_dyn`.
-    H_after_dyn = copy(interior(y.tpo.H_ice))
+function topo_step!(y::YelmoModel, dt::Float64, ::PCAdvance; use_H_pred::Bool)
+    tpo = y.tpo
+    if _topo_active(y, dt)
+        _load_pc_stage!(y, use_H_pred ? tpo.scratch.pc.pred : tpo.scratch.pc.corr)
+        copyto!(interior(tpo.dHidt_dyn_raw_n), tpo.scratch.pc.dHidt_dyn_raw)
+        _stage_rates!(y, dt)
+    end
+    update_diagnostics!(y)
+    return y
+end
 
-    # Refresh f_ice now that the dynamic margin may have moved.
+_topo_active(y::YelmoModel, dt::Real) = !y.p.ytopo.topo_fixed && dt > 0
+
+# Raw advective rate `f = (advected H − H)/dt` of the live H_ice with the
+# transport velocity (Fortran `calc_G_advec_simple`), into the array `dHdt`.
+function _advection_rate!(dHdt::AbstractArray, y::YelmoModel, dt::Float64)
+    scheme = parse_advection_scheme(y.p.ytopo.solver)
+    if scheme === :none
+        fill!(dHdt, 0.0)
+        return dHdt
+    end
+    advection_tendency!(dHdt, y.tpo.H_ice, y.tpo.scratch.pc.ux_t, y.tpo.scratch.pc.uy_t, dt,
+                        y.tpo.scratch.pc.H_tmp;
+                        scheme     = scheme,
+                        cache      = y.tpo.scratch.adv_cache,
+                        cfl_safety = y.p.yelmo.cfl_max)
+    return dHdt
+end
+
+# D = a·X + b·Y (X may be D).
+function _mix_rates!(D::AbstractArray, a::Float64, X::AbstractArray,
+                     b::Float64, Y::AbstractArray)
+    @inbounds @simd for i in eachindex(D)
+        D[i] = a * X[i] + b * Y[i]
+    end
+    return D
+end
+
+# Apply the mixed transport rate `dHidt_dyn` to the live H_ice (= H_n);
+# the clip of negative thickness goes to `mb_clip` and `dHidt_dyn` becomes
+# the applied transport rate (Fortran yelmo_topography.f90:161-165).
+function _apply_transport!(y::YelmoModel, dt::Float64)
+    D = y.tpo.dHidt_dyn
+    apply_tendency!(y.tpo.H_ice, D, dt; adjust_mb = true, mb_clip = y.tpo.mb_clip)
+    interior(D) .-= interior(y.tpo.mb_clip)
     calc_f_ice!(y)
+    return y
+end
 
-    _topo_mb_cascade!(y, dt)
+# Rates of the stage (Fortran yelmo_topography.f90:517-524): total
+# thickness and level-set rates, and the mass budget residual, which
+# vanishes to round-off since every tendency is applied with `adjust_mb`.
+function _stage_rates!(y::YelmoModel, dt::Float64)
+    tpo = y.tpo
+    inv_dt = 1.0 / dt
+    interior(tpo.dHidt)  .= (interior(tpo.H_ice) .- interior(tpo.H_ice_n)) .* inv_dt
+    interior(tpo.dlsfdt) .= (interior(tpo.lsf)   .- interior(tpo.lsf_n))   .* inv_dt
+    interior(tpo.mb_err) .= interior(tpo.dHidt) .-
+                            (interior(tpo.dHidt_dyn) .+ interior(tpo.mb_clip) .+
+                             interior(tpo.mb_net) .+ interior(tpo.cmb))
+    return y
+end
 
-    _update_diagnostics!(y, H_prev, H_after_dyn, dt)
+function _save_pc_stage!(rec::NamedTuple, y::YelmoModel)
+    for k in keys(rec)
+        copyto!(rec[k], interior(getproperty(y.tpo, k)))
+    end
+    return rec
+end
 
-    advance_time && (y.time += dt)
+function _load_pc_stage!(y::YelmoModel, rec::NamedTuple)
+    for k in keys(rec)
+        copyto!(interior(getproperty(y.tpo, k)), rec[k])
+    end
     return y
 end
 
 # ---------------------------------------------------------------------------
-# Mass-balance cascade — Fortran's per-step (smb → bmb → fmb → dmb →
-# calving → relax → resid) chain. Called from `topo_step!` after the
-# advective stage (legacy path), and from each `topo_pc_step!` mode
-# (`:predictor` and `:corrector`) for the advective-PC path.
+# Mass-balance cascade — Fortran's per-stage (smb → bmb → fmb → dmb →
+# calving → relax → resid) chain, run by the predictor and corrector
+# stages after transport (yelmo_topography.f90:212-375).
 #
 # Invariants on entry:
 #   - `y.tpo.H_ice` holds the post-advection thickness.
@@ -168,7 +261,8 @@ end
 # Invariants on exit:
 #   - All MB tendency fields (`smb`, `bmb`, `fmb`, `dmb`, `cmb*`,
 #     `mb_relax`, `mb_resid`) are populated with realised rates [m/yr].
-#   - `mb_net` is the sum.
+#   - `mb_net` is their sum without calving (Fortran: `cmb` is booked
+#     separately).
 #   - `f_ice` reflects the final post-cascade thickness.
 # ---------------------------------------------------------------------------
 function _topo_mb_cascade!(y::YelmoModel, dt::Float64)
@@ -279,250 +373,14 @@ function _topo_mb_cascade!(y::YelmoModel, dt::Float64)
     # Final f_ice refresh after the cleanup step.
     calc_f_ice!(y)
 
-    # Net mass balance applied this step.
+    # Net mass balance applied this stage (calving `cmb` is separate,
+    # as in Fortran).
     interior(y.tpo.mb_net) .= interior(y.tpo.smb) .+
                               interior(y.tpo.bmb) .+
                               interior(y.tpo.fmb) .+
                               interior(y.tpo.dmb) .+
-                              interior(y.tpo.cmb) .+
                               interior(y.tpo.mb_relax) .+
                               interior(y.tpo.mb_resid)
-    return y
-end
-
-# ---------------------------------------------------------------------------
-# PC stage buffer — mirrors Fortran's `tpo%now%pred` / `tpo%now%corr`
-# (yelmo_topography.f90:322-353). Stores the per-stage outputs that
-# `topo_pc_step!(:advance)` reads to commit either the predictor or the
-# corrector result into the live state.
-# ---------------------------------------------------------------------------
-
-"""
-    PCStageBuf
-
-Per-stage scratch buffer holding the 13 fields that Fortran's
-`tpo%now%pred` / `tpo%now%corr` carry. Allocated lazily by the
-adaptive-PC driver; one instance for the predictor stage, one for the
-corrector stage. See `topo_pc_step!`.
-"""
-mutable struct PCStageBuf
-    H_ice    ::Array{Float64,3}
-    dHidt_dyn::Array{Float64,3}
-    mb_net   ::Array{Float64,3}
-    mb_relax ::Array{Float64,3}
-    mb_resid ::Array{Float64,3}
-    smb      ::Array{Float64,3}
-    bmb      ::Array{Float64,3}
-    fmb      ::Array{Float64,3}
-    dmb      ::Array{Float64,3}
-    cmb      ::Array{Float64,3}
-    cmb_flt  ::Array{Float64,3}
-    cmb_grnd ::Array{Float64,3}
-    lsf      ::Array{Float64,3}
-end
-
-function _alloc_pc_stage_buf(y::YelmoModel)
-    sz = size(interior(y.tpo.H_ice))
-    Z() = zeros(Float64, sz)
-    return PCStageBuf(Z(), Z(), Z(), Z(), Z(), Z(), Z(), Z(),
-                      Z(), Z(), Z(), Z(), Z())
-end
-
-function _save_pc_stage!(buf::PCStageBuf, y::YelmoModel)
-    copyto!(buf.H_ice,     interior(y.tpo.H_ice))
-    copyto!(buf.dHidt_dyn, interior(y.tpo.dHidt_dyn))
-    copyto!(buf.mb_net,    interior(y.tpo.mb_net))
-    copyto!(buf.mb_relax,  interior(y.tpo.mb_relax))
-    copyto!(buf.mb_resid,  interior(y.tpo.mb_resid))
-    copyto!(buf.smb,       interior(y.tpo.smb))
-    copyto!(buf.bmb,       interior(y.tpo.bmb))
-    copyto!(buf.fmb,       interior(y.tpo.fmb))
-    copyto!(buf.dmb,       interior(y.tpo.dmb))
-    copyto!(buf.cmb,       interior(y.tpo.cmb))
-    copyto!(buf.cmb_flt,   interior(y.tpo.cmb_flt))
-    copyto!(buf.cmb_grnd,  interior(y.tpo.cmb_grnd))
-    copyto!(buf.lsf,       interior(y.tpo.lsf))
-    return buf
-end
-
-function _load_pc_stage!(y::YelmoModel, buf::PCStageBuf)
-    copyto!(interior(y.tpo.H_ice),     buf.H_ice)
-    copyto!(interior(y.tpo.dHidt_dyn), buf.dHidt_dyn)
-    copyto!(interior(y.tpo.mb_net),    buf.mb_net)
-    copyto!(interior(y.tpo.mb_relax),  buf.mb_relax)
-    copyto!(interior(y.tpo.mb_resid),  buf.mb_resid)
-    copyto!(interior(y.tpo.smb),       buf.smb)
-    copyto!(interior(y.tpo.bmb),       buf.bmb)
-    copyto!(interior(y.tpo.fmb),       buf.fmb)
-    copyto!(interior(y.tpo.dmb),       buf.dmb)
-    copyto!(interior(y.tpo.cmb),       buf.cmb)
-    copyto!(interior(y.tpo.cmb_flt),   buf.cmb_flt)
-    copyto!(interior(y.tpo.cmb_grnd),  buf.cmb_grnd)
-    copyto!(interior(y.tpo.lsf),       buf.lsf)
-    return y
-end
-
-# ---------------------------------------------------------------------------
-# Fortran-style advective predictor / corrector — ported from
-# `calc_ytopo_pc` (yelmo/src/yelmo_topography.f90:42). Three modes:
-#
-#   - `:predictor` — snapshot input state (`H_ice_n`, `dHidt_dyn_n`,
-#     `lsf_n`); compute pure advective tendency at `H_n` with the
-#     current velocity field; β-mix `dHidt_dyn = β1·dHidt_now +
-#     β2·dHidt_dyn_n`; apply the tendency on top of `H_ice_n`; run the
-#     full MB cascade on top of the
-#     resulting `H_pred`; save the per-stage outputs to `pred_buf`.
-#     On exit, live `y.tpo.H_ice = H_pred` — the next `dyn_step!` solves
-#     SSA at this state.
-#
-#   - `:corrector` — load `H_pred` from `pred_buf` into live state;
-#     compute pure advective tendency at `H_pred` with the newly-solved
-#     velocity field; β-mix `dHidt_dyn = β3·dHidt_now + β4·dHidt_dyn_n`;
-#     apply on top of `H_ice_n` (not `H_pred`); run MB cascade; save
-#     outputs to `corr_buf`. Restore `H_ice = H_ice_n` at end so the
-#     downstream mat/therm steps see the start-of-step geometry.
-#
-#   - `:advance` — copy `pred_buf` or `corr_buf` (per `use_H_pred`) into
-#     live state, refresh diagnostics, set `dHidt = (H_now − H_ice_n)/dt`,
-#     advance `y.time` by `dt`.
-#
-# `H_scratch` is a `Nx×Ny×1` Float64 buffer used by the snapshot-diff
-# advection-tendency wrapper; the caller owns it (typically on
-# `PCScratch`).
-# ---------------------------------------------------------------------------
-function topo_pc_step!(y::YelmoModel, dt::Float64;
-                       mode::Symbol,
-                       β1::Float64 = 1.0,
-                       β2::Float64 = 0.0,
-                       β3::Float64 = 1.0,
-                       β4::Float64 = 0.0,
-                       pred_buf::PCStageBuf,
-                       corr_buf::PCStageBuf,
-                       H_scratch::AbstractArray,
-                       use_H_pred::Bool = true,
-                       advance_time::Bool = true)
-    if mode === :predictor
-        # 1. Snapshot input state.
-        copyto!(interior(y.tpo.H_ice_n),     interior(y.tpo.H_ice))
-        copyto!(interior(y.tpo.dHidt_dyn_n), interior(y.tpo.dHidt_dyn))
-        copyto!(interior(y.tpo.lsf_n),       interior(y.tpo.lsf))
-        copyto!(interior(y.tpo.z_srf_n),     interior(y.tpo.z_srf))
-
-        calc_f_ice!(y)
-
-        # 2. Pure advective tendency at H_n with current velocity.
-        _advection_tendency_mix!(y, dt, H_scratch, β1, β2)
-
-        # 3. Apply mixed advective tendency on top of H_n (H_ice already
-        # equals H_ice_n since the tendency helper restores).
-        apply_tendency!(y.tpo.H_ice, y.tpo.dHidt_dyn, dt;
-                        adjust_mb = true)
-
-        # 4. Mask-ice post-pass (NONE→0, FIXED→H_ice_ref, DYNAMIC→max(0)).
-        apply_mask_ice_pass!(y)
-        calc_f_ice!(y)
-
-        # 5. MB cascade on H_pred.
-        _topo_mb_cascade!(y, dt)
-
-        # 6. Refresh diagnostics for the upcoming dyn solve at H_pred.
-        # (`dt = 0` form preserves dHidt_dyn, which is our β-mixed value.)
-        update_diagnostics!(y)
-
-        # 7. Save predictor outputs.
-        _save_pc_stage!(pred_buf, y)
-        return y
-
-    elseif mode === :corrector
-        # 1. Load H_pred + lsf_pred into live state.
-        copyto!(interior(y.tpo.H_ice), pred_buf.H_ice)
-        copyto!(interior(y.tpo.lsf),   pred_buf.lsf)
-        calc_f_ice!(y)
-
-        # 2. Pure advective tendency at H_pred with just-solved u_pred.
-        _advection_tendency_mix!(y, dt, H_scratch, β3, β4)
-
-        # 3. Restore H_ice ← H_ice_n; apply mixed tendency.
-        copyto!(interior(y.tpo.H_ice), interior(y.tpo.H_ice_n))
-        copyto!(interior(y.tpo.lsf),   interior(y.tpo.lsf_n))
-        apply_tendency!(y.tpo.H_ice, y.tpo.dHidt_dyn, dt;
-                        adjust_mb = true)
-
-        # 4. Mask-ice pass and f_ice refresh.
-        apply_mask_ice_pass!(y)
-        calc_f_ice!(y)
-
-        # 5. MB cascade on H_corr.
-        _topo_mb_cascade!(y, dt)
-
-        # 6. Refresh diagnostics at H_corr so eta-masking and any
-        # immediate post-corrector logic see consistent z_srf / H_grnd /
-        # gradients at the corrector geometry.
-        update_diagnostics!(y)
-
-        # 7. Save corrector outputs.
-        # NOTE: live state is left at H_corr on exit. The PC driver
-        # restores `H_ice ← H_ice_n` after `_compute_pc_eta` reads
-        # corrector-state diagnostics, before running mat/therm (which
-        # Fortran's `update_others_pc = false` evaluates at H_ice_n).
-        _save_pc_stage!(corr_buf, y)
-        return y
-
-    elseif mode === :advance
-        # Commit pred or corr buffer into live state.
-        src = use_H_pred ? pred_buf : corr_buf
-        _load_pc_stage!(y, src)
-
-        # Refresh diagnostics (z_srf, gradients, distances, masks) from
-        # the committed H_ice. `update_diagnostics!` preserves dHidt_dyn
-        # (we want the saved β-mix value, not a (H_after - H_prev)/dt
-        # snapshot).
-        update_diagnostics!(y)
-
-        # dHidt = (H_now − H_ice_n) / dt — total step rate.
-        if dt > 0
-            dHidt = interior(y.tpo.dHidt)
-            H_now = interior(y.tpo.H_ice)
-            H_n   = interior(y.tpo.H_ice_n)
-            inv_dt = 1.0 / dt
-            @inbounds @simd for i in eachindex(dHidt)
-                dHidt[i] = (H_now[i] - H_n[i]) * inv_dt
-            end
-        end
-
-        advance_time && (y.time += dt)
-        return y
-    else
-        error("topo_pc_step!: unknown mode=$(mode). " *
-              "Use :predictor, :corrector, or :advance.")
-    end
-end
-
-# Internal helper: compute the pure advective tendency into y.tpo.dHidt_dyn
-# (mutating it via β-mix with y.tpo.dHidt_dyn_n) without modifying H_ice.
-# Honors `topo_fixed` (writes zero tendency) and the scheme dispatch.
-function _advection_tendency_mix!(y::YelmoModel, dt::Float64,
-                                  H_scratch::AbstractArray,
-                                  βnow::Float64, βn::Float64)
-    if y.p.ytopo.topo_fixed
-        fill!(interior(y.tpo.dHidt_dyn), 0.0)
-        return y
-    end
-    scheme = parse_advection_scheme(y.p.ytopo.solver)
-    if scheme === :none
-        fill!(interior(y.tpo.dHidt_dyn), 0.0)
-        return y
-    end
-    advection_tendency!(y.tpo.dHidt_dyn, y.tpo.H_ice,
-                        y.dyn.ux_bar, y.dyn.uy_bar, dt, H_scratch;
-                        scheme     = scheme,
-                        cache      = y.tpo.scratch.adv_cache,
-                        cfl_safety = y.p.yelmo.cfl_max)
-    dH  = interior(y.tpo.dHidt_dyn)
-    dHn = interior(y.tpo.dHidt_dyn_n)
-    @inbounds @simd for i in eachindex(dH)
-        dH[i] = βnow * dH[i] + βn * dHn[i]
-    end
     return y
 end
 
@@ -531,82 +389,31 @@ end
 
 Recompute every diagnostic `tpo` field from the current prognostic
 state (`H_ice` plus `bnd` inputs `z_bed`, `z_sl`, `f_pmp`, `z_bed_sd`)
-without advancing time. Refreshes `f_ice` first (so the rest of the
-diagnostic chain sees a consistent ice cover), then runs the same
-diagnostic body that fires at the end of `topo_step!`.
+without advancing time (Fortran `calc_ytopo_diagnostic`). Refreshes
+`f_ice` first, so the rest of the chain sees a consistent ice cover.
+Runs at the end of every topography stage; also useful to materialise
+diagnostics after `load_state!`.
 
-`dHidt` and `dHidt_dyn` are preserved (not recomputed) since there is
-no time step over which to differentiate. Useful to materialise
-diagnostics after `load_state!` for restart files that omit some
-derived fields, and as a regression check that the Julia diagnostic
-chain reproduces what the Fortran reference wrote into a restart —
-including consumers like `calc_uz_3D_jac!` that read `dHidt`.
+Rates (`dHidt`, `dHidt_dyn`, `dlsfdt`) are not touched: the topography
+stages set them.
 """
 function update_diagnostics!(y::YelmoModel)
     calc_f_ice!(y)
-    H = copy(interior(y.tpo.H_ice))
-    _update_diagnostics!(y, H, H, 0.0)
+    _update_diagnostics!(y)
     return y
 end
 
-# Per-cell post-step pass keyed off bnd.mask_ice. Stored values are
-# Float64 representations of the Int constants from YelmoCore.
-#
-# This is an invariant-restore pass with no mass-balance accounting:
-# the faithful `mb_resid` bookkeeping for the mask lives in
-# `resid_tendency!` (the `calc_G_boundaries` port). This pass is needed
-# at points where no residual step follows — notably after the Heun
-# corrector average in `pc_step!` (timestepping.jl), where the
-# (H_n + H_**)/2 average can violate mask invariants (e.g. a
-# MASK_ICE_NONE cell gets H_corr = H_n/2 > 0), and after the advective
-# stage in `topo_step!` / `topo_pc_step!` before the MB cascade reads
-# the geometry. Semantics match Fortran: MASK_ICE_NONE → 0,
-# MASK_ICE_FIXED → bnd.H_ice_ref, MASK_ICE_DYNAMIC → clamp ≥ 0.
-function apply_mask_ice_pass!(y::YelmoModel)
-    H_ice     = interior(y.tpo.H_ice)
-    mask_ice  = interior(y.bnd.mask_ice)
-    H_ice_ref = interior(y.bnd.H_ice_ref)
-    _apply_mask_ice_pass_kernel!(H_ice, mask_ice, H_ice_ref)
-    return y
-end
-
-# Branchless 3-way mask select for @turbo: the default `:dynamic` case
-# is the always-computed `max(H, 0)` value, and the `:none` / `:fixed`
-# cases override it via `ifelse`. Comparing Float64-encoded mask values
-# against the Float64 cast of the integer constants matches the
-# original 3-arm if/elseif/else exactly.
-@inline function _apply_mask_ice_pass_kernel!(H_ice::AbstractArray{Float64},
-                                              mask_ice::AbstractArray{Float64},
-                                              H_ice_ref::AbstractArray{Float64})
-    m_none  = Float64(MASK_ICE_NONE)
-    m_fixed = Float64(MASK_ICE_FIXED)
-    @turbo for j in axes(H_ice, 2), i in axes(H_ice, 1)
-        m       = mask_ice[i, j, 1]
-        H_dyn   = ifelse(H_ice[i, j, 1] > 0.0, H_ice[i, j, 1], 0.0)
-        H_new   = ifelse(m == m_none,  0.0,
-                  ifelse(m == m_fixed, H_ice_ref[i, j, 1], H_dyn))
-        H_ice[i, j, 1] = H_new
-    end
-end
-const _apply_mask_ice_pass! = apply_mask_ice_pass!
-
-# Recompute Phase-10 diagnostics from current state.
+# Recompute the diagnostics from the current state.
 #  - Refresh `H_grnd` (flotation diagnostic), then `f_grnd` via the
 #    CISM bilinear-interpolation subgrid scheme.
 #  - `z_srf` from `calc_z_srf!` (Pattyn 2017, Eq. 1 — max-of-grounded-
 #    or-floating with sub-grid `f_ice < 1` collapsing to bare bed/sea
 #    level). `z_base = z_srf - H_ice` per Fortran convention.
-#  - `dHidt = (H_now - H_prev) / dt`           — total step rate.
-#  - `dHidt_dyn = (H_after_dyn - H_prev) / dt` — dynamic-only rate
-#    (post-advection / mask-pass, before SMB or mb_resid).
 #  - `dist_grline` / `dist_margin` (m), `mask_grz`, `mask_bed`,
 #    `mask_frnt`. The grounding-zone half-width parameter
 #    `ytopo.dist_grz` is in km in the namelist; convert to metres for
 #    the kernel.
-function _update_diagnostics!(y::YelmoModel,
-                              H_prev::AbstractArray,
-                              H_after_dyn::AbstractArray,
-                              dt::Real)
+function _update_diagnostics!(y::YelmoModel)
     calc_H_grnd!(y.tpo.H_grnd, y.tpo.H_ice, y.bnd.z_bed, y.bnd.z_sl,
                  y.c.rho_ice, y.c.rho_sw)
 
@@ -634,21 +441,6 @@ function _update_diagnostics!(y::YelmoModel,
         # value is meaningful for both grounded (= z_bed) and floating
         # (= z_sl - rho_ice/rho_sw·H_ice) regimes.
         z_base[i, j, 1] = z_srf[i, j, 1] - H_ice[i, j, 1]
-    end
-
-    # Time-derivative tracking. Only recompute when there is a real
-    # step to differentiate over. The `update_diagnostics!(y)` entry
-    # point passes `dt = 0` (post-load refresh, no time advance); in
-    # that case preserve the loaded values so consumers like
-    # `calc_uz_3D_jac!` see the restart's `dHidt`.
-    if dt > 0
-        dHidt     = interior(y.tpo.dHidt)
-        dHidt_dyn = interior(y.tpo.dHidt_dyn)
-        inv_dt = 1.0 / dt
-        @inbounds for j in axes(H_ice, 2), i in axes(H_ice, 1)
-            dHidt[i, j, 1]     = (H_ice[i, j, 1]       - H_prev[i, j, 1]) * inv_dt
-            dHidt_dyn[i, j, 1] = (H_after_dyn[i, j, 1] - H_prev[i, j, 1]) * inv_dt
-        end
     end
 
     # Margin-aware horizontal gradients on staggered ac-faces.

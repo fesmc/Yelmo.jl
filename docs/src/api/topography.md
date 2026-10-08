@@ -8,6 +8,7 @@ narrative pipeline; this page is the API reference.
 ## Per-step orchestrator and diagnostics refresh
 
 ```@docs
+PCStage
 topo_step!
 update_diagnostics!
 ```
