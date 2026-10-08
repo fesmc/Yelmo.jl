@@ -12,7 +12,7 @@ using Yelmo
 using NCDatasets
 using Oceananigans
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 @testset "regions: RegionDiagnostics defaults to zeros" begin
     diag = RegionDiagnostics()

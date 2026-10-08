@@ -110,11 +110,16 @@ end
 
 # Snapshot a single 2D / 3D mat field from the fixture as a plain
 # `Array{Float64}` matching the model's interior shape.
-function _read_fixture_field(ds, name)
+# `nz`: interior ice levels of the model. The fixture's 3D ice fields
+# also hold the bed and surface levels (Fortran layout, `nz + 2`);
+# those are dropped to compare with the model interior.
+function _read_fixture_field(ds, name, nz)
     haskey(ds, name) || return nothing
     raw = ds[name][:, :, :]
     # Drop the trailing singleton time dim if present.
-    return Array{Float64}(raw)
+    data = Array{Float64}(raw)
+    size(data, 3) == 1 && return data
+    return Array(Yelmo.YelmoCore._strip_boundary_endpoints_3d(data, nz))
 end
 
 
@@ -131,15 +136,16 @@ end
 
     # Snapshot Mirror's mat fields BEFORE running mat_step!. These
     # are the references for the comparison.
+    nz = size(interior(y.mat.ATT), 3)
     ref = NCDataset(FIXTURE_PATH, "r") do ds
         (
-            ATT      = _read_fixture_field(ds, "ATT"),
-            ATT_bar  = _read_fixture_field(ds, "ATT_bar"),
-            enh      = _read_fixture_field(ds, "enh"),
-            enh_bar  = _read_fixture_field(ds, "enh_bar"),
-            visc     = _read_fixture_field(ds, "visc"),
-            visc_bar = _read_fixture_field(ds, "visc_bar"),
-            visc_int = _read_fixture_field(ds, "visc_int"),
+            ATT      = _read_fixture_field(ds, "ATT", nz),
+            ATT_bar  = _read_fixture_field(ds, "ATT_bar", nz),
+            enh      = _read_fixture_field(ds, "enh", nz),
+            enh_bar  = _read_fixture_field(ds, "enh_bar", nz),
+            visc     = _read_fixture_field(ds, "visc", nz),
+            visc_bar = _read_fixture_field(ds, "visc_bar", nz),
+            visc_int = _read_fixture_field(ds, "visc_int", nz),
         )
     end
 

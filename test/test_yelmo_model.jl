@@ -20,7 +20,7 @@ using Yelmo.YelmoPar: ydyn_params, ytherm_params
 using Oceananigans: interior
 using NCDatasets
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 @testset "YelmoModel v0 scaffolding" begin
     @assert isfile(RESTART_PATH) "Restart fixture not found at $(RESTART_PATH)"

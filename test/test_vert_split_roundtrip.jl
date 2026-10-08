@@ -28,7 +28,7 @@ using Yelmo
 using NCDatasets
 using Oceananigans.Fields: Center, Face, interior
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 @assert isfile(RESTART_PATH) "Restart fixture not found at $(RESTART_PATH)"
 

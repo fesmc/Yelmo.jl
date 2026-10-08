@@ -30,8 +30,7 @@ using Oceananigans: interior
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 using NCDatasets
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
-const NML_PATH     = "/Users/alrobi001/models/yelmox/output/16KM/test/yelmo_Greenland_rembo.nml"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 # rel-L∞ helpers — same shape as `test_yelmo_topo.jl`. `rel_linf_inner`
 # strips the outermost face row/col on every side, which is where the
@@ -420,11 +419,10 @@ end
     # at their restart-loaded values; `dyn_step!` only refreshes the
     # diagnostic outputs (driving stress, lateral stress, ice flux,
     # magnitudes, surface / basal slices, `f_vbvs`).
-    # The namelist is a v1.15 yelmox output: read it non-strictly (its
-    # legacy keys are dropped). The restart's saved `c_bed` has no
+    # The restart's saved `c_bed` has no
     # thermal scaling (`c_bed / N_eff = tan(cb_ref°)` exactly across all
     # grounded cells), which is what `calc_c_bed!` computes.
-    p_nml = Yelmo.YelmoPar.read_nml(NML_PATH; strict = false)
+    p_nml = Yelmo.YelmoPar.read_nml(NML_PATH)
     p = with_ported_options(Yelmo.YelmoPar.YelmoParameters("dyn-consistency";
             yelmo           = p_nml.yelmo,
             ytopo           = p_nml.ytopo,

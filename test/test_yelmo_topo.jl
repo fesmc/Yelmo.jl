@@ -37,7 +37,7 @@ function _topo_fe_step!(y, dt)
     return y
 end
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 # ------------------------------------------------------------------
 # Analytical advection — kernel-level
@@ -236,7 +236,6 @@ end
 # Real-restart smoke test: 5 steps, mass conservation accounting
 # ------------------------------------------------------------------
 
-const NML_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/yelmo_Greenland_rembo.nml"
 
 @testset "tpo: post-load diagnostic consistency" begin
     # Recompute every diagnostic tpo field from the loaded prognostic
