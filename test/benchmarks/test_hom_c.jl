@@ -90,7 +90,7 @@ const _SPEC = HOMCBenchmark(:C; L_km=80.0, dx_km=2.0)
 function _hom_c_yelmo_params()
     slope_bg_x, slope_bg_y = background_slope(_SPEC)
     return with_ported_options(YelmoParameters("hom_c";
-        yelmo = yelmo_params(phys_const = "ISMIPHOM", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
+        yelmo = yelmo_params(phys_const = "ISMIPHOM", experiment = "ISMIPHOM", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
         # The bed tilt, not contained in z_srf/z_bed (see header).
         ytopo = ytopo_params(slope_bg_x = slope_bg_x, slope_bg_y = slope_bg_y),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),

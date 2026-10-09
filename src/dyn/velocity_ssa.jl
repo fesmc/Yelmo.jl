@@ -63,202 +63,106 @@ export set_ssa_masks!, _assemble_ssa_matrix!,
        set_inactive_margins!, calc_basal_stress!,
        dump_ssa_assembly
 
-# Integer constants for `mask_frnt`. Mirror the Fortran values from
-# `solver_ssa_ac.f90:899-903`. `val_disabled = 5` is internal to
-# `set_ssa_masks` and used to mark a front position that should NOT
-# trigger lateral-BC mask=3.
-const _SSA_MASK_FRNT_ICE_FREE  = -1
-const _SSA_MASK_FRNT_FLT       = 1
-const _SSA_MASK_FRNT_MARINE    = 2
-const _SSA_MASK_FRNT_GRND      = 3
-const _SSA_MASK_FRNT_DISABLED  = 5
-
 """
-    set_ssa_masks!(ssa_mask_acx, ssa_mask_acy,
-                   mask_frnt, H_ice, f_ice, f_grnd, z_base, z_sl,
-                   dx::Real;
-                   use_ssa::Bool=true,
-                   lateral_bc::AbstractString="floating")
+    set_ssa_masks!(ssa_mask_acx, ssa_mask_acy, mask_frnt, f_ice, f_grnd;
+                   lateral_bc::AbstractString, use_ssa::Bool = true)
         -> (ssa_mask_acx, ssa_mask_acy)
 
-Set the SSA solver masks per Fortran convention. Mask values written
-to `ssa_mask_acx[i+1, j, 1]` (Fortran `ssa_mask_acx(i, j)`) and
-`ssa_mask_acy[i, j+1, 1]` (Fortran `ssa_mask_acy(i, j)`):
+Set the SSA solver masks on the faces. Fortran face `(i, j)` is written to
+`ssa_mask_acx[i+1, j, 1]` (and `ssa_mask_acy[i, j+1, 1]`):
 
-  - 0 = SSA inactive at this face (Dirichlet u = 0).
-  - 1 = active grounded / grounding-line (shelfy-stream).
-  - 2 = active floating (shelf).
-  - 3 = lateral boundary condition (calving front).
-  - 4 = deactivated lateral boundary; treated as inner SSA.
+  - 0 = no SSA (velocity zero), also a wall where floating ice meets
+        ice-free land.
+  - 1 = grounded ice or grounding line (shelfy-stream).
+  - 2 = floating ice (shelf).
+  - 3 = ice front with the lateral boundary condition.
+  - 4 = ice front treated as inner SSA (half drag in the assembler).
 
-If `use_ssa == false`, all faces stay 0 (everything Dirichlet).
+A face is active when either neighbour is fully covered (`f_ice == 1`; the
+model passes `f_ice_dyn`). Front faces (a front cell `mask_frnt > 0` next
+to an ice-free cell `mask_frnt < 0`) are set by `_front_face_mask` from
+`lateral_bc` ("none", "floating"/"float", "marine", "all"). With
+`use_ssa = false` all faces are 0.
 
-`lateral_bc` selects which fronts trigger the BC:
-  - "none"               : no fronts.
-  - "floating"|"float"    : only floating fronts.
-  - "marine"             : floating + grounded-marine.
-  - "all"                : all fronts.
-
-`z_base` and `z_sl` are accepted for Fortran signature parity but
-not actually consumed by the current Fortran logic (the ice-base
-slope check is gated on a parameter that defaults off). They are
-kept in the signature for forward compatibility.
-
-Port of `solver_ssa_ac.f90:854 set_ssa_masks` (lines 854-1104).
+Port of `solver_ssa_ac.f90:set_ssa_masks` (yelmo dev).
 """
-function set_ssa_masks!(ssa_mask_acx, ssa_mask_acy,
-                        mask_frnt, H_ice, f_ice, f_grnd, z_base, z_sl,
-                        dx::Real;
-                        use_ssa::Bool=true,
-                        lateral_bc::AbstractString="floating")
+function set_ssa_masks!(ssa_mask_acx, ssa_mask_acy, mask_frnt, f_ice, f_grnd;
+                        lateral_bc::AbstractString, use_ssa::Bool = true)
+    lateral_bc in ("none", "floating", "float", "marine", "all") ||
+        error("set_ssa_masks!: lateral_bc = \"$lateral_bc\" not recognized.")
 
     Mx = interior(ssa_mask_acx)
     My = interior(ssa_mask_acy)
-    MF = interior(mask_frnt)
-    Hi = interior(H_ice)
-    Fi = interior(f_ice)
-    Fg = interior(f_grnd)
-
-    Nx = size(Hi, 1)
-    Ny = size(Hi, 2)
-
-    Tx_top = topology(ssa_mask_acx.grid, 1)
-    Ty_top = topology(ssa_mask_acy.grid, 2)
-
-    # Initialise to all zero (Fortran lines 911-912).
     fill!(Mx, 0.0)
     fill!(My, 0.0)
-
     use_ssa || return ssa_mask_acx, ssa_mask_acy
 
-    # ---- Step 1: build mask_frnt_dyn from mask_frnt + lateral_bc ----
-    # Fortran lines 916-978. We allocate a small Int matrix here
-    # (size Nx*Ny is tiny relative to the matrix we'll assemble).
-    mask_frnt_dyn = Matrix{Int}(undef, Nx, Ny)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        mask_frnt_dyn[i, j] = Int(MF[i, j, 1])
-    end
+    MF = interior(mask_frnt)
+    Fi = interior(f_ice)
+    Fg = interior(f_grnd)
+    Nx, Ny = size(Fi, 1), size(Fi, 2)
+    Tx = topology(ssa_mask_acx.grid, 1)
+    Ty = topology(ssa_mask_acy.grid, 2)
+    lat = _lateral_bc_code(lateral_bc)
 
-    if lateral_bc == "none"
-        # Disable all front detection — treat all ice as inner SSA.
-        @inbounds for j in 1:Ny, i in 1:Nx
-            if mask_frnt_dyn[i, j] > 0
-                mask_frnt_dyn[i, j] = _SSA_MASK_FRNT_DISABLED
-            end
-        end
-    elseif lateral_bc == "floating" || lateral_bc == "float"
-        # Only floating fronts trigger BC; disable grounded + marine.
-        @inbounds for j in 1:Ny, i in 1:Nx
-            v = mask_frnt_dyn[i, j]
-            if v == _SSA_MASK_FRNT_GRND || v == _SSA_MASK_FRNT_MARINE
-                mask_frnt_dyn[i, j] = _SSA_MASK_FRNT_DISABLED
-            end
-        end
-    elseif lateral_bc == "marine"
-        # Disable only purely-grounded above-sea-level fronts.
-        @inbounds for j in 1:Ny, i in 1:Nx
-            if mask_frnt_dyn[i, j] == _SSA_MASK_FRNT_GRND
-                mask_frnt_dyn[i, j] = _SSA_MASK_FRNT_DISABLED
-            end
-        end
-    elseif lateral_bc == "all"
-        # No-op — all fronts already accurately diagnosed.
-    else
-        error("set_ssa_masks!: lateral_bc=\"$lateral_bc\" not recognized.")
-    end
-
-    # ---- Step 2: define ssa solver masks (Fortran lines 983-1098). ----
-    @inbounds for j in 1:Ny, i in 1:Nx
-        # Topology-dispatched neighbour indices: clamp under Bounded
-        # (Fortran "infinite" BC, lines 987-990), wrap under Periodic.
-        im1 = _neighbor_im1(i, Nx, Tx_top)
-        ip1 = _neighbor_ip1(i, Nx, Tx_top)
-        jm1 = _neighbor_jm1(j, Ny, Ty_top)
-        jp1 = _neighbor_jp1(j, Ny, Ty_top)
-
-        # ===== x-direction (acx face, between cell (i, j) and (ip1, j)) =====
-        # Fortran lines 995-1025.
-        if Fi[i, j, 1] == 1.0 || Fi[ip1, j, 1] == 1.0
-            # ac-node borders an ice-covered cell.
-            if Fg[i, j, 1] > 0.0 || Fg[ip1, j, 1] > 0.0
-                mval = 1   # shelfy-stream (grounded or GL)
-            else
-                mval = 2   # shelf
-            end
-
-            # SPECIAL CASE: floating ice next to ice-free land
-            # (Fortran lines 1009-1023).
-            if mval == 2
-                if Fg[i, j, 1] == 0.0 &&
-                   (Fg[ip1, j, 1] > 0.0 && Hi[ip1, j, 1] == 0.0)
-                    mval = 0
-                elseif (Fg[i, j, 1] > 0.0 && Hi[i, j, 1] == 0.0) &&
-                       Fg[ip1, j, 1] == 0.0
-                    mval = 0
-                end
-            end
-
-            # Write to the X-face slot for cell (i, j).
-            ip1f = _ip1_modular(i, Nx, Tx_top)
-            Mx[ip1f, j, 1] = Float64(mval)
-        end
-
-        # Overwrite for lateral BC (Fortran lines 1028-1034).
-        let mfd_ij  = mask_frnt_dyn[i, j],
-            mfd_ip1 = mask_frnt_dyn[ip1, j]
-            if (mfd_ij > 0 && mfd_ip1 < 0) ||
-               (mfd_ij < 0 && mfd_ip1 > 0)
-                ip1f = _ip1_modular(i, Nx, Tx_top)
-                Mx[ip1f, j, 1] = 3.0
-            end
-            # Deactivated lateral BC (Fortran lines 1037-1043).
-            if (mfd_ij == _SSA_MASK_FRNT_DISABLED && mfd_ip1 < 0) ||
-               (mfd_ij < 0 && mfd_ip1 == _SSA_MASK_FRNT_DISABLED)
-                ip1f = _ip1_modular(i, Nx, Tx_top)
-                Mx[ip1f, j, 1] = 4.0
-            end
-        end
-
-        # ===== y-direction (acy face, between cell (i, j) and (i, jp1)) =====
-        # Fortran lines 1047-1077.
-        if Fi[i, j, 1] == 1.0 || Fi[i, jp1, 1] == 1.0
-            if Fg[i, j, 1] > 0.0 || Fg[i, jp1, 1] > 0.0
-                mval = 1
-            else
-                mval = 2
-            end
-
-            if mval == 2
-                if Fg[i, j, 1] == 0.0 &&
-                   (Fg[i, jp1, 1] > 0.0 && Hi[i, jp1, 1] == 0.0)
-                    mval = 0
-                elseif (Fg[i, j, 1] > 0.0 && Hi[i, j, 1] == 0.0) &&
-                       Fg[i, jp1, 1] == 0.0
-                    mval = 0
-                end
-            end
-
-            jp1f = _jp1_modular(j, Ny, Ty_top)
-            My[i, jp1f, 1] = Float64(mval)
-        end
-
-        # Overwrite for lateral BC (Fortran lines 1080-1095).
-        let mfd_ij  = mask_frnt_dyn[i, j],
-            mfd_jp1 = mask_frnt_dyn[i, jp1]
-            if (mfd_ij > 0 && mfd_jp1 < 0) ||
-               (mfd_ij < 0 && mfd_jp1 > 0)
-                jp1f = _jp1_modular(j, Ny, Ty_top)
-                My[i, jp1f, 1] = 3.0
-            end
-            if (mfd_ij == _SSA_MASK_FRNT_DISABLED && mfd_jp1 < 0) ||
-               (mfd_ij < 0 && mfd_jp1 == _SSA_MASK_FRNT_DISABLED)
-                jp1f = _jp1_modular(j, Ny, Ty_top)
-                My[i, jp1f, 1] = 4.0
-            end
-        end
-    end
-
+    _set_ssa_masks_kernel!(Mx, My, MF, Fi, Fg, lat, Tx, Ty, Nx, Ny)
     return ssa_mask_acx, ssa_mask_acy
+end
+
+# `lateral_bc` as an integer for the kernel: 0 none, 1 floating, 2 marine, 3 all.
+_lateral_bc_code(lateral_bc::AbstractString) =
+    lateral_bc == "none"   ? 0 :
+    lateral_bc == "marine" ? 2 :
+    lateral_bc == "all"    ? 3 : 1
+
+function _set_ssa_masks_kernel!(Mx, My, MF, Fi, Fg, lat::Int,
+                                ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int
+                               ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ip1  = _neighbor_ip1(i, Nx, Tx)
+        jp1  = _neighbor_jp1(j, Ny, Ty)
+        ip1f = _ip1_modular(i, Nx, Tx)
+        jp1f = _jp1_modular(j, Ny, Ty)
+
+        # x-direction: face between (i, j) and (ip1, j).
+        if Fi[i, j, 1] == 1.0 || Fi[ip1, j, 1] == 1.0
+            Mx[ip1f, j, 1] = (Fg[i, j, 1] > 0.0 || Fg[ip1, j, 1] > 0.0) ? 1.0 : 2.0
+        end
+        m = _front_face_mask(MF[i, j, 1], MF[ip1, j, 1], lat)
+        m >= 0 && (Mx[ip1f, j, 1] = Float64(m))
+
+        # y-direction: face between (i, j) and (i, jp1).
+        if Fi[i, j, 1] == 1.0 || Fi[i, jp1, 1] == 1.0
+            My[i, jp1f, 1] = (Fg[i, j, 1] > 0.0 || Fg[i, jp1, 1] > 0.0) ? 1.0 : 2.0
+        end
+        m = _front_face_mask(MF[i, j, 1], MF[i, jp1, 1], lat)
+        m >= 0 && (My[i, jp1f, 1] = Float64(m))
+    end
+    return nothing
+end
+
+# SSA mask of the face between two cells with ice-front codes `a` and `b`
+# (`MASK_FRNT_*`): -1 not a front face, 0 wall, 3 lateral BC, 4 front
+# treated as inner SSA. A front is only floating or marine across a face
+# whose ice-free side is ocean: across ice-free land, floating ice ends at a
+# wall and grounded ice is a front grounded above sea level, whatever its
+# bed. Port of `solver_ssa_ac.f90:front_face_mask` (yelmo dev).
+@inline function _front_face_mask(a, b, lat::Int)
+    if a > 0 && b < 0
+        code_ice, code_free = a, b
+    elseif a < 0 && b > 0
+        code_ice, code_free = b, a
+    else
+        return -1
+    end
+    if code_free == MASK_FRNT_ICE_FREE_LAND
+        code_ice == MASK_FRNT_FLOAT && return 0
+        code_ice = MASK_FRNT_GRND
+    end
+    lat == 0 && return 4
+    lat == 1 && return code_ice == MASK_FRNT_FLOAT ? 3 : 4
+    lat == 2 && return (code_ice == MASK_FRNT_FLOAT || code_ice == MASK_FRNT_MARINE) ? 3 : 4
+    return 3
 end
 
 # ----------------------------------------------------------------------
@@ -284,8 +188,8 @@ end
 #     boundaries = :periodic_x   → (periodic, free-slip, periodic, free-slip)
 #     boundaries = :periodic_y   → (free-slip, periodic, free-slip, periodic)
 #     boundaries = :infinite     → (free-slip, free-slip, free-slip, free-slip)
+#     boundaries = :mask         → (free-slip, free-slip, free-slip, free-slip)
 #     boundaries = :zeros        → (no-slip, no-slip, no-slip, no-slip)
-#     default                    → (no-slip, no-slip, no-slip, no-slip)
 #
 #   bcs[1] = right (i = Nx)
 #   bcs[2] = top (j = Ny)
@@ -316,16 +220,14 @@ function _ssa_resolve_bcs(boundaries::Symbol)
         return (:periodic, :periodic, :periodic, :periodic)
     elseif boundaries == :periodic_x
         return (:periodic, :free_slip, :periodic, :free_slip)
-    elseif boundaries == :periodic_y || boundaries == :bounded_y_periodic ||
-           boundaries == :y_periodic
+    elseif boundaries == :periodic_y
         return (:free_slip, :periodic, :free_slip, :periodic)
-    elseif boundaries == :infinite
+    elseif boundaries == :infinite || boundaries == :mask
         return (:free_slip, :free_slip, :free_slip, :free_slip)
-    elseif boundaries == :zeros || boundaries == :bounded || boundaries == :no_slip
+    elseif boundaries == :zeros
         return (:no_slip, :no_slip, :no_slip, :no_slip)
     else
-        # Match the Fortran DEFAULT branch (no-slip).
-        return (:no_slip, :no_slip, :no_slip, :no_slip)
+        error("_ssa_resolve_bcs: unknown boundaries :$(boundaries).")
     end
 end
 
@@ -407,7 +309,7 @@ end
                           taud_acx, taud_acy,
                           taul_int_acx, taul_int_acy,
                           dx::Real, dy::Real;
-                          boundaries::Symbol=:bounded,
+                          boundaries::Symbol=:zeros,
                           lateral_bc::AbstractString="floating")
 
 Faithful port of `solver_ssa_ac.f90:240-826
@@ -466,7 +368,7 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                taud_acx, taud_acy,
                                taul_int_acx, taul_int_acy,
                                dx::Real, dy::Real;
-                               boundaries::Symbol=:bounded,
+                               boundaries::Symbol=:zeros,
                                lateral_bc::AbstractString="floating")
     # Wrapper: do halo fills + lift Field views to plain SubArrays +
     # look up topology, then dispatch to the parametric kernel below.
@@ -544,7 +446,7 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
                                        dx::Float64, dy::Float64,
                                        ::Type{Tx_top}, ::Type{Ty_top},
                                        Nx::Int, Ny::Int;
-                                       boundaries::Symbol=:bounded,
+                                       boundaries::Symbol=:zeros,
                                        lateral_bc::AbstractString="floating",
         ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
@@ -735,7 +637,10 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
 
         else
             # Fortran lines 475-540. === Inner SSA solution. ===
-            beta_now = Bx[ip1f_i, j, 1]
+            # A front face treated as inner SSA (mask 4) carries half the
+            # drag (Fortran w_face).
+            w_face   = ssa_mask_x == 4 ? 0.5 : 1.0
+            beta_now = w_face * Bx[ip1f_i, j, 1]
 
             # Index helpers for `N_ab` reads. Fortran `N_ab(i, j)` ↔
             # `Nab[i+1, j+1, 1]`. With wrapped (im1, jm1) this becomes
@@ -935,7 +840,8 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
 
         else
             # Fortran lines 758-822. === Inner SSA solution (uy). ===
-            beta_now = By[i, jp1f_j, 1]
+            w_face   = ssa_mask_y == 4 ? 0.5 : 1.0
+            beta_now = w_face * By[i, jp1f_j, 1]
 
             ip1f_x = _ip1_modular(i, Nx, Tx_top)
             jp1f_y = _jp1_modular(j, Ny, Ty_top)
@@ -1601,9 +1507,7 @@ function calc_velocity_ssa!(y)
 
     # 1. Compute SSA masks for this dyn step.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
-                   y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
-                   y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
-                   use_ssa = true,
+                   y.tpo.mask_frnt, y.tpo.f_ice_dyn, y.tpo.f_grnd;
                    lateral_bc = p_ydyn.ssa_lat_bc)
 
     # 2. Snapshot initial state for the post-iter convergence check.
@@ -1708,8 +1612,7 @@ function calc_velocity_ssa!(y)
                                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
 
         # ---- Step 6: stagger viscosity to ab-corner cache. ----
-        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
+        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int, y.tpo.f_ice_dyn)
 
         # ---- Step 7: assemble SSA matrix into COO buffers + RHS. ----
         # Dispatch on `ssa.method`:
@@ -1733,7 +1636,7 @@ function calc_velocity_ssa!(y)
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_quadratic
@@ -1748,7 +1651,7 @@ function calc_velocity_ssa!(y)
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_nonlinear
@@ -1841,25 +1744,6 @@ function calc_velocity_ssa!(y)
                        y.dyn.ux_b, y.dyn.uy_b)
 
     return y
-end
-
-# Resolve the boundaries Symbol used by `_assemble_ssa_matrix!` from
-# the model's grid topology. We don't have direct access to the
-# `boundaries` namelist value; map from grid topology pair instead.
-function _ssa_boundaries_symbol(y)
-    Tx = topology(y.g, 1)
-    Ty = topology(y.g, 2)
-    if Tx === Bounded && Ty === Bounded
-        return :bounded
-    elseif Tx === Bounded && Ty === Periodic
-        return :periodic_y
-    elseif Tx === Periodic && Ty === Bounded
-        return :periodic_x
-    elseif Tx === Periodic && Ty === Periodic
-        return :periodic
-    else
-        error("_ssa_boundaries_symbol: unsupported topology pair ($(Tx), $(Ty)).")
-    end
 end
 
 # ----------------------------------------------------------------------

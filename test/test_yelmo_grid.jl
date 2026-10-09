@@ -480,3 +480,31 @@ end
         end
     end
 end
+
+# ======================================================================
+# Domain boundaries from `yelmo.experiment` and the grid topology
+# ======================================================================
+
+@testset "grid: domain_boundaries and the YelmoModel topology" begin
+    _p(e) = with_ported_options(YelmoParameters("bnd"; yelmo = yelmo_params(experiment = e)))
+    @test domain_boundaries(_p("None"))       === :zeros
+    @test domain_boundaries(_p("EISMINT"))    === :zeros
+    @test domain_boundaries(_p("periodic-y")) === :zeros       # no Fortran case
+    @test domain_boundaries(_p("MISMIP+"))    === :MISMIP3D
+    @test domain_boundaries(_p("TROUGH-F17")) === :TROUGH
+    @test domain_boundaries(_p("ISMIPHOM"))   === :periodic
+    @test domain_boundaries(_p("periodic-x")) === :periodic_x
+    @test domain_boundaries(_p("infinite"))   === :infinite
+    @test domain_boundaries(_p("MASK_ICE"))   === :mask
+
+    xc = collect(500.0:1000.0:5500.0)
+    yc = collect(500.0:1000.0:3500.0)
+    # Topology from the experiment when not given.
+    y = YelmoModel(xc, yc, _p("MISMIP3D"))
+    @test topology(y.g, 1) === Bounded && topology(y.g, 2) === Periodic
+    y = YelmoModel(xc, yc, _p("None"))
+    @test topology(y.g, 1) === Bounded && topology(y.g, 2) === Bounded
+    # A given topology must match.
+    @test topology(YelmoModel(xc, yc, _p("ISMIPHOM"); boundaries = :periodic).g, 1) === Periodic
+    @test_throws ErrorException YelmoModel(xc, yc, _p("None"); boundaries = :periodic_y)
+end

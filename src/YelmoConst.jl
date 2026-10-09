@@ -25,6 +25,10 @@ Two flavours of constants live here:
     the integer parameters at the top of Fortran
     `physics/topography.f90`; consumers in `yelmo_data.f90` and
     diagnostic output expect these exact integer values.
+
+  - `MASK_FRNT_ICE_FREE` … `MASK_FRNT_GRND` (module-level `const`) —
+    enum values for the ice-front mask `tpo.mask_frnt` (Fortran
+    `yelmo_defs.f90`).
 """
 module YelmoConst
 
@@ -34,6 +38,8 @@ export YelmoConstants, yelmo_constants, earth_constants,
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
+export MASK_FRNT_ICE_FREE, MASK_FRNT_ICE_FREE_LAND, MASK_FRNT_NONE,
+       MASK_FRNT_FLOAT, MASK_FRNT_MARINE, MASK_FRNT_GRND
 
 # ---------------------------------------------------------------------------
 # Non-physical constants — bit-pattern enums for bnd.mask_ice cells.
@@ -56,6 +62,18 @@ const MASK_BED_GRLINE  = 4  # grounding line cell
 const MASK_BED_FLOAT   = 5  # fully ice-covered, floating
 const MASK_BED_ISLAND  = 6  # reserved (Fortran does not currently emit)
 const MASK_BED_PARTIAL = 7  # partially ice-covered cell
+
+# ---------------------------------------------------------------------------
+# Non-physical constants — ice-front mask (tpo.mask_frnt).
+# Integer values mirror Fortran yelmo_defs.f90 (MASK_FRNT_*).
+# ---------------------------------------------------------------------------
+
+const MASK_FRNT_ICE_FREE      = -1  # ice-free cell next to a front, ocean (bed below sea level)
+const MASK_FRNT_ICE_FREE_LAND = -2  # ice-free cell next to a front, land (bed at or above sea level)
+const MASK_FRNT_NONE          =  0  # not a front cell
+const MASK_FRNT_FLOAT         =  1  # floating ice front
+const MASK_FRNT_MARINE        =  2  # ice front grounded below sea level
+const MASK_FRNT_GRND          =  3  # ice front grounded above sea level
 
 # ---------------------------------------------------------------------------
 # Physical constants — instantiable per model.

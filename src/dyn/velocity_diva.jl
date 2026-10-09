@@ -639,9 +639,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
 
     # Step 1 — SSA masks.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
-                   y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
-                   y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
-                   use_ssa = true,
+                   y.tpo.mask_frnt, y.tpo.f_ice_dyn, y.tpo.f_grnd;
                    lateral_bc = p_ydyn.ssa_lat_bc)
 
     # Step 2 — snapshot for convergence check (DIVA uses ux_bar, not ux_b).
@@ -783,8 +781,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
 
         # Step 6c — corner-stagger viscosity (same as SSA).
-        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
+        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int, y.tpo.f_ice_dyn)
 
         # Step 7 — assemble SSA matrix with β_eff in place of β.
         # The kernel and inputs are otherwise identical to SSA.
@@ -802,7 +799,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_quadratic
@@ -817,7 +814,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_nonlinear

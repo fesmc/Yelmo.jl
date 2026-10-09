@@ -59,7 +59,7 @@ const _SPEC_LOCK = MISMIP3DBenchmark(:Stnd; dx_km=16.0)
 # exercise the same Yelmo.jl-side solver setup.
 function _mismip3d_lockstep_params()
     return with_ported_options(YelmoParameters("mismip3d_stnd_lockstep";
-        yelmo = yelmo_params(phys_const = "MISMIP3D", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_filter_vel = false, pc_n_redo = 10, pc_eps = 0.01),
+        yelmo = yelmo_params(phys_const = "MISMIP3D", experiment = "MISMIP3D", domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0, pc_filter_vel = false, pc_n_redo = 10, pc_eps = 0.01),
         ytopo = ytopo_params(),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(

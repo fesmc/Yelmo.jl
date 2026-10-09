@@ -105,7 +105,7 @@ const _SSA_ENERGY_KAPPA = 1.0e15
                                   taud_acx, taud_acy,
                                   taul_int_acx, taul_int_acy,
                                   dx::Real, dy::Real;
-                                  boundaries::Symbol=:bounded,
+                                  boundaries::Symbol=:zeros,
                                   lateral_bc::AbstractString="floating")
 
 Energy-functional sibling of `_assemble_ssa_matrix!`. Same signature
@@ -130,7 +130,7 @@ function _assemble_ssa_matrix_energy!(I_idx::Vector{Int},
                                        taud_acx, taud_acy,
                                        taul_int_acx, taul_int_acy,
                                        dx::Real, dy::Real;
-                                       boundaries::Symbol=:bounded,
+                                       boundaries::Symbol=:zeros,
                                        lateral_bc::AbstractString="floating")
     Tx_top = topology(visc_eff_int.grid, 1)
     Ty_top = topology(visc_eff_int.grid, 2)
@@ -197,7 +197,7 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
                                               dx::Float64, dy::Float64,
                                               ::Type{Tx_top}, ::Type{Ty_top},
                                               Nx::Int, Ny::Int;
-                                              boundaries::Symbol=:bounded,
+                                              boundaries::Symbol=:zeros,
                                               lateral_bc::AbstractString="floating",
         ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 

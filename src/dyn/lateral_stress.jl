@@ -13,13 +13,15 @@
 #
 # where `H_ocn = H_ice · (1 − min((z_srf − z_sl)/H_ice, 1))` is the
 # submerged ocean column at the cell. For a fully-grounded front above
-# sea level (`z_srf > z_sl`) the second term collapses to zero.
+# sea level (`z_srf > z_sl`) the second term collapses to zero. Across a
+# face to ice-free land (`mask_frnt == MASK_FRNT_ICE_FREE_LAND`) there is
+# no water back-pressure: `z_sl` is taken at the ice base.
 #
 # Indexing follows `calc_driving_stress!`: Fortran face `(i, j)` ↔
 # Julia `interior(taul_int_acx)[i+1, j, 1]` for x-faces (likewise y).
 #
-# Port of `velocity_general.f90:1450 calc_lateral_bc_stress_2D` and
-# `:1565 calc_lateral_bc_stress`.
+# Port of `velocity_general.f90:calc_lateral_bc_stress_2D` and
+# `calc_lateral_bc_stress` (yelmo dev).
 # ----------------------------------------------------------------------
 
 using Oceananigans.Fields: interior
@@ -56,10 +58,11 @@ straddle a front: `(mask_frnt[i,j] > 0 ∧ mask_frnt[i+1,j] < 0)` or the
 reverse. All non-front faces are zeroed. The acy direction is
 analogous.
 
-`mask_frnt` follows the encoding from `calc_ice_front!`:
-`+1`/`+3` = front, `-1` = ice-free margin neighbour, `0` = interior.
+`mask_frnt` follows the encoding from `calc_ice_front!` (`MASK_FRNT_*`):
+`> 0` front cell, `< 0` ice-free neighbour, `0` elsewhere. Across a face
+to ice-free land (`-2`) there is no water back-pressure (`z_sl = z_srf - H_ice`).
 
-Port of `velocity_general.f90:1450 calc_lateral_bc_stress_2D`.
+Port of `velocity_general.f90:calc_lateral_bc_stress_2D` (yelmo dev).
 """
 function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
                                     mask_frnt, H_ice, f_ice,
@@ -102,21 +105,21 @@ function calc_lateral_bc_stress_2D!(taul_int_acx, taul_int_acy,
         # x-direction: front face between (i, j) and (i+1, j).
         if (m0 > 0.0 && mE < 0.0) || (m0 < 0.0 && mE > 0.0)
             i1 = m0 < 0.0 ? i + 1 : i
-            Tx[ip1f, j, 1] = _calc_lateral_bc_stress(
-                Float64(H_ice[i1, j, 1]),
-                Float64(z_srf[i1, j, 1]),
-                Float64(z_sl[i1, j, 1]),
-                rho_ice_f, rho_sw_f, g_f)
+            H_now  = Float64(H_ice[i1, j, 1])
+            zs_now = Float64(z_srf[i1, j, 1])
+            zl_now = (m0 == MASK_FRNT_ICE_FREE_LAND || mE == MASK_FRNT_ICE_FREE_LAND) ? zs_now - H_now : Float64(z_sl[i1, j, 1])
+            Tx[ip1f, j, 1] = _calc_lateral_bc_stress(H_now, zs_now, zl_now,
+                                                     rho_ice_f, rho_sw_f, g_f)
         end
 
         # y-direction: front face between (i, j) and (i, j+1).
         if (m0 > 0.0 && mN < 0.0) || (m0 < 0.0 && mN > 0.0)
             j1 = m0 < 0.0 ? j + 1 : j
-            Ty[i, jp1f, 1] = _calc_lateral_bc_stress(
-                Float64(H_ice[i, j1, 1]),
-                Float64(z_srf[i, j1, 1]),
-                Float64(z_sl[i, j1, 1]),
-                rho_ice_f, rho_sw_f, g_f)
+            H_now  = Float64(H_ice[i, j1, 1])
+            zs_now = Float64(z_srf[i, j1, 1])
+            zl_now = (m0 == MASK_FRNT_ICE_FREE_LAND || mN == MASK_FRNT_ICE_FREE_LAND) ? zs_now - H_now : Float64(z_sl[i, j1, 1])
+            Ty[i, jp1f, 1] = _calc_lateral_bc_stress(H_now, zs_now, zl_now,
+                                                     rho_ice_f, rho_sw_f, g_f)
         end
     end
 

@@ -544,44 +544,33 @@ function _calc_visc_eff_int_kernel!(Vi, V, Vb, Vs, H, fi,
 end
 
 """
-    stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice) -> visc_ab
+    stagger_visc_aa_ab!(visc_ab, visc, f_ice) -> visc_ab
 
-Average a 2D aa-cell viscosity field `visc` to the 4-corner ab-grid.
-Only ice-covered neighbours (`f_ice == 1`) contribute; partial- or
-no-ice neighbours are skipped. If no neighbours are ice-covered, the
-corner value stays at 0.
+Stagger a 2D aa-cell viscosity `visc` to the cell corners (ab-nodes),
+where it multiplies the shear strain rate. A corner gets the mean of its
+four cells when all four are fully covered (`f_ice == 1`; the model passes
+`f_ice_dyn`) and zero otherwise: a corner touching an ice-free or partial
+cell lies on the traction-free margin, with no shear stress along the
+front.
 
-Port of `solver_ssa_ac.f90:1160 stagger_visc_aa_ab`.
+Port of `solver_ssa_ac.f90:stagger_visc_aa_ab` (yelmo dev).
 
 Indexing: `visc_ab` is a `Field((Face(), Face(), Center()), g)` with
 interior shape `(Nx+1, Ny+1, 1)`. The corner east-and-north of cell
 `(i, j)` (Fortran `visc_ab(i, j)`) is at array index `[i+1, j+1, 1]`.
-
-`H_ice` is unused in the kernel body but kept for signature parity
-(Fortran line 1167) — future work that gates corner contribution on
-H_ice may consume it.
+Neighbours follow the grid topology (clamped when Bounded).
 """
-function stagger_visc_aa_ab!(visc_ab, visc, H_ice, f_ice)
-    # Wrapper: lift Field views, look up topology, dispatch into the
-    # parametric kernel below. Same wrapper-+-parametric-kernel template
-    # as the dyn 3D refactors — `_neighbor_ip1` / `_jp1_modular` fold at
-    # compile time when `Tx_top` / `Ty_top` enter the kernel as `Type`
-    # parameters.
+function stagger_visc_aa_ab!(visc_ab, visc, f_ice)
     Vab = interior(visc_ab)
     V   = interior(visc)
     fi  = interior(f_ice)
-
     Nx, Ny = size(V, 1), size(V, 2)
-
     Tx_top = topology(visc_ab.grid, 1)
     Ty_top = topology(visc_ab.grid, 2)
-
     _stagger_visc_aa_ab_kernel!(Vab, V, fi, Tx_top, Ty_top, Nx, Ny)
     return visc_ab
 end
 
-# Compute kernel: parametric topology, plain arrays. Inner loop is
-# alloc-free.
 function _stagger_visc_aa_ab_kernel!(
         Vab, V, fi,
         ::Type{Tx_top}, ::Type{Ty_top}, Nx::Int, Ny::Int,
@@ -592,26 +581,10 @@ function _stagger_visc_aa_ab_kernel!(
     @inbounds for j in 1:Ny, i in 1:Nx
         ip1 = _neighbor_ip1(i, Nx, Tx_top)
         jp1 = _neighbor_jp1(j, Ny, Ty_top)
-        ip1f = _ip1_modular(i, Nx, Tx_top)
-        jp1f = _jp1_modular(j, Ny, Ty_top)
-
-        acc = 0.0
-        k_count = 0
-        if fi[i, j, 1] == 1.0
-            acc += V[i, j, 1]; k_count += 1
-        end
-        if fi[ip1, j, 1] == 1.0
-            acc += V[ip1, j, 1]; k_count += 1
-        end
-        if fi[i, jp1, 1] == 1.0
-            acc += V[i, jp1, 1]; k_count += 1
-        end
-        if fi[ip1, jp1, 1] == 1.0
-            acc += V[ip1, jp1, 1]; k_count += 1
-        end
-
-        if k_count > 0
-            Vab[ip1f, jp1f, 1] = acc / k_count
+        if fi[i, j, 1] == 1.0 && fi[ip1, j, 1] == 1.0 &&
+           fi[i, jp1, 1] == 1.0 && fi[ip1, jp1, 1] == 1.0
+            Vab[_ip1_modular(i, Nx, Tx_top), _jp1_modular(j, Ny, Ty_top), 1] =
+                0.25 * (V[i, j, 1] + V[ip1, j, 1] + V[i, jp1, 1] + V[ip1, jp1, 1])
         end
     end
     return nothing

@@ -58,7 +58,7 @@ function build_params(dt_method::Int; log_timestep::Bool = false)
     # Mirrors `test_trough_diva.jl::_trough_diva_params` plus
     # log_timestep + the adaptive PC machinery.
     return with_ported_options(YelmoParameters("trough_f17_$(dt_method)";
-        yelmo = yelmo_params(phys_const = "TROUGH",
+        yelmo = yelmo_params(phys_const = "TROUGH", experiment = "TROUGH-F17",
             dt_method     = dt_method,
             pc_method     = "AB-SAM",     # TROUGH spec values
             pc_controller = "PI42",

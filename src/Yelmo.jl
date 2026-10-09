@@ -104,7 +104,7 @@ export YelmoParameters
 export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        ytill_params, yhyd_params, ymat_params, ytrc_params, ytherm_params,
        yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
-export write_nml, write_defaults_nml, check_ported, with_ported_options
+export write_nml, write_defaults_nml, check_ported, with_ported_options, domain_boundaries
 export read_nml
 export compare
 
@@ -118,6 +118,8 @@ export XFACE_VARIABLES, YFACE_VARIABLES, ZFACE_VARIABLES, VERTICAL_DIMS
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
+export MASK_FRNT_ICE_FREE, MASK_FRNT_ICE_FREE_LAND, MASK_FRNT_NONE,
+       MASK_FRNT_FLOAT, MASK_FRNT_MARINE, MASK_FRNT_GRND
 export compare_state, StateComparison
 
 # YelmoMirrorCore
