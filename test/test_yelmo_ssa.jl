@@ -412,6 +412,9 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
             ssa_lat_bc     = "none",           # no calving fronts
             ssa_solver     = SSASolver(method = :residual, rtol = 1e-10, itmax = 200),
             ssa_iter_conv = ssa_tol, ssa_iter_max = picard_iter_max,
+            # No Picard relaxation: the linear problem (constant viscosity
+            # and beta) is then solved exactly in the first iteration.
+            ssa_iter_rel = 1.0,
             ssa_vel_max = 5000.0
         ),
         # external N_eff

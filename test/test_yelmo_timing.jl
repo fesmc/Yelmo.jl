@@ -45,7 +45,7 @@ function _eismint_moving_params(; timing::Bool)
                            eps_0=1e-6, taud_lim=2e5,
             ssa_solver = SSASolver(method = :residual),
             ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
-        ytill = ytill_params(method=-1),
+        ytill = ytill_params(method=1),   # Mirror spec; no sliding under SIA
         yhyd = yhyd_params(bkt_N_closure = 0, const_N = 1.0),
         ymat = ymat_params(n_glen=3.0, rf_const=1e-16, visc_min=1e3,
                             de_max=0.5, enh_method="shear3D",
@@ -60,7 +60,6 @@ end
 function _build_eismint_moving(b, p)
     y = YelmoModel(b, 0.0; p=p, boundaries=:bounded)
     fill!(interior(y.mat.ATT), p.ymat.rf_const)
-    fill!(interior(y.dyn.cb_ref), 0.0)
     fill!(interior(y.dyn.N_eff),  1.0)
     return y
 end

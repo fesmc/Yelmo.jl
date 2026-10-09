@@ -107,8 +107,8 @@ function _hom_c_yelmo_params()
             ssa_iter_conv = 1e-6, ssa_iter_rel = 0.7, ssa_iter_max = 100,
             ssa_vel_max = 5000.0
         ),
-        ytill = ytill_params(method = -1),
-        # No till / N_eff dependency under beta_method = -1.
+        # cb_ref online (Fortran par/yelmo_ISMIPHOM.nml); unused, beta is imposed.
+        ytill = ytill_params(method = 1),
         yhyd = yhyd_params(bkt_N_closure = -1, const_N = 1e7),
         # Glen flow law from HOM-C: A = 1e-16 Pa^-3 yr^-1, n = 3,
         # constant ATT (isothermal).
