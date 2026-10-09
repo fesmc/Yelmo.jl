@@ -554,8 +554,9 @@ end
     H_ice = interior(y.tpo.H_ice)
     fill!(H_ice, 1000.0)
 
-    fill!(interior(y.dyn.ux_bar), 0.0)
-    fill!(interior(y.dyn.uy_bar), 0.0)
+    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
+        fill!(interior(u), 0.0)   # current and previous (pc_filter_vel) velocity
+    end
 
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
 
@@ -955,8 +956,9 @@ end
     # Slab geometry; everything zeroed except the relaxation target.
     H_ice = interior(y.tpo.H_ice)
     fill!(H_ice, 500.0)
-    fill!(interior(y.dyn.ux_bar), 0.0)
-    fill!(interior(y.dyn.uy_bar), 0.0)
+    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
+        fill!(interior(u), 0.0)   # current and previous (pc_filter_vel) velocity
+    end
     fill!(interior(y.bnd.mask_ice),   Float64(MASK_ICE_DYNAMIC))
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
