@@ -412,9 +412,6 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
             ssa_lat_bc     = "none",           # no calving fronts
             ssa_solver     = SSASolver(method = :residual, rtol = 1e-10, itmax = 200),
             ssa_iter_conv = ssa_tol, ssa_iter_max = picard_iter_max,
-            # No Picard relaxation: the linear problem (constant viscosity
-            # and beta) is then solved exactly in the first iteration.
-            ssa_iter_rel = 1.0,
             ssa_vel_max = 5000.0
         ),
         # external N_eff
@@ -459,8 +456,11 @@ end
     # The Fortran SSA matrix has `-beta · u + lapl(u) = taud` on the
     # diagonal: with lapl(u) = 0 in plug flow, `u = -taud/beta`.
     expected_taud = rho_ice * g_acc * H * (-slope_x)   # [Pa]  (≈ -8927)
-    beta = 1e9                                          # [Pa·yr/m]
-    expected_ux = -expected_taud / beta                 # [m/yr] (positive: ice flows downhill)
+    # beta such that u is above the 1e-5 m/yr floor of the Picard
+    # convergence check (Fortran vel_tol): below it no face is checked
+    # and the loop stops after one (relaxed) iteration.
+    beta = 1e6                                          # [Pa·yr/m]
+    expected_ux = -expected_taud / beta                 # [m/yr] (≈ 8.9e-3, ice flows downhill)
 
     y = _run_ssa_plugflow(; Nx=Nx, Ny=Ny, dx=dx, H=H,
                            slope_x=slope_x, Nz=4,
@@ -702,7 +702,7 @@ end
     H = 1000.0
     slope_x = 0.001
     rho_ice = 910.0; g_acc = 9.81
-    beta = 1e9
+    beta = 1e6       # u ≈ 8.9e-3 m/yr, above the Picard check's 1e-5 m/yr floor
     expected_taud = rho_ice * g_acc * H * (-slope_x)
     expected_ux   = -expected_taud / beta
 
