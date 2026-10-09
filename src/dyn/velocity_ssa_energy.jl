@@ -104,7 +104,7 @@ const _SSA_ENERGY_KAPPA = 1.0e15
                                   H_ice, f_ice,
                                   taud_acx, taud_acy,
                                   taul_int_acx, taul_int_acy,
-                                  dx::Real, dy::Real, beta_min::Real;
+                                  dx::Real, dy::Real;
                                   boundaries::Symbol=:bounded,
                                   lateral_bc::AbstractString="floating")
 
@@ -129,7 +129,7 @@ function _assemble_ssa_matrix_energy!(I_idx::Vector{Int},
                                        H_ice, f_ice,
                                        taud_acx, taud_acy,
                                        taul_int_acx, taul_int_acy,
-                                       dx::Real, dy::Real, beta_min::Real;
+                                       dx::Real, dy::Real;
                                        boundaries::Symbol=:bounded,
                                        lateral_bc::AbstractString="floating")
     Tx_top = topology(visc_eff_int.grid, 1)
@@ -179,7 +179,7 @@ function _assemble_ssa_matrix_energy!(I_idx::Vector{Int},
     return _assemble_ssa_matrix_energy_kernel!(
         I_idx, J_idx, vals, b_vec, nnz_ref,
         Ux, Uy, Bx, By, Naa, Nab, Mx, My, Hi, Fi, Tdx, Tdy, Tlx, Tly,
-        Float64(dx), Float64(dy), Float64(beta_min),
+        Float64(dx), Float64(dy),
         Tx_top, Ty_top, Nx, Ny;
         boundaries = boundaries, lateral_bc = lateral_bc)
 end
@@ -195,7 +195,6 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
                                               Mx, My, Hi, Fi,
                                               Tdx, Tdy, Tlx, Tly,
                                               dx::Float64, dy::Float64,
-                                              beta_min::Float64,
                                               ::Type{Tx_top}, ::Type{Ty_top},
                                               Nx::Int, Ny::Int;
                                               boundaries::Symbol=:bounded,
@@ -347,9 +346,6 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
             ηH_S = Nab[ip1f_x, jm1_y,  1]
 
             β_now = Bx[ip1f_i, j, 1]
-            if ssa_mask_x == 1 && β_now == 0.0
-                β_now = beta_min
-            end
 
             # Diagonal: 4(ηH_W + ηH_E)·dy/dx + (ηH_S + ηH_N)·dx/dy + β·dx·dy
             v = 4.0 * (ηH_W + ηH_E) * s_dy_dx +
@@ -510,9 +506,6 @@ function _assemble_ssa_matrix_energy_kernel!(I_idx::Vector{Int},
             ηH_Ec = Nab[ip1f_x, jp1f_y, 1]
 
             β_now = By[i, jp1f_j, 1]
-            if ssa_mask_y == 1 && β_now == 0.0
-                β_now = beta_min
-            end
 
             # Diagonal: 4(ηH_Sc + ηH_Nc)·dx/dy + (ηH_Wc + ηH_Ec)·dy/dx + β·dx·dy
             v = 4.0 * (ηH_Sc + ηH_Nc) * s_dx_dy_2 +

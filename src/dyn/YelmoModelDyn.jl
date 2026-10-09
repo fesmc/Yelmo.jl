@@ -73,7 +73,7 @@ export dyn_step!,
        calc_driving_stress!, calc_driving_stress_gl!,
        calc_lateral_bc_stress_2D!,
        calc_ydyn_neff!,
-       calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!,
+       calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!, set_beta_min_grounded!,
        calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
        calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
@@ -87,7 +87,7 @@ export dyn_step!,
        _solve_ssa_linear!,
        picard_relax_visc!, picard_relax_vel!,
        picard_calc_convergence_l2, picard_calc_convergence_l1rel_matrix!,
-       set_inactive_margins!, calc_basal_stress!,
+       set_inactive_margins!, calc_basal_stress!, ssa_vel_clip!,
        dump_ssa_assembly
 
 include("driving_stress.jl")
@@ -218,6 +218,8 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     #     supplied value (Fortran convention — see yelmo_dynamics.f90:131).
     if y.p.ytill.method == 1
         interior(y.dyn.cb_ref) .= interior(y.dyn.cb_tgt)
+    elseif y.p.ytill.method == -1
+        _check_external_cb_ref(y)
     end
 
     # 5d. Basal drag coefficient `c_bed = c · N_eff`.
@@ -495,6 +497,26 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     end
 
     return y
+end
+
+# `ytill.method = -1`: cb_ref is set externally. Local zeros are allowed
+# (e.g. the free-slip centreline of SLAB-S06), but a negative value, or
+# zero everywhere, under grounded ice means it was not set (Fortran
+# yelmo_dynamics.f90:138-154).
+function _check_external_cb_ref(y)
+    cb = interior(y.dyn.cb_ref)
+    H, fg = interior(y.tpo.H_ice), interior(y.tpo.f_grnd)
+    n_grnd = n_pos = 0
+    @inbounds for k in eachindex(cb, H, fg)
+        (H[k] > 0 && fg[k] > 0) || continue
+        cb[k] < 0 && error("dyn_step!: cb_ref < 0 under grounded ice with ytill.method = -1.")
+        n_grnd += 1
+        cb[k] > 0 && (n_pos += 1)
+    end
+    (n_grnd > 0 && n_pos == 0) &&
+        error("dyn_step!: cb_ref = 0 everywhere under grounded ice with ytill.method = -1; " *
+              "cb_ref is set externally, was it initialized?")
+    return nothing
 end
 
 end # module YelmoModelDyn

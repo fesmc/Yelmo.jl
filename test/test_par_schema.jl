@@ -84,3 +84,15 @@ end
           YelmoConstants(:EISMINT)
     @test_throws ErrorException YelmoConstants(:bogus)
 end
+
+@testset "&ydyn / &ytill checks (Fortran ydyn_par_load)" begin
+    @test YelmoParameters("ok") isa YelmoParameters
+    @test_throws ErrorException YelmoParameters("bad"; ydyn = ydyn_params(solver = "l1l2"))
+    @test_throws ErrorException YelmoParameters("bad"; ydyn = ydyn_params(ssa_lat_bc = "slab"))
+    @test_throws ErrorException YelmoParameters("bad"; ydyn = ydyn_params(ssa_vel_max = 0.0))
+    @test_throws ErrorException YelmoParameters("bad"; ydyn = ydyn_params(ssa_vel_lim_method = "drag",
+                                                                         ssa_vel_lim_tau = 0.0))
+    @test_throws ErrorException YelmoParameters("bad"; ydyn = ydyn_params(frz_scale = true, frz_min = 2.0))
+    @test_throws ErrorException YelmoParameters("bad"; ytill = ytill_params(z0 = 300.0, z1 = 200.0))
+    @test_throws ErrorException YelmoParameters("bad"; ytill = ytill_params(cf_min = 1.0, cf_ref = 0.5))
+end

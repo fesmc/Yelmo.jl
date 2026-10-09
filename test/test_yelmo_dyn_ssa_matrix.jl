@@ -294,7 +294,7 @@ _coo_count_in_row(I_idx, nnz, row) = sum(I_idx[k] == row for k in 1:nnz)
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:bounded, lateral_bc="floating",
     )
 
@@ -350,7 +350,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:bounded,
     )
 
@@ -386,7 +386,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:bounded,
     )
 
@@ -430,7 +430,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:bounded,
     )
 
@@ -474,7 +474,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:periodic_y,
     )
 
@@ -518,7 +518,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:periodic_x,
     )
 
@@ -567,7 +567,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:periodic,
     )
 
@@ -596,7 +596,7 @@ end
         s.H_ice, s.f_ice,
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
-        dx, dx, 0.0;
+        dx, dx;
         boundaries=:periodic_y,
     )
 

@@ -25,7 +25,7 @@
 using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 
-export calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!
+export calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!, set_beta_min_grounded!
 
 # Linear bedrock-elevation scaling for cb_ref. Returns λ ∈ [0, 1] with
 # λ=0 below `z0` (low / no friction) and λ=1 above `z1` (full
@@ -1067,6 +1067,51 @@ function stagger_beta!(beta_acx, beta_acy, beta,
     _stagger_beta_min_floor_kernel!(bx_int, by_int, Float64(beta_min),
                                      Tx_top, Ty_top, Nx, Ny)
 
+    return beta_acx, beta_acy
+end
+
+"""
+    set_beta_min_grounded!(beta_acx, beta_acy, ssa_mask_acx, ssa_mask_acy, beta_min)
+        -> (beta_acx, beta_acy)
+
+Friction of the SSA matrix (`beta_acx/acy` for SSA, `beta_eff_acx/acy` for
+DIVA): `beta_min` on grounded faces (`ssa_mask = 1`) with `beta = 0`, so
+that the diagnosed basal stress `beta·u` is the friction the matrix uses.
+Applies to every `beta_method`. Warns if no inner grounded face (not on a
+non-periodic domain border) has `beta > 0` (Fortran
+`set_beta_min_grounded`, basal_dragging.f90:673).
+"""
+function set_beta_min_grounded!(beta_acx, beta_acy, ssa_mask_acx, ssa_mask_acy, beta_min::Real)
+    Bx, By = interior(beta_acx), interior(beta_acy)
+    Mx, My = interior(ssa_mask_acx), interior(ssa_mask_acy)
+    Nx, Ny = size(beta_acx.grid, 1), size(beta_acx.grid, 2)
+    Tx, Ty = topology(beta_acx.grid, 1), topology(beta_acy.grid, 2)
+    per_x, per_y = Tx === Periodic, Ty === Periodic
+    n_grnd_x = n_beta_x = n_grnd_y = n_beta_y = 0
+    @inbounds for j in 1:Ny, i in 1:Nx
+        (!per_x && (i == 1 || i == Nx)) && continue
+        (!per_y && (j == 1 || j == Ny)) && continue
+        ie = _ip1_modular(i, Nx, Tx)     # east face of cell i
+        jn = _jp1_modular(j, Ny, Ty)     # north face of cell j
+        if Mx[ie, j, 1] == 1
+            n_grnd_x += 1
+            Bx[ie, j, 1] > 0 && (n_beta_x += 1)
+        end
+        if My[i, jn, 1] == 1
+            n_grnd_y += 1
+            By[i, jn, 1] > 0 && (n_beta_y += 1)
+        end
+    end
+    if (n_grnd_x > 0 && n_beta_x == 0) || (n_grnd_y > 0 && n_beta_y == 0)
+        @warn "set_beta_min_grounded!: beta appears to be zero everywhere for grounded ice; " *
+              "beta = beta_min is used there." n_grnd_x n_beta_x n_grnd_y n_beta_y
+    end
+    bm = Float64(beta_min)
+    for (B, M) in ((Bx, Mx), (By, My))
+        @inbounds for k in axes(B, 3), j in axes(B, 2), i in axes(B, 1)
+            (M[i, j, k] == 1 && B[i, j, k] == 0.0) && (B[i, j, k] = bm)
+        end
+    end
     return beta_acx, beta_acy
 end
 

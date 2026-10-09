@@ -533,6 +533,7 @@ struct YelmoParameters
     function YelmoParameters(name, yelmo, ytopo, ycalv, ydyn, ytill, yhyd, ymat, ytrc,
                              ytherm, yelmo_masks, yelmo_init_topo, yelmo_data)
         _check_yelmo_params(yelmo)
+        _check_ydyn_params(ydyn, ytill)
         return new(name, yelmo, ytopo, ycalv, ydyn, ytill, yhyd, ymat, ytrc, ytherm,
                    yelmo_masks, yelmo_init_topo, yelmo_data)
     end
@@ -557,6 +558,26 @@ function _check_yelmo_params(p::YelmoParams)
         push!(bad, "pc_eta_H_min = $(p.pc_eta_H_min), pc_eta_u_min = $(p.pc_eta_u_min) must be >= 0")
     0 <= p.pc_eta_trim < 0.5 || push!(bad, "pc_eta_trim = $(p.pc_eta_trim) must be in [0, 0.5)")
     isempty(bad) || error("YelmoParameters: invalid &yelmo parameters:\n  " * join(bad, "\n  "))
+    return nothing
+end
+
+# The checks of `&ydyn` and `&ytill` that Fortran `ydyn_par_load` makes
+# (yelmo_dynamics.f90:835-867). `ssa_solver` is checked by `SSASolver`.
+function _check_ydyn_params(p::YdynParams, t::YtillParams)
+    bad = String[]
+    _enum(k, v, ok) = v in ok || push!(bad, "ydyn.$(k) = $(repr(v)) (options: $(join(ok, ", ")))")
+    _enum("solver",             p.solver,             ("fixed", "sia", "ssa", "hybrid", "diva", "diva-noslip"))
+    _enum("ssa_lat_bc",         p.ssa_lat_bc,         ("all", "marine", "floating", "float", "none"))
+    _enum("ssa_vel_lim_method", p.ssa_vel_lim_method, ("clip", "drag"))
+    p.ssa_vel_max > 0 || push!(bad, "ydyn.ssa_vel_max = $(p.ssa_vel_max) must be > 0")
+    (p.ssa_vel_lim_method != "drag" || p.ssa_vel_lim_tau > 0) ||
+        push!(bad, "ydyn.ssa_vel_lim_method = \"drag\" requires ssa_vel_lim_tau > 0 (got $(p.ssa_vel_lim_tau))")
+    (!p.frz_scale || (p.frz_efold > 0 && 0 < p.frz_min <= 1)) ||
+        push!(bad, "ydyn.frz_scale requires frz_efold > 0 and 0 < frz_min <= 1 " *
+                   "(got $(p.frz_efold), $(p.frz_min))")
+    t.z0 < t.z1 || push!(bad, "ytill.z0 = $(t.z0) must be < ytill.z1 = $(t.z1)")
+    t.cf_min <= t.cf_ref || push!(bad, "ytill.cf_min = $(t.cf_min) must be <= ytill.cf_ref = $(t.cf_ref)")
+    isempty(bad) || error("YelmoParameters: invalid &ydyn / &ytill parameters:\n  " * join(bad, "\n  "))
     return nothing
 end
 
