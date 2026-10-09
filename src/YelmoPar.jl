@@ -41,6 +41,7 @@ export write_nml, write_defaults_nml
 export read_nml
 export compare
 export check_ported, with_ported_options
+export domain_boundaries
 
 # ---------------------------------------------------------------------------
 # &yelmo  (top-level Yelmo group)
@@ -579,6 +580,35 @@ function _check_ydyn_params(p::YdynParams, t::YtillParams)
     t.cf_min <= t.cf_ref || push!(bad, "ytill.cf_min = $(t.cf_min) must be <= ytill.cf_ref = $(t.cf_ref)")
     isempty(bad) || error("YelmoParameters: invalid &ydyn / &ytill parameters:\n  " * join(bad, "\n  "))
     return nothing
+end
+
+"""
+    domain_boundaries(p::YelmoParameters) -> Symbol
+
+Boundary treatment of the domain borders, set by `yelmo.experiment` as in
+Fortran `yelmo_init` (yelmo_ice.f90:898-966, `tpo/dyn/thrm%par%boundaries`):
+
+| `experiment`                                          | boundaries    |
+|:------------------------------------------------------|:--------------|
+| `"MISMIP3D"`, `"MISMIP+"`                             | `:MISMIP3D`   |
+| `"TROUGH-F17"`                                        | `:TROUGH`     |
+| `"SLAB"`, `"ISMIPHOM"`, `"slab"`, `"periodic"`, `"periodic-xy"` | `:periodic` |
+| `"periodic-x"`                                        | `:periodic_x` |
+| `"infinite"`                                          | `:infinite`   |
+| `"MASK_ICE"`                                          | `:mask`       |
+| anything else (`"None"`, `"EISMINT"`, ...)            | `:zeros`      |
+
+The grid topology of a `YelmoModel` must match it (see `boundaries_topology`).
+"""
+function domain_boundaries(p::YelmoParameters)
+    e = p.yelmo.experiment
+    e in ("MISMIP3D", "MISMIP+")                                  && return :MISMIP3D
+    e == "TROUGH-F17"                                             && return :TROUGH
+    e in ("SLAB", "ISMIPHOM", "slab", "periodic", "periodic-xy")  && return :periodic
+    e == "periodic-x"                                             && return :periodic_x
+    e == "infinite"                                               && return :infinite
+    e == "MASK_ICE"                                               && return :mask
+    return :zeros
 end
 
 # Namelist group order (= Fortran yelmo_defaults.nml).

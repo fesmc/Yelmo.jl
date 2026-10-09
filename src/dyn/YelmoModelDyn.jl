@@ -54,6 +54,7 @@ using Oceananigans.BoundaryConditions: fill_halo_regions!
 
 using ..YelmoCore: AbstractYelmoModel, YelmoModel
 using ..YelmoSolvers: Solver, SSASolver, resolve_linear_method
+using ..YelmoPar: domain_boundaries
 using ..YelmoIntegration: vert_int_trapz_boundary!
 using ..YelmoTiming: @timed_section
 

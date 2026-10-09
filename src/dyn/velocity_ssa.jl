@@ -284,8 +284,8 @@ end
 #     boundaries = :periodic_x   → (periodic, free-slip, periodic, free-slip)
 #     boundaries = :periodic_y   → (free-slip, periodic, free-slip, periodic)
 #     boundaries = :infinite     → (free-slip, free-slip, free-slip, free-slip)
+#     boundaries = :mask         → (free-slip, free-slip, free-slip, free-slip)
 #     boundaries = :zeros        → (no-slip, no-slip, no-slip, no-slip)
-#     default                    → (no-slip, no-slip, no-slip, no-slip)
 #
 #   bcs[1] = right (i = Nx)
 #   bcs[2] = top (j = Ny)
@@ -316,16 +316,14 @@ function _ssa_resolve_bcs(boundaries::Symbol)
         return (:periodic, :periodic, :periodic, :periodic)
     elseif boundaries == :periodic_x
         return (:periodic, :free_slip, :periodic, :free_slip)
-    elseif boundaries == :periodic_y || boundaries == :bounded_y_periodic ||
-           boundaries == :y_periodic
+    elseif boundaries == :periodic_y
         return (:free_slip, :periodic, :free_slip, :periodic)
-    elseif boundaries == :infinite
+    elseif boundaries == :infinite || boundaries == :mask
         return (:free_slip, :free_slip, :free_slip, :free_slip)
-    elseif boundaries == :zeros || boundaries == :bounded || boundaries == :no_slip
+    elseif boundaries == :zeros
         return (:no_slip, :no_slip, :no_slip, :no_slip)
     else
-        # Match the Fortran DEFAULT branch (no-slip).
-        return (:no_slip, :no_slip, :no_slip, :no_slip)
+        error("_ssa_resolve_bcs: unknown boundaries :$(boundaries).")
     end
 end
 
@@ -407,7 +405,7 @@ end
                           taud_acx, taud_acy,
                           taul_int_acx, taul_int_acy,
                           dx::Real, dy::Real;
-                          boundaries::Symbol=:bounded,
+                          boundaries::Symbol=:zeros,
                           lateral_bc::AbstractString="floating")
 
 Faithful port of `solver_ssa_ac.f90:240-826
@@ -466,7 +464,7 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                taud_acx, taud_acy,
                                taul_int_acx, taul_int_acy,
                                dx::Real, dy::Real;
-                               boundaries::Symbol=:bounded,
+                               boundaries::Symbol=:zeros,
                                lateral_bc::AbstractString="floating")
     # Wrapper: do halo fills + lift Field views to plain SubArrays +
     # look up topology, then dispatch to the parametric kernel below.
@@ -544,7 +542,7 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
                                        dx::Float64, dy::Float64,
                                        ::Type{Tx_top}, ::Type{Ty_top},
                                        Nx::Int, Ny::Int;
-                                       boundaries::Symbol=:bounded,
+                                       boundaries::Symbol=:zeros,
                                        lateral_bc::AbstractString="floating",
         ) where {Tx_top<:AbstractTopology, Ty_top<:AbstractTopology}
 
@@ -1733,7 +1731,7 @@ function calc_velocity_ssa!(y)
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_quadratic
@@ -1748,7 +1746,7 @@ function calc_velocity_ssa!(y)
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_nonlinear
@@ -1841,25 +1839,6 @@ function calc_velocity_ssa!(y)
                        y.dyn.ux_b, y.dyn.uy_b)
 
     return y
-end
-
-# Resolve the boundaries Symbol used by `_assemble_ssa_matrix!` from
-# the model's grid topology. We don't have direct access to the
-# `boundaries` namelist value; map from grid topology pair instead.
-function _ssa_boundaries_symbol(y)
-    Tx = topology(y.g, 1)
-    Ty = topology(y.g, 2)
-    if Tx === Bounded && Ty === Bounded
-        return :bounded
-    elseif Tx === Bounded && Ty === Periodic
-        return :periodic_y
-    elseif Tx === Periodic && Ty === Bounded
-        return :periodic_x
-    elseif Tx === Periodic && Ty === Periodic
-        return :periodic
-    else
-        error("_ssa_boundaries_symbol: unsupported topology pair ($(Tx), $(Ty)).")
-    end
 end
 
 # ----------------------------------------------------------------------

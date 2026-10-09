@@ -15,7 +15,7 @@ using ..YelmoConst: MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
                     MASK_BED_ISLAND, MASK_BED_PARTIAL
-using ..YelmoPar: YelmoParameters, check_ported, with_ported_options
+using ..YelmoPar: YelmoParameters, check_ported, with_ported_options, domain_boundaries
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
 using ..YelmoHooks: YelmoHooks
@@ -228,6 +228,39 @@ function resolve_boundaries(boundaries)
           "Use a Symbol (:bounded, :periodic, :periodic_x, :periodic_y), " *
           "a 2-tuple of Symbols (e.g. (:periodic, :bounded)), or a tuple " *
           "of Oceananigans topology types (e.g. (Bounded, Periodic)).")
+end
+
+"""
+    boundaries_topology(b::Symbol) -> Symbol
+
+Grid topology ([`resolve_boundaries`](@ref) keyword) of the boundary
+treatment `b` from [`domain_boundaries`](@ref): the periodic directions of
+`b` wrap, all others are `Bounded`.
+"""
+function boundaries_topology(b::Symbol)
+    b in (:zeros, :infinite, :mask) && return :bounded
+    b in (:MISMIP3D, :TROUGH)       && return :periodic_y
+    b === :periodic                 && return :periodic
+    b === :periodic_x               && return :periodic_x
+    error("boundaries_topology: unknown boundaries :$(b).")
+end
+
+# Grid topology of a model whose `boundaries` keyword is not given: from the
+# parameters' experiment, or Bounded for other parameter types.
+_default_topology(p::YelmoParameters) = boundaries_topology(domain_boundaries(p))
+_default_topology(p) = :bounded
+
+# The grid topology must match the boundaries set by `yelmo.experiment`.
+function _check_boundaries(p::YelmoParameters, g)
+    b    = domain_boundaries(p)
+    want = resolve_boundaries(boundaries_topology(b))
+    have = (topology(g, 1), topology(g, 2))
+    want == have || error(
+        "YelmoModel: yelmo.experiment = $(repr(p.yelmo.experiment)) sets boundaries :$(b), " *
+        "which need a $(want) grid, but the grid is $(have). Leave out the `boundaries` " *
+        "keyword (the topology follows from the parameters) or pass " *
+        "`boundaries = :$(boundaries_topology(b))`.")
+    return nothing
 end
 
 @inline _topology_from(t::Symbol) = t === :periodic ? Periodic :
@@ -934,7 +967,10 @@ mutable struct YelmoModel{P, B, DT, DY, M, TH, TP} <: AbstractYelmoModel
     function YelmoModel(alias, rundir, time, p::P, c, g, gt, gr, v,
                         bnd::B, dta::DT, dyn::DY, mat::M, thrm::TH, tpo::TP,
                         timer, hooks) where {P, B, DT, DY, M, TH, TP}
-        p isa YelmoParameters && check_ported(p)
+        if p isa YelmoParameters
+            check_ported(p)
+            _check_boundaries(p, g)
+        end
         return new{P, B, DT, DY, M, TH, TP}(alias, rundir, time, p, c, g, gt, gr, v,
                                             bnd, dta, dyn, mat, thrm, tpo, timer, hooks)
     end
@@ -1235,7 +1271,7 @@ function YelmoModel(restart_file::String, time::Float64;
                     rundir::String = "./",
                     p = nothing,
                     c::Union{Nothing,YelmoConstants} = nothing,
-                    boundaries = :bounded,
+                    boundaries = nothing,
                     groups::NTuple{N,Symbol} where N = _ALL_MODEL_GROUPS,
                     strict::Bool = true,
                     target_grid_file::Union{Nothing,AbstractString} = nothing,
@@ -1248,6 +1284,7 @@ function YelmoModel(restart_file::String, time::Float64;
         p = with_ported_options(YelmoParameters(alias))
     end
     c === nothing && (c = _default_constants(p))
+    boundaries === nothing && (boundaries = _default_topology(p))
 
     # Build grids: if a target_grid_file is provided, the model lives
     # on the target horizontal grid (vertical axis from restart) and
@@ -1324,8 +1361,9 @@ Callers are expected to populate boundary/topography fields (`bnd.z_bed`,
   - `time` (default `0.0`): initial model time.
   - `alias` (default `"ymodel1"`), `rundir` (default `"./"`).
   - `c::YelmoConstants` (default `YelmoConstants(p.yelmo.phys_const)`).
-  - `boundaries` (default `:bounded`): horizontal topology, see
-    [`resolve_boundaries`](@ref).
+  - `boundaries`: horizontal topology, see [`resolve_boundaries`](@ref).
+    By default it follows from `yelmo.experiment` ([`domain_boundaries`](@ref));
+    a given topology must match it.
 """
 function YelmoModel(xc::AbstractVector, yc::AbstractVector,
                     p::YelmoParameters;
@@ -1333,9 +1371,10 @@ function YelmoModel(xc::AbstractVector, yc::AbstractVector,
                     alias::String = "ymodel1",
                     rundir::String = "./",
                     c::Union{Nothing,YelmoConstants} = nothing,
-                    boundaries = :bounded)
+                    boundaries = nothing)
 
     c === nothing && (c = _default_constants(p))
+    boundaries === nothing && (boundaries = _default_topology(p))
 
     # Ice and rock vertical axes recovered from the parameters.
     zeta_aa_ice, _ = calc_zeta(p.yelmo.nz_aa, p.yelmo.zeta_scale, p.yelmo.zeta_exp)
@@ -1383,7 +1422,7 @@ function YelmoModel(gridfile::AbstractString, p::YelmoParameters;
                     alias::String = "ymodel1",
                     rundir::String = "./",
                     c::Union{Nothing,YelmoConstants} = nothing,
-                    boundaries = :bounded)
+                    boundaries = nothing)
 
     xc, yc = NCDataset(gridfile) do ds
         x = Vector{Float64}(ds[xname][:])

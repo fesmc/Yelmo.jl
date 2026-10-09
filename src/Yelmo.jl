@@ -104,7 +104,7 @@ export YelmoParameters
 export yelmo_params, ytopo_params, ycalv_params, ydyn_params,
        ytill_params, yhyd_params, ymat_params, ytrc_params, ytherm_params,
        yelmo_masks_params, yelmo_init_topo_params, yelmo_data_params
-export write_nml, write_defaults_nml, check_ported, with_ported_options
+export write_nml, write_defaults_nml, check_ported, with_ported_options, domain_boundaries
 export read_nml
 export compare
 

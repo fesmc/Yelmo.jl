@@ -802,7 +802,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_quadratic
@@ -817,7 +817,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
                 dx, dy;
-                boundaries = _ssa_boundaries_symbol(y),
+                boundaries = domain_boundaries(y.p),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
         elseif ssa.method === :energy_nonlinear
