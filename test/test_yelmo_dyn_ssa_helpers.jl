@@ -642,3 +642,16 @@ end
     f  = Field((Face(), Face(), Center()), g)
     @test size(interior(f)) == (Nx + 1, Ny + 1, 1)
 end
+
+@testset "set_beta_min_grounded!: beta_min at grounded faces with beta = 0" begin
+    g  = _bounded_2d(4, 4)
+    bx = XFaceField(g); by = YFaceField(g)
+    mx = XFaceField(g); my = YFaceField(g)
+    fill!(interior(bx), 5.0); fill!(interior(by), 0.0)
+    fill!(interior(mx), 1.0); fill!(interior(my), 2.0)   # x grounded, y floating
+    interior(bx)[3, 2, 1] = 0.0
+    Yelmo.YelmoModelDyn.set_beta_min_grounded!(bx, by, mx, my, 1e-3)
+    @test interior(bx)[3, 2, 1] == 1e-3                 # grounded, beta = 0
+    @test count(==(5.0), interior(bx)) == length(interior(bx)) - 1
+    @test all(==(0.0), interior(by))                     # not grounded: unchanged
+end

@@ -9,7 +9,8 @@
 #
 # Rows are buffered in memory and written to `<rundir>/yelmo_timesteps.nc`
 # by `close(log)` (one NetCDF access per row would cost ~28 ms each).
-# `close` can be called repeatedly: later calls append.
+# The first `close` of a log creates the file (replacing one of an earlier
+# run, as Fortran does at init); later calls append.
 # ----------------------------------------------------------------------
 
 using NCDatasets
@@ -44,6 +45,7 @@ mutable struct TimestepLog
     yc::Vector{Float64}          # [m]
     time::Vector{Float64}
     cols::NamedTuple             # one buffer per `TIMESTEP_LOG_VARS` entry
+    created::Bool                # file written by this log
 end
 
 """
@@ -59,7 +61,7 @@ function init_timestep_log!(y; filename::String = "yelmo_timesteps.nc")
     return TimestepLog(joinpath(rundir, filename), Float64(y.p.yelmo.pc_eps),
                        collect(Float64, xnodes(y.g, Center())),
                        collect(Float64, ynodes(y.g, Center())),
-                       Float64[], cols)
+                       Float64[], cols, false)
 end
 
 """
@@ -83,7 +85,7 @@ end
 function Base.close(log::TimestepLog)
     n = length(log.time)
     n == 0 && return log
-    isfile(log.path) || _create_timestep_file(log)
+    log.created || (_create_timestep_file(log); log.created = true)
     NCDataset(log.path, "a") do ds
         n0 = length(ds["time"])
         r = (n0 + 1):(n0 + n)

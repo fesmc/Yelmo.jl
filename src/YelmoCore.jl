@@ -1000,6 +1000,11 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
     bnd  = _alloc_group(v_meta.bnd,  g, gt, gr)
     dta  = _alloc_group(v_meta.dta,  g, gt, gr)
     dyn  = _alloc_group(v_meta.dyn,  g, gt, gr)
+    # Non-zero initial values of Fortran `ydyn_alloc` (yelmo_dynamics.f90:1089):
+    # the first Picard iteration relaxes the viscosity, in log space,
+    # towards the value of the previous call.
+    fill!(interior(dyn.visc_eff),     1e3)
+    fill!(interior(dyn.visc_eff_int), 1e3)
     mat  = _alloc_group(v_meta.mat,  g, gt, gr)
     thrm = _alloc_group(v_meta.thrm, g, gt, gr)
     tpo  = _alloc_group(v_meta.tpo,  g, gt, gr)
@@ -1053,6 +1058,11 @@ function _alloc_yelmo_groups(g, gt, gr, v_meta)
         ssa_b_vec                  = Vector{Float64}(undef, N_rows),
         ssa_x_vec                  = Vector{Float64}(undef, N_rows),
         ssa_iter_now               = Ref{Int}(0),
+        # Friction of the SSA matrix and of taub: beta_acx/acy with beta_min
+        # at grounded faces with beta = 0 (Fortran `beta_ssa_acx/acy`), a
+        # copy so that an imposed beta is not modified.
+        ssa_beta_acx               = XFaceField(g),
+        ssa_beta_acy               = YFaceField(g),
         # Linear solver iterations / failures of the last velocity solve
         # (summed over Picard iterations) and faces at the velocity limit
         # after it (Fortran `ssa_lin_iter`, `ssa_lin_fail`, `ssa_lim_n`).

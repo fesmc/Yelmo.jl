@@ -653,7 +653,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
     fill!(interior(y.dyn.ssa_err_acy), 1.0)
 
     zeta_c = znodes(y.gt, Center())
-    set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice_dyn)
+    # (No `set_inactive_margins!`: disabled in Fortran DIVA, velocity_diva.f90:185.)
 
     iter_now = 0
     n_resid_max = length(sc.ssa_residuals)
@@ -740,9 +740,9 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
         calc_F_integral_2D!(sc.diva_F2, y.dyn.visc_eff,
                             y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c; n = 2.0)
 
-        # Step 5 — beta and beta_eff on aa-cells (uses CURRENT depth-averaged
-        # velocity for the friction-law nonlinearity).
-        calc_beta!(y.dyn.beta, y.dyn.c_bed, y.dyn.ux_bar, y.dyn.uy_bar,
+        # Step 5 — beta and beta_eff on aa-cells; the friction law uses the
+        # basal velocity of the previous iteration (Fortran velocity_diva.f90:264).
+        calc_beta!(y.dyn.beta, y.dyn.c_bed, y.dyn.ux_b, y.dyn.uy_b,
                    y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, y.tpo.H_grnd, y.tpo.f_grnd,
                    y.bnd.z_bed, y.bnd.z_sl;
                    beta_method   = p_ydyn.beta_method,
@@ -777,6 +777,11 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                           beta_gl_stag = p_ydyn.beta_gl_stag,
                           beta_min     = p_ydyn.beta_min)
 
+        # Step 6b' — friction of the matrix (and of taub): beta_min at
+        # grounded faces with beta_eff = 0 (Fortran velocity_diva.f90:283).
+        set_beta_min_grounded!(sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
+                               y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
+
         # Step 6c — corner-stagger viscosity (same as SSA).
         stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
                             y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
@@ -796,7 +801,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-                dx, dy, p_ydyn.beta_min;
+                dx, dy;
                 boundaries = _ssa_boundaries_symbol(y),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
@@ -811,7 +816,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                 y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-                dx, dy, p_ydyn.beta_min;
+                dx, dy;
                 boundaries = _ssa_boundaries_symbol(y),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
@@ -856,101 +861,70 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
             @views Uybar[:, 1, :] .= Uybar[:, 2, :]
         end
 
-        # Step 9b — NaN-scrub + ssa_vel_max clamp (same safety net as SSA).
-        ssa_vel_max = p_ydyn.ssa_vel_max
-        nan_seen = false
-        Nxx, Nxy, Nxz = size(Uxbar, 1), size(Uxbar, 2), size(Uxbar, 3)
-        @inbounds for kk in 1:Nxz, jj in 1:Nxy, ii in 1:Nxx
-            v = Uxbar[ii, jj, kk]
-            if isnan(v)
-                Uxbar[ii, jj, kk] = 0.0; nan_seen = true
-            else
-                Uxbar[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
-            end
-        end
-        Nyx, Nyy, Nyz = size(Uybar, 1), size(Uybar, 2), size(Uybar, 3)
-        @inbounds for kk in 1:Nyz, jj in 1:Nyy, ii in 1:Nyx
-            v = Uybar[ii, jj, kk]
-            if isnan(v)
-                Uybar[ii, jj, kk] = 0.0; nan_seen = true
-            else
-                Uybar[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
-            end
-        end
-        if nan_seen
-            @warn "calc_velocity_diva!: NaN entries from linear solve; replaced with 0 and clamped." iter = iter ssa_vel_max = ssa_vel_max
-        end
+        # Step 9b — velocity limit (Fortran `ssa_vel_clip`; only "clip" is
+        # ported). A non-finite solution stops the run in the convergence
+        # check below.
+        ssa_vel_clip!(y.dyn.ux_bar, y.dyn.uy_bar, Float64(p_ydyn.ssa_vel_max))
 
-        # Step 10 — Picard velocity relax.
-        if iter > 1
-            picard_relax_vel!(y.dyn.ux_bar, y.dyn.uy_bar,
-                              sc.diva_picard_ux_bar_nm1,
-                              sc.diva_picard_uy_bar_nm1,
-                              p_ydyn.ssa_iter_rel)
-        end
+        # Step 10 — Picard velocity relaxation, every iteration (the first
+        # one towards the previous call's solution).
+        picard_relax_vel!(y.dyn.ux_bar, y.dyn.uy_bar,
+                          sc.diva_picard_ux_bar_nm1,
+                          sc.diva_picard_uy_bar_nm1,
+                          p_ydyn.ssa_iter_rel)
 
-        # Step 11 — zero face velocities at fully-empty margins.
-        set_inactive_margins!(y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.f_ice_dyn)
-
-        # Step 11b — effective pressure that depends on the sliding speed
-        # (a steady hydrology such as K24): recover this iteration's basal
-        # velocity, let the hook re-evaluate N from it, and rebuild c_bed
-        # so that the next iteration's beta uses N consistent with the
-        # current velocity. N and u_b then converge together instead of
-        # alternating between steps. Mirrors Fortran velocity_diva.f90
-        # `neff_hook` (called after calc_vel_basal in every iteration).
-        c_bed_settled = true
-        if neff_hook !== nothing
-            c_bed_nm1 .= interior(y.dyn.c_bed)
-            calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
-                               sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
-                               y.dyn.ux_bar, y.dyn.uy_bar)
-            calc_vel_basal_diva!(y.dyn.ux_b, y.dyn.uy_b,
-                                 y.dyn.ux_bar, y.dyn.uy_bar,
-                                 y.dyn.taub_acx, y.dyn.taub_acy,
-                                 sc.diva_F2, y.tpo.f_ice_dyn;
-                                 no_slip = no_slip)
-            neff_hook(y.dyn.N_eff, y.dyn.ux_b, y.dyn.uy_b)
-            calc_c_bed!(y.dyn.c_bed, y.dyn.cb_ref, y.dyn.N_eff, y.p.ytill.is_angle)
-            # Converged only once c_bed has stopped changing too (relative L1
-            # change below ydyn.ssa_iter_conv): a warm-started solve can otherwise
-            # exit after one iteration without ever updating N.
-            c_new = interior(y.dyn.c_bed)
-            c_old = c_bed_nm1
-            c_bed_settled = sum(abs, c_new .- c_old) <=
-                            p_ydyn.ssa_iter_conv * max(sum(abs, c_new), 1e-300)
-        end
-
-        # Step 12 — convergence (L2 relative residual on ux_bar, uy_bar).
-        l2_resid = picard_calc_convergence_l2(
-            interior(y.dyn.ux_bar), interior(sc.diva_picard_ux_bar_nm1),
-            interior(y.dyn.uy_bar), interior(sc.diva_picard_uy_bar_nm1))
+        # Step 11 — convergence (relative L2 change of ux_bar, uy_bar on the
+        # solved faces) and the L1 error matrix.
+        l2_resid = picard_calc_convergence_l2(y.dyn.ux_bar, sc.diva_picard_ux_bar_nm1,
+                                              y.dyn.uy_bar, sc.diva_picard_uy_bar_nm1,
+                                              y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy)
         if iter ≤ n_resid_max
             sc.ssa_residuals[iter] = l2_resid
         end
-        if l2_resid < p_ydyn.ssa_iter_conv && iter > 1 && c_bed_settled
-            break
+        picard_calc_convergence_l1rel_matrix!(
+            interior(y.dyn.ssa_err_acx), interior(y.dyn.ssa_err_acy),
+            interior(y.dyn.ux_bar), interior(y.dyn.uy_bar),
+            interior(sc.diva_picard_ux_bar_nm1), interior(sc.diva_picard_uy_bar_nm1))
+        converged = l2_resid < p_ydyn.ssa_iter_conv
+
+        # Step 12 — basal stress and basal velocity of this iteration, read
+        # by the friction law and the vertical shear of the next one
+        # (Fortran velocity_diva.f90:386-391).
+        calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
+                           sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
+                           y.dyn.ux_bar, y.dyn.uy_bar)
+        calc_vel_basal_diva!(y.dyn.ux_b, y.dyn.uy_b,
+                             y.dyn.ux_bar, y.dyn.uy_bar,
+                             y.dyn.taub_acx, y.dyn.taub_acy,
+                             sc.diva_F2, y.tpo.f_ice_dyn;
+                             no_slip = no_slip)
+
+        # Step 12b — effective pressure that depends on the sliding speed
+        # (a steady hydrology such as K24): let the hook re-evaluate N from
+        # this iteration's u_b and rebuild c_bed, so that the next
+        # iteration's beta uses N consistent with the current velocity.
+        # Converged only once c_bed has stopped changing too (relative L1
+        # change below ssa_iter_conv): a warm-started solve can otherwise
+        # exit after one iteration without ever updating N. Mirrors Fortran
+        # velocity_diva.f90:396-403.
+        if neff_hook !== nothing
+            c_bed_nm1 .= interior(y.dyn.c_bed)
+            neff_hook(y.dyn.N_eff, y.dyn.ux_b, y.dyn.uy_b)
+            calc_c_bed!(y.dyn.c_bed, y.dyn.cb_ref, y.dyn.N_eff, y.p.ytill.is_angle)
+            c_new = interior(y.dyn.c_bed)
+            sum(abs, c_new .- c_bed_nm1) > p_ydyn.ssa_iter_conv * max(sum(abs, c_new), 1e-15) &&
+                (converged = false)
         end
+
+        converged && break
     end
 
     sc.ssa_iter_now[] = iter_now
     sc.ssa_lim_n[] = count_vel_lim_faces(y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ssa_mask_acx,
                                          y.dyn.ssa_mask_acy, Float64(p_ydyn.ssa_vel_max))
 
-    # Post-Picard reconstruction.
-    # 1. Basal stress at faces from β_eff and the converged depth-averaged
-    #    velocity (Fortran calc_basal_stress at velocity_diva.f90:377).
-    calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
-                       sc.diva_beta_eff_acx, sc.diva_beta_eff_acy,
-                       y.dyn.ux_bar, y.dyn.uy_bar)
-
-    # 2. Recover basal velocity via Goldberg (2011) Eq. 34.
-    calc_vel_basal_diva!(y.dyn.ux_b, y.dyn.uy_b,
-                         y.dyn.ux_bar, y.dyn.uy_bar,
-                         y.dyn.taub_acx, y.dyn.taub_acy,
-                         sc.diva_F2, y.tpo.f_ice_dyn;
-                         no_slip = no_slip)
-
+    # Post-Picard reconstruction (taub and u_b are those of the last
+    # iteration).
     # 3. Compute F1 cumulative (3D) and full-column F1 integral (2D).
     calc_F1_integral_3D!(sc.diva_F1_3D, y.dyn.visc_eff,
                          y.tpo.H_ice_dyn, y.tpo.f_ice_dyn, zeta_c)

@@ -406,7 +406,7 @@ end
                           H_ice, f_ice,
                           taud_acx, taud_acy,
                           taul_int_acx, taul_int_acy,
-                          dx::Real, dy::Real, beta_min::Real;
+                          dx::Real, dy::Real;
                           boundaries::Symbol=:bounded,
                           lateral_bc::AbstractString="floating")
 
@@ -429,8 +429,8 @@ Inputs:
   - `mask_frnt`, `H_ice`, `f_ice`, `taud_acx`, `taud_acy`,
     `taul_int_acx`, `taul_int_acy` — geometry / forcing fields.
   - `dx`, `dy` — grid spacing in metres.
-  - `beta_min` — minimum allowed beta for grounded ice
-    (Fortran lines 479, 762).
+  - `beta_acx`, `beta_acy` are the friction of the matrix, with
+    `beta_min` at grounded faces already set (`set_beta_min_grounded!`).
   - `boundaries` — Symbol selecting the edge-BC palette.
   - `lateral_bc` — accepted for signature parity (used by the caller
     when pre-computing the masks).
@@ -465,7 +465,7 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
                                H_ice, f_ice,
                                taud_acx, taud_acy,
                                taul_int_acx, taul_int_acy,
-                               dx::Real, dy::Real, beta_min::Real;
+                               dx::Real, dy::Real;
                                boundaries::Symbol=:bounded,
                                lateral_bc::AbstractString="floating")
     # Wrapper: do halo fills + lift Field views to plain SubArrays +
@@ -527,7 +527,7 @@ function _assemble_ssa_matrix!(I_idx::Vector{Int},
     return _assemble_ssa_matrix_kernel!(
         I_idx, J_idx, vals, b_vec, nnz_ref,
         Ux, Uy, Bx, By, Naa, Nab, Mx, My, MF, Hi, Fi, Tdx, Tdy, Tlx, Tly,
-        Float64(dx), Float64(dy), Float64(beta_min),
+        Float64(dx), Float64(dy),
         Tx_top, Ty_top, Nx, Ny;
         boundaries = boundaries, lateral_bc = lateral_bc)
 end
@@ -541,7 +541,7 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
                                        nnz_ref::Ref{Int},
                                        Ux, Uy, Bx, By, Naa, Nab, Mx, My, MF,
                                        Hi, Fi, Tdx, Tdy, Tlx, Tly,
-                                       dx::Float64, dy::Float64, beta_min::Float64,
+                                       dx::Float64, dy::Float64,
                                        ::Type{Tx_top}, ::Type{Ty_top},
                                        Nx::Int, Ny::Int;
                                        boundaries::Symbol=:bounded,
@@ -736,9 +736,6 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
         else
             # Fortran lines 475-540. === Inner SSA solution. ===
             beta_now = Bx[ip1f_i, j, 1]
-            if ssa_mask_x == 1 && Bx[ip1f_i, j, 1] == 0.0
-                beta_now = beta_min
-            end
 
             # Index helpers for `N_ab` reads. Fortran `N_ab(i, j)` ↔
             # `Nab[i+1, j+1, 1]`. With wrapped (im1, jm1) this becomes
@@ -939,9 +936,6 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
         else
             # Fortran lines 758-822. === Inner SSA solution (uy). ===
             beta_now = By[i, jp1f_j, 1]
-            if ssa_mask_y == 1 && By[i, jp1f_j, 1] == 0.0
-                beta_now = beta_min
-            end
 
             ip1f_x = _ip1_modular(i, Nx, Tx_top)
             jp1f_y = _jp1_modular(j, Ny, Ty_top)
@@ -1336,59 +1330,73 @@ function _picard_relax_vel_kernel!(Ux, Uy, Uxnm1, Uynm1, rel::Float64)
 end
 
 """
-    picard_calc_convergence_l2(ux, ux_nm1, uy, uy_nm1) -> Float64
+    picard_calc_convergence_l2(ux, ux_nm1, uy, uy_nm1, mask_acx, mask_acy) -> Float64
 
-Relative L2 residual norm of the velocity change between successive
-Picard iterations. Mirrors `velocity_general.f90:1917
-picard_calc_convergence_l2` with `norm_method = 1` (the only branch
-actually used by the Fortran driver):
+Relative L2 change of the face velocity between two Picard iterations,
+`sqrt(Σ(u − u_prev)²) / (sqrt(Σ u_prev²) + 1e-10)` over the faces whose
+momentum equation is solved (`mask > 0`) and with `|u| > 1e-5` m/yr;
+0 if there are none (Fortran `picard_calc_convergence_l2`,
+`norm_method = 1`, velocity_general.f90:2120). Errors if the velocity of
+a solved face or the residual is not finite (Fortran stops there too).
 
-    res1 = sum((u - u_prev)²) over points where |u| > vel_tol
-    res2 = sum((u_prev)²)     over the same points
-    resid = res1 / (res2 + du_reg)
-
-If no points pass the velocity-tolerance mask, returns 0.0 (matches
-Fortran).
-
-Inputs are interior arrays (Yelmo.jl `interior(field)` slabs) of
-shape `(Nx_face, Ny, 1)` — sums over all entries. The Fortran
-`mask_acx > 0` predicate is enforced by passing only the active-SSA
-indices; for our wrapper we instead include all face cells (the
-inactive-mask cells have `u = 0` from the Dirichlet rows so they
-fail the `vel_tol` threshold automatically).
+`ux`, `uy` are the XFace / YFace velocity fields, `mask_acx`, `mask_acy`
+the SSA masks; each face is visited once (Fortran face `i` = east face
+of cell `i`).
 """
-function picard_calc_convergence_l2(ux::AbstractArray, ux_nm1::AbstractArray,
-                                    uy::AbstractArray, uy_nm1::AbstractArray)
-    # `eachindex(ux)` over a SubArray returns CartesianIndices{3} which
-    # yields `CartesianIndex{3}` per loop step — heap-allocated. Use
-    # explicit (i, j, k) iteration instead.
+function picard_calc_convergence_l2(ux, ux_nm1, uy, uy_nm1, mask_acx, mask_acy)
+    Ux, Uxp, Mx = interior(ux), interior(ux_nm1), interior(mask_acx)
+    Uy, Uyp, My = interior(uy), interior(uy_nm1), interior(mask_acy)
+    Nx, Ny = size(ux.grid, 1), size(ux.grid, 2)
+    Tx, Ty = topology(ux.grid, 1), topology(uy.grid, 2)
     res1 = 0.0
     res2 = 0.0
-    Nxx, Nxy, Nxz = size(ux, 1), size(ux, 2), size(ux, 3)
-    @inbounds for k in 1:Nxz, j in 1:Nxy, i in 1:Nxx
-        u = ux[i, j, k]
-        if abs(u) > _SSA_PICARD_VEL_TOL
-            tx = u - ux_nm1[i, j, k]
-            abs(tx) < _SSA_PICARD_TOL_UF && (tx = 0.0)
-            res1 += tx * tx
-            tp = ux_nm1[i, j, k]
-            abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
-            res2 += tp * tp
+    n_check = 0
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ie = _ip1_modular(i, Nx, Tx)     # east face of cell i
+        jn = _jp1_modular(j, Ny, Ty)     # north face of cell j
+        for (u, up, m) in ((Ux[ie, j, 1], Uxp[ie, j, 1], Mx[ie, j, 1]),
+                           (Uy[i, jn, 1], Uyp[i, jn, 1], My[i, jn, 1]))
+            (abs(u) > _SSA_PICARD_VEL_TOL && m > 0) || continue
+            n_check += 1
+            d = u - up
+            abs(d) < _SSA_PICARD_TOL_UF && (d = 0.0)
+            abs(up) < _SSA_PICARD_TOL_UF && (up = 0.0)
+            res1 += d * d
+            res2 += up * up
         end
     end
-    Nyx, Nyy, Nyz = size(uy, 1), size(uy, 2), size(uy, 3)
-    @inbounds for k in 1:Nyz, j in 1:Nyy, i in 1:Nyx
-        u = uy[i, j, k]
-        if abs(u) > _SSA_PICARD_VEL_TOL
-            ty = u - uy_nm1[i, j, k]
-            abs(ty) < _SSA_PICARD_TOL_UF && (ty = 0.0)
-            res1 += ty * ty
-            tp = uy_nm1[i, j, k]
-            abs(tp) < _SSA_PICARD_TOL_UF && (tp = 0.0)
-            res2 += tp * tp
-        end
+    resid = n_check > 0 ? sqrt(res1) / (sqrt(res2) + _SSA_PICARD_DU_REG) : 0.0
+    _check_finite_velocity(resid, ux, uy, mask_acx, mask_acy)
+    return resid
+end
+
+# Stop if the solution is not finite: NaN/Inf on a solved face (mask > 0)
+# or in the residual (Fortran velocity_general.f90:2272-2304).
+function _check_finite_velocity(resid::Float64, ux, uy, mask_acx, mask_acy)
+    Ux, Mx = interior(ux), interior(mask_acx)
+    Uy, My = interior(uy), interior(mask_acy)
+    bad_x = findfirst(k -> Mx[k] > 0 && !isfinite(Ux[k]), CartesianIndices(Ux))
+    bad_y = findfirst(k -> My[k] > 0 && !isfinite(Uy[k]), CartesianIndices(Uy))
+    (isfinite(resid) && bad_x === nothing && bad_y === nothing) && return nothing
+    error("SSA Picard: velocity solution is not finite (residual = $(resid); " *
+          "first non-finite x-face: $(bad_x === nothing ? "none" : Tuple(bad_x)), " *
+          "y-face: $(bad_y === nothing ? "none" : Tuple(bad_y))).")
+end
+
+# Clip each velocity component to [-u_max, u_max] (Fortran `ssa_vel_clip`,
+# `ssa_vel_lim_method = "clip"`). A non-finite value is left as is for
+# `_check_finite_velocity`.
+function ssa_vel_clip!(ux, uy, u_max::Float64)
+    _clip_kernel!(interior(ux), u_max)
+    _clip_kernel!(interior(uy), u_max)
+    return ux, uy
+end
+
+function _clip_kernel!(U::AbstractArray{Float64,3}, u_max::Float64)
+    @inbounds for k in axes(U, 3), j in axes(U, 2), i in axes(U, 1)
+        U[i, j, k] = clamp(U[i, j, k], -u_max, u_max)
     end
-    return res1 / (res2 + _SSA_PICARD_DU_REG)
+    return U
 end
 
 """
@@ -1539,14 +1547,17 @@ end
 #   3. Apply log-space Picard relaxation to viscosity.
 #   4. Update depth-integrated viscosity visc_eff_int.
 #   5. Update beta (basal drag) from current ux_b/uy_b + c_bed.
-#   6. Stagger beta to face-staggered beta_acx/beta_acy.
+#   6. Stagger beta to face-staggered beta_acx/beta_acy; the matrix and
+#      taub use a copy with beta_min at grounded faces (set_beta_min_grounded!).
 #   7. Stagger viscosity to ab-corner (visc_ab cache).
 #   8. Assemble SSA matrix → COO triplets + RHS in dyn.scratch.
 #   9. Build SparseMatrixCSC and run BiCGStab+AMG.
 #  10. Unpack solution back into ux_b, uy_b face slots.
-#  11. Apply linear Picard velocity relaxation.
-#  12. Set inactive margins (zero velocity at fully-empty faces).
-#  13. Compute L2 residual; record in scratch; check convergence.
+#  11. Clip to ssa_vel_max; linear Picard velocity relaxation (also on
+#      the first iteration, towards the previous call's solution).
+#  12. Compute L2 residual; record in scratch; check convergence.
+#
+# Inactive margins are closed once, before the loop (Fortran).
 #
 # After loop: compute basal stress tau_b = beta · u_b.
 #
@@ -1642,9 +1653,10 @@ function calc_velocity_ssa!(y)
         end
 
         # ---- Step 2: log-space Picard relaxation on viscosity. ----
-        # Fortran line 212. Skip on the very first iteration since the
-        # nm1 snapshot equals the n value (pre-iteration state).
-        if iter > 1
+        # Every iteration, the first one towards the viscosity of the
+        # previous call (Fortran velocity_ssa.f90:236-248); none for a
+        # constant viscosity.
+        if p_ydyn.visc_method != 0
             picard_relax_visc!(y.dyn.visc_eff, sc.ssa_picard_visc_eff_nm1,
                                p_ydyn.ssa_iter_rel)
         end
@@ -1689,6 +1701,12 @@ function calc_velocity_ssa!(y)
                       beta_gl_stag = p_ydyn.beta_gl_stag,
                       beta_min     = p_ydyn.beta_min)
 
+        # ---- Step 5b: friction of the matrix (and of taub). ----
+        interior(sc.ssa_beta_acx) .= interior(y.dyn.beta_acx)
+        interior(sc.ssa_beta_acy) .= interior(y.dyn.beta_acy)
+        set_beta_min_grounded!(sc.ssa_beta_acx, sc.ssa_beta_acy,
+                               y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
+
         # ---- Step 6: stagger viscosity to ab-corner cache. ----
         stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
                             y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
@@ -1708,13 +1726,13 @@ function calc_velocity_ssa!(y)
                 sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
                 sc.ssa_b_vec, sc.ssa_nnz,
                 y.dyn.ux_b, y.dyn.uy_b,
-                y.dyn.beta_acx, y.dyn.beta_acy,
+                sc.ssa_beta_acx, sc.ssa_beta_acy,
                 y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
                 y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
                 y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-                dx, dy, p_ydyn.beta_min;
+                dx, dy;
                 boundaries = _ssa_boundaries_symbol(y),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
@@ -1723,13 +1741,13 @@ function calc_velocity_ssa!(y)
                 sc.ssa_I_idx, sc.ssa_J_idx, sc.ssa_vals,
                 sc.ssa_b_vec, sc.ssa_nnz,
                 y.dyn.ux_b, y.dyn.uy_b,
-                y.dyn.beta_acx, y.dyn.beta_acy,
+                sc.ssa_beta_acx, sc.ssa_beta_acy,
                 y.dyn.visc_eff_int, sc.ssa_n_aa_ab,
                 y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, y.tpo.mask_frnt,
                 y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
                 y.dyn.taud_acx, y.dyn.taud_acy,
                 y.dyn.taul_int_acx, y.dyn.taul_int_acy,
-                dx, dy, p_ydyn.beta_min;
+                dx, dy;
                 boundaries = _ssa_boundaries_symbol(y),
                 lateral_bc = p_ydyn.ssa_lat_bc,
             )
@@ -1776,55 +1794,22 @@ function calc_velocity_ssa!(y)
             @views Uy[:, 1, :] .= Uy[:, 2, :]
         end
 
-        # ---- Step 9b: NaN-scrub + ssa_vel_max clamp on raw post-solve velocities. ----
-        # Mirrors Fortran's Lis safety net: rank-deficient or poorly
-        # conditioned linear systems (e.g. all-floating IC with zero β
-        # and zero taud — MISMIP3D Stnd t=0) can return garbage or NaN
-        # entries. Replacing NaN with 0 prevents propagation through the
-        # Picard relaxation, and the per-component absolute clamp to
-        # `ssa_vel_max` (default 5000 m/yr) keeps the iterate bounded so
-        # the time loop can grow ice via SMB until the system is
-        # well-posed. Sign is preserved by the symmetric clamp.
-        ssa_vel_max = p_ydyn.ssa_vel_max
-        nan_seen = false
-        Nxx, Nxy, Nxz = size(Ux, 1), size(Ux, 2), size(Ux, 3)
-        @inbounds for kk in 1:Nxz, jj in 1:Nxy, ii in 1:Nxx
-            v = Ux[ii, jj, kk]
-            if isnan(v)
-                Ux[ii, jj, kk] = 0.0
-                nan_seen = true
-            else
-                Ux[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
-            end
-        end
-        Nyx, Nyy, Nyz = size(Uy, 1), size(Uy, 2), size(Uy, 3)
-        @inbounds for kk in 1:Nyz, jj in 1:Nyy, ii in 1:Nyx
-            v = Uy[ii, jj, kk]
-            if isnan(v)
-                Uy[ii, jj, kk] = 0.0
-                nan_seen = true
-            else
-                Uy[ii, jj, kk] = clamp(v, -ssa_vel_max, +ssa_vel_max)
-            end
-        end
-        if nan_seen
-            @warn "calc_velocity_ssa!: NaN entries from linear solve; replaced with 0 and clamped." iter = iter ssa_vel_max = ssa_vel_max
-        end
+        # ---- Step 9b: velocity limit (Fortran `ssa_vel_clip`). ----
+        # Only "clip" is ported (`with_ported_options`); a non-finite
+        # solution stops the run in the convergence check below.
+        ssa_vel_clip!(y.dyn.ux_b, y.dyn.uy_b, Float64(p_ydyn.ssa_vel_max))
 
         # ---- Step 10: linear Picard velocity relaxation. ----
-        if iter > 1
-            picard_relax_vel!(y.dyn.ux_b, y.dyn.uy_b,
-                              sc.ssa_picard_ux_b_nm1, sc.ssa_picard_uy_b_nm1,
-                              p_ydyn.ssa_iter_rel)
-        end
-
-        # ---- Step 11: zero out fully-empty-margin face velocities. ----
-        set_inactive_margins!(y.dyn.ux_b, y.dyn.uy_b, y.tpo.f_ice_dyn)
+        # Every iteration, the first one towards the velocity of the
+        # previous call (Fortran velocity_ssa.f90:361).
+        picard_relax_vel!(y.dyn.ux_b, y.dyn.uy_b,
+                          sc.ssa_picard_ux_b_nm1, sc.ssa_picard_uy_b_nm1,
+                          p_ydyn.ssa_iter_rel)
 
         # ---- Step 12: convergence check (L2 relative residual). ----
-        l2_resid = picard_calc_convergence_l2(
-            interior(y.dyn.ux_b), interior(sc.ssa_picard_ux_b_nm1),
-            interior(y.dyn.uy_b), interior(sc.ssa_picard_uy_b_nm1))
+        l2_resid = picard_calc_convergence_l2(y.dyn.ux_b, sc.ssa_picard_ux_b_nm1,
+                                              y.dyn.uy_b, sc.ssa_picard_uy_b_nm1,
+                                              y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy)
         if iter ≤ n_resid_max
             sc.ssa_residuals[iter] = l2_resid
         end
@@ -1849,9 +1834,10 @@ function calc_velocity_ssa!(y)
         @warn "SSA Picard did not converge" iter = iter_now resid = (iter_now > 0 && iter_now <= n_resid_max ? sc.ssa_residuals[iter_now] : NaN) tol = p_ydyn.ssa_iter_conv
     end
 
-    # Post-loop: basal stress (Fortran line 325).
+    # Post-loop: basal stress with the friction of the matrix (Fortran
+    # velocity_ssa.f90:403).
     calc_basal_stress!(y.dyn.taub_acx, y.dyn.taub_acy,
-                       y.dyn.beta_acx, y.dyn.beta_acy,
+                       sc.ssa_beta_acx, sc.ssa_beta_acy,
                        y.dyn.ux_b, y.dyn.uy_b)
 
     return y

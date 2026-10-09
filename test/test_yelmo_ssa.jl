@@ -199,36 +199,40 @@ end
     @test all(interior(uy_n) .≈ 100.0)
 end
 
+# Face velocities and SSA masks on a 5x5 bounded grid for
+# `picard_calc_convergence_l2` (face values u, previous up; mask m).
+function _picard_fields(u, up, v, vp; m = 1)
+    g = _bounded_2d(5, 5)
+    ux, uxp, uy, uyp = XFaceField(g), XFaceField(g), YFaceField(g), YFaceField(g)
+    mx, my = XFaceField(g), YFaceField(g)
+    fill!(interior(ux), u); fill!(interior(uxp), up)
+    fill!(interior(uy), v); fill!(interior(uyp), vp)
+    fill!(interior(mx), m); fill!(interior(my), m)
+    return ux, uxp, uy, uyp, mx, my
+end
+
 @testset "picard_calc_convergence_l2: all-zero → resid=0" begin
-    Nx, Ny = 5, 5
-    ux  = zeros(Nx + 1, Ny, 1)
-    uy  = zeros(Nx, Ny + 1, 1)
-    uxp = zeros(Nx + 1, Ny, 1)
-    uyp = zeros(Nx, Ny + 1, 1)
-    @test picard_calc_convergence_l2(ux, uxp, uy, uyp) == 0.0
+    @test picard_calc_convergence_l2(_picard_fields(0.0, 0.0, 0.0, 0.0)...) == 0.0
 end
 
 @testset "picard_calc_convergence_l2: identical fields above tol → resid=0" begin
-    Nx, Ny = 5, 5
-    ux  = fill(1.0, Nx + 1, Ny, 1)
-    uxp = copy(ux)
-    uy  = fill(1.0, Nx, Ny + 1, 1)
-    uyp = copy(uy)
-    @test picard_calc_convergence_l2(ux, uxp, uy, uyp) ≈ 0.0
+    @test picard_calc_convergence_l2(_picard_fields(1.0, 1.0, 1.0, 1.0)...) ≈ 0.0
 end
 
-@testset "picard_calc_convergence_l2: doubled velocity → resid≈1" begin
-    Nx, Ny = 5, 5
-    ux  = fill(2.0, Nx + 1, Ny, 1)
-    uxp = fill(1.0, Nx + 1, Ny, 1)
-    uy  = fill(0.0, Nx, Ny + 1, 1)
-    uyp = fill(0.0, Nx, Ny + 1, 1)
-    # res1 = sum((2 - 1)^2) over Nx+1=6 cells × Ny=5 + zeros
-    #      = 30
-    # res2 = sum(1^2) = 30
-    # resid = 30 / (30 + 1e-10) ≈ 1
-    r = picard_calc_convergence_l2(ux, uxp, uy, uyp)
-    @test r ≈ 1.0 atol = 1e-9
+@testset "picard_calc_convergence_l2: relative L2 norm (Fortran norm_method 1)" begin
+    # sqrt(Σ(3 − 1)²) / sqrt(Σ 1²) = 2 over the 25 x-faces (uy = 0 below tol).
+    r = picard_calc_convergence_l2(_picard_fields(3.0, 1.0, 0.0, 0.0)...)
+    @test r ≈ 2.0 atol = 1e-9
+end
+
+@testset "picard_calc_convergence_l2: only solved faces (mask > 0)" begin
+    @test picard_calc_convergence_l2(_picard_fields(3.0, 1.0, 3.0, 1.0; m = 0)...) == 0.0
+end
+
+@testset "picard_calc_convergence_l2: non-finite solution stops" begin
+    ux, uxp, uy, uyp, mx, my = _picard_fields(3.0, 1.0, 0.0, 0.0)
+    interior(ux)[3, 2, 1] = NaN
+    @test_throws ErrorException picard_calc_convergence_l2(ux, uxp, uy, uyp, mx, my)
 end
 
 @testset "picard_calc_convergence_l1rel_matrix!: tolerance gate" begin
@@ -452,8 +456,11 @@ end
     # The Fortran SSA matrix has `-beta · u + lapl(u) = taud` on the
     # diagonal: with lapl(u) = 0 in plug flow, `u = -taud/beta`.
     expected_taud = rho_ice * g_acc * H * (-slope_x)   # [Pa]  (≈ -8927)
-    beta = 1e9                                          # [Pa·yr/m]
-    expected_ux = -expected_taud / beta                 # [m/yr] (positive: ice flows downhill)
+    # beta such that u is above the 1e-5 m/yr floor of the Picard
+    # convergence check (Fortran vel_tol): below it no face is checked
+    # and the loop stops after one (relaxed) iteration.
+    beta = 1e6                                          # [Pa·yr/m]
+    expected_ux = -expected_taud / beta                 # [m/yr] (≈ 8.9e-3, ice flows downhill)
 
     y = _run_ssa_plugflow(; Nx=Nx, Ny=Ny, dx=dx, H=H,
                            slope_x=slope_x, Nz=4,
@@ -695,7 +702,7 @@ end
     H = 1000.0
     slope_x = 0.001
     rho_ice = 910.0; g_acc = 9.81
-    beta = 1e9
+    beta = 1e6       # u ≈ 8.9e-3 m/yr, above the Picard check's 1e-5 m/yr floor
     expected_taud = rho_ice * g_acc * H * (-slope_x)
     expected_ux   = -expected_taud / beta
 
