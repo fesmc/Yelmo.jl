@@ -174,7 +174,7 @@ end
     end
 
     visc_ab = Field((Face(), Face(), Center()), g)
-    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, f_ice)
 
     Vab = interior(visc_ab)
     println("[1.3] visc_ab interior extrema = $(extrema(Vab))")

@@ -14,6 +14,7 @@ y = YelmoModel(restart_file::String, time::Float64;
                rundir = "./",
                p      = nothing,           # YelmoParameters or nothing
                c      = nothing,           # constants; default YelmoConstants(p)
+               boundaries = nothing,       # grid topology; default from p
                groups = (:bnd, :dta, :dyn, :mat, :thrm, :tpo),
                strict = true)
 ```
@@ -49,6 +50,27 @@ carry every group — e.g. the data group `dta` is rarely populated on
 output. `strict=false` further loosens the loader to skip individual
 missing variables within a loaded group, leaving them at their
 default-allocated value (zeros).
+
+### Domain boundaries
+
+As in Fortran, `yelmo.experiment` sets the treatment of the domain
+borders, [`domain_boundaries`](@ref)`(p)`:
+
+| `experiment`                                   | boundaries    | grid topology |
+|:-----------------------------------------------|:--------------|:--------------|
+| `"None"`, `"EISMINT"` (any other value)        | `:zeros`      | `:bounded`    |
+| `"infinite"`                                   | `:infinite`   | `:bounded`    |
+| `"MASK_ICE"`                                   | `:mask`       | `:bounded`    |
+| `"MISMIP3D"`, `"MISMIP+"`                      | `:MISMIP3D`   | `:periodic_y` |
+| `"TROUGH-F17"`                                 | `:TROUGH`     | `:periodic_y` |
+| `"SLAB"`, `"ISMIPHOM"`, `"periodic"`, ...      | `:periodic`   | `:periodic`   |
+| `"periodic-x"`                                 | `:periodic_x` | `:periodic_x` |
+
+Without the `boundaries` keyword the grid topology follows from it; a
+given topology must match it. The boundaries select the SSA edge
+conditions (no-slip for `:zeros`, free-slip for `:infinite` and `:mask`,
+and for MISMIP3D/TROUGH no-slip at the left edge and free-slip at the
+right edge).
 
 ## Building parameters
 

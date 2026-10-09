@@ -315,8 +315,8 @@ end
 # ======================================================================
 #
 # Plug-flow regime: uniform slab on a uniform slope, all grounded,
-# all ice-covered, β = constant, taud = constant body force, periodic-y
-# boundaries (so no y-direction gradient). The SSA momentum equation
+# all ice-covered, β = constant, taud = constant body force, free-slip
+# edges (uniform in y, so no y-direction gradient). The SSA momentum equation
 # collapses (no spatial variation in u) to:
 #
 #     β · u = τ_d   →   u = τ_d / β
@@ -386,11 +386,12 @@ function _write_ssa_slab_fixture!(path::AbstractString;
 end
 
 # Build a YelmoModel for the SSA plug-flow setup, run one dyn_step!,
-# return the populated model. `boundaries` controls the topology.
+# return the populated model. `experiment` sets the boundaries (and the
+# grid topology), see `domain_boundaries`.
 function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
                             H::Float64, slope_x::Float64, Nz::Int,
                             beta_const::Float64,
-                            boundaries::Symbol = :periodic_y,
+                            experiment::String = "infinite",
                             ssa_tol::Float64 = 1e-2,
                             picard_iter_max::Int = 50)
     tdir = mktempdir(; prefix="ssa_plug_")
@@ -399,7 +400,8 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
     p = with_ported_options(YelmoParameters("slab-ssa";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0,
+                             experiment = experiment),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
@@ -425,7 +427,6 @@ function _run_ssa_plugflow(; Nx::Int, Ny::Int, dx::Float64,
                    rundir = tdir,
                    alias  = "slab-ssa",
                    p      = p,
-                   boundaries = boundaries,
                    strict = false)
 
     # Uniform ATT (used only if visc_method ≠ 0, but harmless).
@@ -443,8 +444,8 @@ end
 
 @testset "dyn_step! solver=\"ssa\" — plug flow on uniform slab" begin
     # Geometry: 7×3 cells, dx = 1 km, H = 1000 m, slope = 0.001.
-    # Periodic-y removes y-direction gradients; free-slip x boundary
-    # allows interior plug flow.
+    # Free-slip edges ("infinite") allow plug flow; the slab is uniform
+    # in y.
     Nx, Ny  = 7, 3
     dx      = 1000.0
     H       = 1000.0
@@ -465,7 +466,7 @@ end
     y = _run_ssa_plugflow(; Nx=Nx, Ny=Ny, dx=dx, H=H,
                            slope_x=slope_x, Nz=4,
                            beta_const = beta,
-                           boundaries = :periodic_y,
+                           experiment = "infinite",
                            ssa_tol = 1e-8,
                            picard_iter_max = 100)
 
@@ -523,7 +524,7 @@ function _run_uniform_slab(solver_name::String;
                             ATT_const::Float64 = 1e-16,
                             picard_tol::Float64 = 1e-8,
                             picard_iter_max::Int = 100,
-                            boundaries::Symbol = :periodic_y,
+                            experiment::String = "infinite",
                             beta_method::Int = 0,
                             beta_u0::Float64 = 31556926.0,
                             neff_hook_factory = nothing)
@@ -533,7 +534,8 @@ function _run_uniform_slab(solver_name::String;
                              H_const=H, slope_x=slope_x, Nz=Nz)
 
     p = with_ported_options(YelmoParameters("slab-$(solver_name)";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0,
+                             experiment = experiment),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = solver_name,
@@ -558,7 +560,6 @@ function _run_uniform_slab(solver_name::String;
                    rundir = tdir,
                    alias  = "slab-$(solver_name)",
                    p      = p,
-                   boundaries = boundaries,
                    strict = false)
     fill!(interior(y.mat.ATT), ATT_const)
     fill!(interior(y.dyn.cb_ref), 1.0)
@@ -812,7 +813,8 @@ end
                                   H_const=H, Nz=Nz)
 
     p = with_ported_options(YelmoParameters("slab-floating-ssa";
-        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
+        yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0,
+                             experiment = "infinite"),
         ycalv = ycalv_params(use_lsf = false, calv_flt_method = "vm-l19", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(
             solver         = "ssa",
@@ -835,7 +837,6 @@ end
                    rundir = tdir,
                    alias  = "slab-floating-ssa",
                    p      = p,
-                   boundaries = :periodic_y,
                    strict = false)
     fill!(interior(y.mat.ATT),    1e-16)
     fill!(interior(y.dyn.cb_ref), 0.0)

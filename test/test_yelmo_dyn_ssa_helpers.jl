@@ -590,7 +590,7 @@ end
     f_ice   = CenterField(g);   fill!(interior(f_ice),   1.0)
 
     visc_ab = Field((Face(), Face(), Center()), g)
-    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, f_ice)
 
     # Interior corners (i, j) for i in 1:Nx, j in 1:Ny → array index
     # [i+1, j+1, 1]. With f_ice=1 everywhere, each corner reads 4
@@ -600,7 +600,7 @@ end
     end
 end
 
-@testset "stagger_visc_aa_ab!: only ice-covered neighbours contribute" begin
+@testset "stagger_visc_aa_ab!: zero at corners touching a partial cell" begin
     Nx, Ny = 4, 4
     g = _bounded_2d(Nx, Ny)
     visc_2d = CenterField(g);   fill!(interior(visc_2d), 1e8)
@@ -611,11 +611,12 @@ end
     interior(visc_2d)[2, 2, 1] = 5e8
 
     visc_ab = Field((Face(), Face(), Center()), g)
-    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, f_ice)
 
-    # Corner (i=1, j=1) reads aa-cells (1, 1), (2, 1), (1, 2), (2, 2).
-    # Cell (2, 2) excluded. Mean of the other three (all 1e8) = 1e8.
-    @test interior(visc_ab)[2, 2, 1] ≈ 1e8 rtol=1e-12
+    # Corner (i=1, j=1) reads aa-cells (1, 1), (2, 1), (1, 2), (2, 2):
+    # cell (2, 2) is partial, so the corner is on the margin → 0.
+    @test interior(visc_ab)[2, 2, 1] == 0.0
+    @test interior(visc_ab)[3, 3, 1] == 0.0
     # Corner not touching cell (2, 2) — e.g. (i=3, j=3) → reads cells
     # (3, 3), (4, 3), (3, 4), (4, 4); all iced → mean = 1e8.
     @test interior(visc_ab)[4, 4, 1] ≈ 1e8 rtol=1e-12
@@ -630,7 +631,7 @@ end
 
     visc_ab = Field((Face(), Face(), Center()), g)
     fill!(interior(visc_ab), 0.0)
-    stagger_visc_aa_ab!(visc_ab, visc_2d, H_ice, f_ice)
+    stagger_visc_aa_ab!(visc_ab, visc_2d, f_ice)
     @test maximum(abs.(interior(visc_ab))) == 0.0
 end
 

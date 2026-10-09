@@ -413,8 +413,6 @@ end
 # in the comments. Broken until the port; move each back to `@test` when
 # it matches.
 const DYN_DEV_GAPS = (
-    :taul_int_acx,   # 0.28
-    :taul_int_acy,   # 0.070
     :qq_acx,         # 0.50
     :qq_acy,         # 0.50
     :qq,             # 0.33

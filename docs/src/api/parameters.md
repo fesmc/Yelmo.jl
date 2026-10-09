@@ -121,3 +121,10 @@ check_ported
 with_ported_options
 write_defaults_nml
 ```
+
+`yelmo.experiment` sets the treatment of the domain borders and the grid
+topology of a `YelmoModel` (see [Loading](../usage/loading.md#Domain-boundaries)):
+
+```@docs
+domain_boundaries
+```

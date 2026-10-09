@@ -69,8 +69,7 @@ end
     g = _bounded_2d(Nx, Ny)
     s = _build_mask_inputs(g)
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=false, lateral_bc="floating")
     @test all(interior(s.ssa_mask_acx) .== 0.0)
     @test all(interior(s.ssa_mask_acy) .== 0.0)
@@ -81,8 +80,7 @@ end
     g = _bounded_2d(Nx, Ny)
     s = _build_mask_inputs(g)   # H=1000, f_ice=1, f_grnd=1, mask_frnt=0
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=true, lateral_bc="floating")
     Mx = interior(s.ssa_mask_acx)
     My = interior(s.ssa_mask_acy)
@@ -105,18 +103,11 @@ end
     interior(s.f_ice)[2, 2, 1] = 0.0
     interior(s.H_ice)[2, 2, 1] = 0.0
     interior(s.f_grnd)[2, 2, 1] = 1.0  # still grounded land
-    # Note: the Fortran logic in `set_ssa_masks` checks
-    # f_ice == 1 OR neighbour f_ice == 1. The face between (2,2)
-    # ice-free and (3, 2) iced still has neighbour ice, so mask
-    # at face slot [3, 2, 1] (between Fortran cells (2, 2) and (3, 2))
-    # is the special-case branch:
-    #   - mval starts at 1 (since f_grnd(2,2)>0 OR f_grnd(3,2)>0).
-    #   - mval == 2 check skipped.
-    #   - lateral-BC overwrite skipped (mask_frnt all zero).
-    # → mask remains 1.
+    # A face is active when either cell is fully covered: the face
+    # between (2, 2) and (3, 2) at slot [3, 2, 1] is grounded → 1
+    # (mask_frnt is all zero, so no front overwrite).
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=true, lateral_bc="floating")
     # The face inside an all-ice-free cell: between (2, 1) and (2, 2)
     # is mask_acx slot at [3, 1, 1] under cell (2, 1) (covered by the
@@ -130,8 +121,7 @@ end
     # touches ice-free cells → if-branch fails → mask stays 0.
     s2 = _build_mask_inputs(g; H_val=0.0, fi_val=0.0, fg_val=0.0)
     set_ssa_masks!(s2.ssa_mask_acx, s2.ssa_mask_acy,
-                   s2.mask_frnt, s2.H_ice, s2.f_ice, s2.f_grnd,
-                   s2.z_base, s2.z_sl, 1.0;
+                   s2.mask_frnt, s2.f_ice, s2.f_grnd;
                    use_ssa=true, lateral_bc="floating")
     @test all(interior(s2.ssa_mask_acx) .== 0.0)
     @test all(interior(s2.ssa_mask_acy) .== 0.0)
@@ -147,8 +137,7 @@ end
     end
 
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=true, lateral_bc="floating")
     Mx = interior(s.ssa_mask_acx)
     My = interior(s.ssa_mask_acy)
@@ -178,8 +167,7 @@ end
         interior(s.mask_frnt)[4, j, 1] = -1.0  # ice-free side
     end
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=true, lateral_bc="floating")
     Mx = interior(s.ssa_mask_acx)
     # Face between (3, 3) and (4, 3) at slot [4, 3, 1]: mask_frnt(3,3)=1>0,
@@ -200,14 +188,42 @@ end
         interior(s.mask_frnt)[4, j, 1] = -1.0
     end
     set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
-                   s.mask_frnt, s.H_ice, s.f_ice, s.f_grnd,
-                   s.z_base, s.z_sl, 1.0;
+                   s.mask_frnt, s.f_ice, s.f_grnd;
                    use_ssa=true, lateral_bc="none")
     Mx = interior(s.ssa_mask_acx)
-    # mask_frnt(3, 3) was 1>0; lateral_bc="none" disables to 5.
-    # Then the dyn_disabled lateral check fires:
-    #   mfd(3,3)=5, mfd(4,3)=-1 → ssa_mask_acx(3,3) = 4.
+    # Front face without the lateral BC: treated as inner SSA (4).
     @test Mx[4, 3, 1] == 4.0
+end
+
+@testset "set_ssa_masks!: fronts against ice-free land" begin
+    # Ice (1:3, :) and ice-free (4:6, :); the front cells (3, j) face
+    # land (-2) at j = 3:4 and ocean (-1) elsewhere.
+    Nx, Ny = 6, 6
+    g = _bounded_2d(Nx, Ny)
+    function _front(code_ice, lateral_bc)
+        s = _build_mask_inputs(g)
+        interior(s.f_grnd)[:, :, 1] .= code_ice == 1 ? 0.0 : 1.0
+        interior(s.f_ice)[4:6, :, 1] .= 0.0
+        interior(s.mask_frnt)[3, :, 1] .= code_ice
+        interior(s.mask_frnt)[4, :, 1] .= -1.0
+        interior(s.mask_frnt)[4, 3:4, 1] .= -2.0
+        set_ssa_masks!(s.ssa_mask_acx, s.ssa_mask_acy,
+                       s.mask_frnt, s.f_ice, s.f_grnd; lateral_bc = lateral_bc)
+        return interior(s.ssa_mask_acx)
+    end
+    # Floating ice against land is a wall; against ocean the lateral BC.
+    Mx = _front(1.0, "floating")
+    @test Mx[4, 3, 1] == 0.0
+    @test Mx[4, 1, 1] == 3.0
+    # A marine front against land is a front grounded above sea level:
+    # inner SSA with "marine", lateral BC against the ocean.
+    Mx = _front(2.0, "marine")
+    @test Mx[4, 3, 1] == 4.0
+    @test Mx[4, 1, 1] == 3.0
+    # "all" applies the lateral BC at every front, land or ocean.
+    Mx = _front(3.0, "all")
+    @test Mx[4, 3, 1] == 3.0
+    @test Mx[4, 1, 1] == 3.0
 end
 
 # ======================================================================

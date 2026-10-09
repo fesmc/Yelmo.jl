@@ -330,11 +330,9 @@ end
     # boundary cells as on-the-GL; that helper isn't shipped in
     # the public Yelmo source we port from, so we tolerate a small
     # number of disagreements here (≤ 0.5% of cells).
-    # Differs from yelmo dev (v1.15 → dev gap of the topography port):
-    # broken until the port; promote back to `@test` then.
     let n_diff = count(interior(y.tpo.mask_frnt) .!= snap.mask_frnt)
         @info "tpo diagnostic vs Fortran: mask_frnt" n_diff n_tot = length(snap.mask_frnt)
-        @test_broken n_diff == 0
+        @test n_diff == 0
     end
     let n_diff = count(interior(y.tpo.mask_bed) .!= snap.mask_bed),
         n_tot = length(snap.mask_bed)
@@ -2208,10 +2206,8 @@ end
 @testset "tpo: calc_ice_front!" begin
     # 6x6 grid. Configuration:
     #   - 4x4 ice block at (2:5, 2:5)
-    #   - block is grounded marine in the south half (y ≤ 3),
-    #     grounded above SL in the north half (y ≥ 4)
-    #   - one floating-extension cell at (3, 5) sticking out — wait,
-    #     keep it simple: just test floating + marine + grounded fronts
+    #   - floating (j = 2:3), marine (j = 4) and grounded above sea
+    #     level (j = 5) fronts; one ice-free land cell north of the block
     Nx = 6
     g = RectilinearGrid(size=(Nx, Nx),
                         x=(0.0, 6.0), y=(0.0, 6.0),
@@ -2241,6 +2237,8 @@ end
         interior(f_grnd)[i, 5, 1] = 1.0
         interior(z_bed)[i, 5, 1]  = 200.0   # above SL
     end
+    interior(z_bed)[3, 6, 1] = 50.0         # ice-free land
+
 
     calc_ice_front!(mask_frnt, f_ice, f_grnd, z_bed, z_sl)
     M = interior(mask_frnt)
@@ -2249,18 +2247,19 @@ end
     @test M[2, 2, 1] == 1.0    # SW: floating
     @test M[2, 3, 1] == 1.0    # floating front (S edge)
     @test M[5, 2, 1] == 1.0
-    @test M[2, 4, 1] == 1.0    # marine front
-    @test M[5, 4, 1] == 1.0
+    @test M[2, 4, 1] == 2.0    # marine front
+    @test M[5, 4, 1] == 2.0
     @test M[2, 5, 1] == 3.0    # grounded above SL
     @test M[5, 5, 1] == 3.0
     @test M[3, 5, 1] == 3.0
 
-    # Adjacent ice-free cells get -1.
+    # Adjacent ice-free cells: -1 ocean, -2 land (from their own bed).
     @test M[1, 2, 1] == -1.0   # west of (2,2)
     @test M[1, 5, 1] == -1.0
     @test M[6, 5, 1] == -1.0
     @test M[3, 1, 1] == -1.0   # south of (3,2)
-    @test M[3, 6, 1] == -1.0   # north of (3,5)
+    @test M[4, 6, 1] == -1.0   # north of (4,5)
+    @test M[3, 6, 1] == -2.0   # north of (3,5), land
 
     # Interior cells of the block (3,3) - (4,4) — those are not
     # adjacent to ice-free, so they stay 0.
@@ -2272,6 +2271,17 @@ end
     # Far-from-block cells stay 0.
     @test M[1, 1, 1] == 0.0
     @test M[6, 6, 1] == 0.0
+
+    # Periodic x: a front on the east edge marks the wrapped west cell.
+    gp = RectilinearGrid(size=(Nx, Nx), x=(0.0, 6.0), y=(0.0, 6.0),
+                         topology=(Periodic, Bounded, Flat))
+    mp, fp, gpf, zbp, zsp = (CenterField(gp) for _ in 1:5)
+    fill!(interior(zbp), -100.0)
+    interior(fp)[5:6, 2:5, 1] .= 1.0
+    calc_ice_front!(mp, fp, gpf, zbp, zsp)
+    Mp = interior(mp)
+    @test Mp[6, 3, 1] == 1.0
+    @test Mp[1, 3, 1] == -1.0
 end
 
 # ------------------------------------------------------------------

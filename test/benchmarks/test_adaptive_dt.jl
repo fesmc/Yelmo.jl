@@ -47,7 +47,7 @@ using Yelmo.YelmoPar: YelmoParameters, ydyn_params, ymat_params, ytherm_params,
 # the pc settings of the Mirror spec (`specs/yelmo_MISMIP3D.nml`).
 function _adaptive_params(; pc_method::String = "FE-SBE", log_timestep::Bool = false)
     return with_ported_options(YelmoParameters("mismip3d_stnd_adaptive";
-        yelmo = yelmo_params(phys_const = "MISMIP3D",
+        yelmo = yelmo_params(phys_const = "MISMIP3D", experiment = "MISMIP3D",
             log_timestep  = log_timestep,
             dt_method     = 2,
             pc_method     = pc_method,
@@ -100,7 +100,7 @@ function _fixed_params()
     p = _adaptive_params(; pc_method = "HEUN")
     # Override the &yelmo block to disable adaptive PC.
     return with_ported_options(YelmoParameters(p.name;
-        yelmo = yelmo_params(phys_const = "MISMIP3D", dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_filter_vel = false, pc_n_redo = 10, pc_eps = 0.01),
+        yelmo = yelmo_params(phys_const = "MISMIP3D", experiment = "MISMIP3D", dt_method = 0, domain = "Greenland", grid_name = "GRL-16KM", pc_filter_vel = false, pc_n_redo = 10, pc_eps = 0.01),
         ytopo = p.ytopo,
         ycalv = p.ycalv,
         ydyn = p.ydyn,
