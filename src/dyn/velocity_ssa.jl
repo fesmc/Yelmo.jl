@@ -637,7 +637,10 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
 
         else
             # Fortran lines 475-540. === Inner SSA solution. ===
-            beta_now = Bx[ip1f_i, j, 1]
+            # A front face treated as inner SSA (mask 4) carries half the
+            # drag (Fortran w_face).
+            w_face   = ssa_mask_x == 4 ? 0.5 : 1.0
+            beta_now = w_face * Bx[ip1f_i, j, 1]
 
             # Index helpers for `N_ab` reads. Fortran `N_ab(i, j)` ↔
             # `Nab[i+1, j+1, 1]`. With wrapped (im1, jm1) this becomes
@@ -837,7 +840,8 @@ function _assemble_ssa_matrix_kernel!(I_idx::Vector{Int},
 
         else
             # Fortran lines 758-822. === Inner SSA solution (uy). ===
-            beta_now = By[i, jp1f_j, 1]
+            w_face   = ssa_mask_y == 4 ? 0.5 : 1.0
+            beta_now = w_face * By[i, jp1f_j, 1]
 
             ip1f_x = _ip1_modular(i, Nx, Tx_top)
             jp1f_y = _jp1_modular(j, Ny, Ty_top)
