@@ -37,6 +37,15 @@ function _topo_fe_step!(y, dt)
     return y
 end
 
+# No transport: zero the depth-averaged velocity and the previous one
+# (with `pc_filter_vel` the transport velocity is the mean of both).
+function _zero_velocity!(y)
+    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
+        fill!(interior(u), 0.0)
+    end
+    return y
+end
+
 include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 # ------------------------------------------------------------------
@@ -459,12 +468,8 @@ end
     fill!(H_ice, 1000.0)
 
     # Zero velocities: isolate SMB; advection becomes a no-op on a
-    # uniform field anyway, but this also bypasses the CFL kernel. The
-    # previous solution too: with `pc_filter_vel` the transport velocity
-    # is the mean of both.
-    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
-        fill!(interior(u), 0.0)
-    end
+    # uniform field anyway, but this also bypasses the CFL kernel.
+    _zero_velocity!(y)
 
     # Ensure all cells are dynamic and ice is allowed everywhere.
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
@@ -554,9 +559,7 @@ end
     H_ice = interior(y.tpo.H_ice)
     fill!(H_ice, 1000.0)
 
-    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
-        fill!(interior(u), 0.0)   # current and previous (pc_filter_vel) velocity
-    end
+    _zero_velocity!(y)
 
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
 
@@ -956,9 +959,7 @@ end
     # Slab geometry; everything zeroed except the relaxation target.
     H_ice = interior(y.tpo.H_ice)
     fill!(H_ice, 500.0)
-    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
-        fill!(interior(u), 0.0)   # current and previous (pc_filter_vel) velocity
-    end
+    _zero_velocity!(y)
     fill!(interior(y.bnd.mask_ice),   Float64(MASK_ICE_DYNAMIC))
     fill!(interior(y.bnd.z_bed), 100.0)
     fill!(interior(y.bnd.z_sl),    0.0)
@@ -1621,8 +1622,7 @@ end
 
     p = with_ported_options(YelmoParameters("calv-kill";
         yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
-        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
-                             dmb_method=0, topo_rel=0),
+        ytopo = ytopo_params(use_bmb=false, dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="equil",
                              calv_grnd_method="zero", dt_lsf=0.0,
             H_min_grnd = 0.0, H_min_flt = 0.0),
@@ -1656,8 +1656,10 @@ end
         interior(y.tpo.lsf)[target_i, j, 1] = 1.0
     end
 
-    # A forward-Euler topography update: this test is verifying the
-    # calving-kill physics (H→0, cmb recording) in a single pass.
+    # A forward-Euler topography update without transport: this test is
+    # verifying the calving-kill physics (H→0, cmb recording) in a
+    # single pass.
+    _zero_velocity!(y)
     _topo_fe_step!(y, 1.0)
 
     # Column `target_i` had H = 500 with lsf > 0 ⇒ kill: H → 0, cmb < 0.
@@ -1673,13 +1675,12 @@ end
 @testset "tpo: calving_step! method dispatch" begin
     # vm-m16 now resolves at runtime (mat's `strs2D_tau_eig_1` is
     # threaded through). With `tau_eig_1` explicitly zeroed and a
-    # topography-only update (so mat_step doesn't refresh tau_eig_1
-    # between zeroing and the calving phase), vm-m16 must produce zero
-    # calving rate — the no-stress no-op path.
+    # topography-only update without transport (so mat_step doesn't
+    # refresh tau_eig_1 between zeroing and the calving phase), vm-m16
+    # must produce zero calving rate — the no-stress no-op path.
     p_vm = with_ported_options(YelmoParameters("calv-vm";
         yelmo = yelmo_params(domain = "Greenland", grid_name = "GRL-16KM", dt_method = 0),
-        ytopo = ytopo_params(topo_fixed=true, use_bmb=false,
-                             dmb_method=0, topo_rel=0),
+        ytopo = ytopo_params(use_bmb=false, dmb_method=0, topo_rel=0),
         ycalv = ycalv_params(use_lsf=true, calv_flt_method="vm-m16", calv_grnd_method = "zero", H_min_grnd = 0.0, H_min_flt = 0.0),
         ydyn = ydyn_params(solver="fixed", ssa_solver = SSASolver(method = :residual), ssa_lat_bc = "floating", ssa_vel_max = 5000.0, ssa_iter_max = 50),
         ymat = ymat_params(rf_method = -1, de_max = 2.0),
@@ -1690,6 +1691,7 @@ end
     lsf_init!(y_vm.tpo.lsf, y_vm.tpo.H_ice, y_vm.bnd.z_bed, y_vm.bnd.z_sl)
     fill!(interior(y_vm.bnd.smb_ref), 0.0)
     fill!(interior(y_vm.mat.strs2D_tau_eig_1), 0.0)
+    _zero_velocity!(y_vm)
     _topo_fe_step!(y_vm, 1.0)
     # tau_1 = 0 everywhere ⇒ wv = 0 ⇒ cr = 0 on every face.
     @test all(interior(y_vm.tpo.cmb_flt_acx) .== 0.0)
