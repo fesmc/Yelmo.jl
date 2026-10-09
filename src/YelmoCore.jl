@@ -14,7 +14,9 @@ import ..YelmoConst: YelmoConstants   # extended below with a YelmoParameters me
 using ..YelmoConst: MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC,
                     MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN,
                     MASK_BED_STREAM, MASK_BED_GRLINE, MASK_BED_FLOAT,
-                    MASK_BED_ISLAND, MASK_BED_PARTIAL
+                    MASK_BED_ISLAND, MASK_BED_PARTIAL,
+                    MASK_FRNT_ICE_FREE, MASK_FRNT_ICE_FREE_LAND, MASK_FRNT_NONE,
+                    MASK_FRNT_FLOAT, MASK_FRNT_MARINE, MASK_FRNT_GRND
 using ..YelmoPar: YelmoParameters, check_ported, with_ported_options, domain_boundaries
 using ..YelmoTiming: YelmoTimer, @timed_section
 using ..YelmoUtils: map_scrip_field, map_scrip_load, gen_map_filename
@@ -34,6 +36,8 @@ export uses_split_boundary_storage
 export MASK_ICE_NONE, MASK_ICE_FIXED, MASK_ICE_DYNAMIC
 export MASK_BED_OCEAN, MASK_BED_LAND, MASK_BED_FROZEN, MASK_BED_STREAM,
        MASK_BED_GRLINE, MASK_BED_FLOAT, MASK_BED_ISLAND, MASK_BED_PARTIAL
+export MASK_FRNT_ICE_FREE, MASK_FRNT_ICE_FREE_LAND, MASK_FRNT_NONE,
+       MASK_FRNT_FLOAT, MASK_FRNT_MARINE, MASK_FRNT_GRND
 export compare_state, StateComparison
 
 # ---------------------------------------------------------------------------

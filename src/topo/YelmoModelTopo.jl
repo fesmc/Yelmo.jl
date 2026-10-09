@@ -496,12 +496,12 @@ function _update_diagnostics!(y::YelmoModel)
     gen_mask_bed!(y.tpo.mask_bed, y.tpo.f_ice, y.thrm.f_pmp,
                   y.tpo.f_grnd, y.tpo.mask_grz)
 
-    calc_ice_front!(y.tpo.mask_frnt, y.tpo.f_ice, y.tpo.f_grnd,
-                    y.bnd.z_bed, y.bnd.z_sl)
-
-    # Dynamics-only thickness/cover fields, dispatched on
-    # `ydyn.ssa_lat_bc`. Default ("floating") is pass-through.
+    # Dynamics-only thickness/cover fields.
     calc_dynamic_ice_fields!(y)
+
+    # Ice-front mask (mainly for the dynamics) from the dynamic cover.
+    calc_ice_front!(y.tpo.mask_frnt, y.tpo.f_ice_dyn, y.tpo.f_grnd,
+                    y.bnd.z_bed, y.bnd.z_sl)
 
     return y
 end
