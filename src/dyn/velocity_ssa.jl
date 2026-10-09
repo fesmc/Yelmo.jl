@@ -1608,8 +1608,7 @@ function calc_velocity_ssa!(y)
                                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
 
         # ---- Step 6: stagger viscosity to ab-corner cache. ----
-        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
+        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int, y.tpo.f_ice_dyn)
 
         # ---- Step 7: assemble SSA matrix into COO buffers + RHS. ----
         # Dispatch on `ssa.method`:

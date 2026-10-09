@@ -781,8 +781,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
                                y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy, p_ydyn.beta_min)
 
         # Step 6c — corner-stagger viscosity (same as SSA).
-        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int,
-                            y.tpo.H_ice_dyn, y.tpo.f_ice_dyn)
+        stagger_visc_aa_ab!(sc.ssa_n_aa_ab, y.dyn.visc_eff_int, y.tpo.f_ice_dyn)
 
         # Step 7 — assemble SSA matrix with β_eff in place of β.
         # The kernel and inputs are otherwise identical to SSA.
