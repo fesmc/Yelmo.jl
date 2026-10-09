@@ -20,7 +20,7 @@ using Yelmo.YelmoPar: ydyn_params, ytherm_params
 using Oceananigans: interior
 using NCDatasets
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 @testset "YelmoModel v0 scaffolding" begin
     @assert isfile(RESTART_PATH) "Restart fixture not found at $(RESTART_PATH)"
@@ -161,9 +161,12 @@ end
         @test haskey(ds, "dyn_scratch_sia_tau_xz")
         @test haskey(ds, "dyn_scratch_sia_tau_yz")
 
-        # Pattern survives the round-trip (within Float32 cast).
+        # Pattern survives the round-trip (within Float32 cast) on the
+        # interior levels; the bed and surface levels of the file's
+        # `zeta` axis are NaN-padded (split-boundary storage).
         slab = ds["dyn_scratch_sia_tau_xz"][:, :, :, 1]
-        @test all(==(Float32(-42.0)), slab)
+        @test all(==(Float32(-42.0)), slab[:, :, 2:end-1])
+        @test all(ismissing, slab[:, :, [1, end]])
 
         # Sanity: regular dyn fields still get written.
         @test haskey(ds, "ux_bar")

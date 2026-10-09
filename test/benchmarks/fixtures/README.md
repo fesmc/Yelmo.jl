@@ -23,3 +23,4 @@ produced a fixture.
 | Filename | Spec | Solver | Notes |
 |---|---|---|---|
 | `bueler_b_smoke__t1000.nc` | `bueler_b_smoke` | SIA | 31×31 at dx=50 km, Halfar IC, 1000-yr decay |
+| `grl16km_t0_restart.nc` + `grl16km_t0.nml` | initmip-grl (`benchmarks/initmip-grl`) | — | Greenland 16 km at t = 0 after `init_state!` (robin-cold), yelmo dev; restart of the unit tests (`test/test_fixtures.jl`). Regenerate with [`../regen_grl16km_restart.jl`](../regen_grl16km_restart.jl) |

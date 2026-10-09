@@ -257,7 +257,9 @@ end
 #   - H_ice = H_const everywhere
 #   - z_sl  = -1e6 (well below bed → slab is fully grounded)
 #   - f_ice = 1, mask_ice = MASK_ICE_DYNAMIC
-#   - zeta_ac = uniform layer interfaces, length Nz_ac → Nz_aa cells
+#   - Nz uniform ice layers, written in the Fortran layout that
+#     `load_grids_from_restart` reads: `zeta` = [0; centres; 1] (Nz + 2),
+#     `zeta_ac` = [0; midpoints of `zeta`; 1] (Nz + 3)
 function _write_slab_fixture!(path::AbstractString;
                               Nx::Int, Ny::Int, dx::Float64,
                               H_const::Float64, slope_x::Float64,
@@ -271,8 +273,8 @@ function _write_slab_fixture!(path::AbstractString;
     NCDataset(path, "c") do ds
         defDim(ds, "xc",           Nx)
         defDim(ds, "yc",           Ny)
-        defDim(ds, "zeta",         Nz)
-        defDim(ds, "zeta_ac",      Nz + 1)
+        defDim(ds, "zeta",         Nz + 2)
+        defDim(ds, "zeta_ac",      Nz + 3)
         defDim(ds, "zeta_rock",    length(zeta_rock_ac) - 1)
         defDim(ds, "zeta_rock_ac", length(zeta_rock_ac))
 
@@ -283,11 +285,12 @@ function _write_slab_fixture!(path::AbstractString;
         yv[:] = yc_m ./ 1e3
         yv.attrib["units"] = "km"
 
+        zeta_aa = vcat(0.0, 0.5 .* (zeta_ac[1:end-1] .+ zeta_ac[2:end]), 1.0)
         zc = defVar(ds, "zeta", Float64, ("zeta",))
-        zc[:] = 0.5 .* (zeta_ac[1:end-1] .+ zeta_ac[2:end])
+        zc[:] = zeta_aa
         zc.attrib["units"] = "1"
         zac = defVar(ds, "zeta_ac", Float64, ("zeta_ac",))
-        zac[:] = zeta_ac
+        zac[:] = vcat(0.0, 0.5 .* (zeta_aa[1:end-1] .+ zeta_aa[2:end]), 1.0)
         zac.attrib["units"] = "1"
 
         zrc = defVar(ds, "zeta_rock", Float64, ("zeta_rock",))

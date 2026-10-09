@@ -320,7 +320,7 @@ end
 # Integration: YelmoModel constructor with target_grid_file kwarg.
 # ---------------------------------------------------------------------
 
-const RESTART_PATH = "/Users/alrobi001/models/yelmox/output/16KM/test/restart-0.000-kyr/yelmo_restart.nc"
+include("test_fixtures.jl")   # RESTART_PATH, NML_PATH
 
 # Write a synthetic target-grid NetCDF: same xc/yc as the restart (so
 # the SCRIP map is identity), but a different `grid_name` global

@@ -1,0 +1,342 @@
+&yelmo
+    domain                   = "Greenland"
+    grid_name                = "GRL-16KM"
+    grid_path                = "data/GRL-16KM/GRL-16KM_REGIONS.nc"
+    phys_const               = "Earth"
+    experiment               = "None"
+    mask_border              = "auto"
+    nml_ytopo                = "ytopo"
+    nml_ycalv                = "ycalv"
+    nml_ydyn                 = "ydyn"
+    nml_ytill                = "ytill"
+    nml_ymat                 = "ymat"
+    nml_ytrc                 = "ytrc"
+    nml_ytherm               = "ytherm"
+    nml_yhyd                 = "yhyd"
+    nml_masks                = "yelmo_masks"
+    nml_init_topo            = "yelmo_init_topo"
+    nml_data                 = "yelmo_data"
+    restart                  = "None"
+    restart_z_bed            = False
+    restart_H_ice            = False
+    restart_relax            = 1000.0
+    log_timestep             = True
+    log_mb_check             = False
+    disable_kill             = False
+    zeta_scale               = "exp"
+    zeta_exp                 = 2.0
+    nz_aa                    = 10
+    dt_method                = 2
+    dt_min                   = 0.1
+    cfl_max                  = 0.1
+    pc_method                = "AB-SAM"
+    pc_controller            = "PI42"
+    pc_use_H_pred            = True
+    pc_filter_vel            = True
+    pc_n_redo                = 5
+    pc_tol                   = 1.0
+    pc_eps                   = 0.02
+    pc_cfl_max               = 0.5
+    pc_rho_max               = 2.0
+    pc_eta_H_min             = 10.0
+    pc_eta_u_min             = 0.0
+    pc_eta_trim              = 0.0
+    write_metrics            = False
+    write_metrics_dt         = 100.0
+    timing                   = True
+/
+
+&ytopo
+    solver                   = "impl-lis"
+    grad_lim                 = 0.5
+    grad_lim_zb              = 0.5
+    slope_bg_x               = 0.0
+    slope_bg_y               = 0.0
+    front_subgrid            = "none"
+    front_H_eff_min          = 50.0
+    front_dHdx               = 0.0
+    use_bmb                  = True
+    topo_fixed               = False
+    topo_rel                 = 0
+    topo_rel_tau             = 10.0
+    topo_rel_field           = "H_ref"
+    bmb_gl_method            = "pmp"
+    gl_sep                   = 1
+    gz_nx                    = 15
+    dist_grz                 = 200.0
+    gz_Hg0                   = 0.0
+    gz_Hg1                   = 0.0
+    dmb_method               = 0
+    dmb_alpha_max            = 60.0
+    dmb_tau                  = 100.0
+    dmb_sigma_ref            = 300.0
+    dmb_m_d                  = 3.0
+    dmb_m_r                  = 1.0
+    fmb_method               = 0
+    fmb_scale                = 1.0
+    fmb_lambda               = 1.0
+/
+
+&ycalv
+    use_lsf                  = False
+    lsf_method               = "snap"
+    dt_lsf                   = -1.0
+    lsf_redist_n_iter        = 5
+    calv_flt_method          = "vm-l19"
+    calv_grnd_method         = "zero"
+    H_min_grnd               = 0.0
+    H_min_flt                = 0.0
+    H_min_tau                = 10.0
+    sd_min                   = 100.0
+    sd_max                   = 500.0
+    calv_grnd_max            = 0.0
+    calv_tau                 = 1.0
+    calv_thin                = 30.0
+    k2                       = 3.2e9
+    w2                       = 0.0
+    kt_ref                   = 0.0025
+    kt_deep                  = 0.1
+    tau_ice_flt              = 250000.0
+    tau_ice_grnd             = 1.0e6
+    Hc_ref_flt               = 200.0
+    Hc_ref_grnd              = 200.0
+    Hc_ref_thin              = 50.0
+    Hc_deep                  = 500.0
+    zb_deep_0                = -1000.0
+    zb_deep_1                = -1500.0
+    zb_sigma                 = 0.0
+/
+
+&ydyn
+    solver                   = "diva"
+    uz_method                = 3
+    visc_method              = 1
+    visc_const               = 1.0e7
+    beta_method              = 1
+    beta_const               = 1000.0
+    beta_q                   = 1.0
+    beta_u0                  = 100.0
+    beta_gl_scale            = 0
+    beta_gl_stag             = 1
+    beta_gl_f                = 1.0
+    taud_gl_method           = 0
+    H_grnd_lim               = 500.0
+    beta_min                 = 100.0
+    eps_0                    = 1.0e-6
+    frz_scale                = False
+    frz_efold                = 3.0
+    frz_min                  = 0.001
+    ssa_solver               = "residual"
+    ssa_solver_linear_method = "auto"
+    ssa_solver_precond       = "jacobi"
+    ssa_solver_smoother      = "gauss_seidel"
+    ssa_solver_rtol          = 1.0e-6
+    ssa_solver_itmax         = 200
+    ssa_lis_opt_residual     = "-i minres -p jacobi -maxiter 100 -tol 1.0e-2 -initx_zeros false"
+    ssa_lis_opt_energy       = "-i cg -p jacobi -maxiter 200 -tol 1.0e-2 -initx_zeros false"
+    ssa_lat_bc               = "floating"
+    ssa_vel_lim_method       = "clip"
+    ssa_vel_max              = 5000.0
+    ssa_vel_lim_tau          = 100000.0
+    ssa_iter_max             = 50
+    ssa_iter_rel             = 0.7
+    ssa_iter_conv            = 0.01
+    taud_lim                 = 200000.0
+    neff_nxi                 = 0
+/
+
+&ytill
+    method                   = 1
+    scale_zb                 = 1
+    scale_sed                = 0
+    is_angle                 = False
+    n_sd                     = 10
+    f_sed                    = 0.01
+    sed_min                  = 5.0
+    sed_max                  = 15.0
+    z0                       = -300.0
+    z1                       = 200.0
+    cf_min                   = 0.1
+    cf_ref                   = 0.8
+/
+
+&yhyd
+    method_til               = 1
+    method_transport         = 0
+    W_til_max                = 2.0
+    mask_bc                  = 2
+    W_til_bc                 = 0.0
+    bkt_N_closure            = 3
+    bkt_till_rate            = 0.001
+    bkt_floating_mode        = 1
+    const_N                  = 1.0e7
+    marine_p                 = 1.0
+    marine_rho_sw            = 1028.0
+    till_N0                  = 1000.0
+    till_delta               = 0.04
+    till_e0                  = 0.69
+    till_Cc                  = 0.12
+    two_value_delta          = 0.02
+    k24_substrate_type       = 2
+    k24_flux_solver          = 3
+    k24_routing_scheme       = 0
+    k24_quinn_original       = False
+    k24_fill_algorithm       = -1
+    k24_priority_flood_epsilon = 1.0
+    k24_q_conversion         = -1
+    k24_dissipation_discretization = -1
+    k24_friction_discretization = 0
+    k24_friction_quadrature  = False
+    k24_friction_u_floor     = 3.168808781402895e-11
+    k24_toposort_allow_cycles = False
+    k24_ub_hook              = True
+    k24_drainage_mode        = 0
+    k24_water_thickness_algorithm = 0
+    k24_gradient_convention  = 0
+    k24_sliding_law          = 0
+    k24_manning_exponent     = 3.0
+    k24_latent_heat_water    = 333500.0
+    k24_bed_thickness        = 0.1
+    k24_manning_coefficient_exponent = 1.25
+    k24_bed_friction_exponent = 1.5
+    k24_friction_factor      = 0.1
+    k24_till_factor          = 1.1
+    k24_critical_discharge   = 1.0
+    k24_initial_cavity_height = 0.1
+    k24_coupling_length      = 10000.0
+    k24_coupling_length_kamb86 = 10.0
+    k24_eta_w                = 5.703855806525211e-11
+    k24_min_pressure_fraction = 0.0
+    k24_W_min                = 0.0
+    k24_W_max                = 1.0e30
+    k24_q_min                = 0.0
+    k24_q_max                = 1.0e30
+    k24_fill_iters           = 10
+    k24_max_psi_out_calls    = 100000
+    k24_dissipation_melt     = True
+    k24_max_dissipation_iters = 20
+    k24_dissipation_rtol     = 1.0e-12
+    k24_dissipation_verbose  = True
+    k24_max_coupling_iters   = 20
+    k24_coupling_rtol        = 1.0e-8
+    k24_coupling_verbose     = True
+    k24_weertman_C           = 0.0
+    k24_weertman_q           = 0.3333333333333333
+    k24_power_plastic_c_till = 0.0
+    k24_power_plastic_q      = 1.0
+    k24_power_plastic_u0     = 3.168808781402895e-6
+    k24_reg_coulomb_c_till   = 0.0
+    k24_reg_coulomb_q        = 0.3333333333333333
+    k24_reg_coulomb_u0       = 3.168808781402895e-6
+    k24_shakti_C             = 0.0
+    k24_shakti_n             = 3.0
+    k24_shakti_lambda_coeff  = 1.5
+/
+
+&ymat
+    flow_law                 = "glen"
+    rf_method                = 1
+    rf_const                 = 1.0e-18
+    rf_use_eismint2          = False
+    rf_with_water            = False
+    n_glen                   = 3.0
+    visc_min                 = 1000.0
+    de_max                   = 2.0
+    enh_method               = "shear3D"
+    enh_shear                = 3.0
+    enh_stream               = 3.0
+    enh_shlf                 = 0.7
+    enh_umin                 = 50.0
+    enh_umax                 = 500.0
+    tracer_method            = "expl"
+    tracer_impl_kappa        = 1.5
+/
+
+&ytrc
+    use_euler                = False
+    use_tracer               = False
+    use_elsa                 = False
+    elsa_restart             = True
+    t_dep_source             = "euler"
+    time_end                 = 0.0
+    calc_age                 = False
+    time_iso                 = -11.7, -29.0, -57.0, -115.0
+    tracer_method            = "expl"
+    tracer_impl_kappa        = 1.5
+    elsa_nml                 = "None"
+    elsa_group               = "None"
+    tracer_nml               = "None"
+/
+
+&ytherm
+    method                   = "temp"
+    qb_method                = 4
+    dt_method                = "FE"
+    solver_advec             = "impl-upwind"
+    advecxy_order            = 1
+    advecxy_cfl              = 0.5
+    advecxy_nmax             = 10
+    gamma                    = 1.0
+    strain_heating           = "full"
+    use_const_cp             = False
+    const_cp                 = 2009.0
+    use_const_kt             = False
+    const_kt                 = 6.62e7
+    enth_cr                  = 0.001
+    omega_max                = 0.01
+    H_ice_thin               = 10.0
+    enth_cp_method           = "integral"
+    basal_bc_method          = "wtil"
+    cap_source               = "auto"
+    cap_W_floor              = 0.0
+    cap_eps                  = 0.0001
+    gl_temperate             = False
+    rock_method              = "equil"
+    nzr_aa                   = 5
+    zeta_scale_rock          = "exp-inv"
+    zeta_exp_rock            = 2.0
+    H_rock                   = 2000.0
+    rhoc_rock                = 2.0e6
+    kt_rock                  = 6.3e7
+/
+
+&yelmo_masks
+    basins_load              = True
+    basins_path              = "data/GRL-16KM/GRL-16KM_BASINS-nasa.nc"
+    basins_nms               = "basin" "basin_mask"
+    regions_load             = True
+    regions_path             = "data/GRL-16KM/GRL-16KM_REGIONS.nc"
+    regions_nms              = "mask" "None"
+/
+
+&yelmo_init_topo
+    init_topo_load           = True
+    init_topo_path           = "data/GRL-16KM/GRL-16KM_TOPO-M17-v5.nc"
+    init_topo_names          = "H_ice" "z_bed" "z_bed_sd" "z_srf"
+    init_topo_state          = 0
+    z_bed_f_sd               = -1.0
+    smooth_H_ice             = 0.0
+    smooth_z_bed             = 0.0
+/
+
+&yelmo_data
+    pd_topo_load             = False
+    pd_topo_path             = "ice_data/{domain}/{grid_name}/{grid_name}_TOPO-M17.nc"
+    pd_topo_names            = "H_ice" "z_bed" "z_bed_sd" "z_srf"
+    pd_tsrf_load             = False
+    pd_tsrf_path             = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
+    pd_tsrf_name             = "T_srf"
+    pd_tsrf_monthly          = False
+    pd_smb_load              = False
+    pd_smb_path              = "ice_data/{domain}/{grid_name}/{grid_name}_MARv3.11-ERA_annmean_1961-1990.nc"
+    pd_smb_name              = "smb"
+    pd_smb_monthly           = False
+    pd_vel_load              = False
+    pd_vel_path              = "ice_data/{domain}/{grid_name}/{grid_name}_VEL-J18.nc"
+    pd_vel_names             = "ux_srf" "uy_srf"
+    pd_age_load              = False
+    pd_age_path              = "ice_data/{domain}/{grid_name}/{grid_name}_STRAT-M15.nc"
+    pd_age_names             = "age_iso" "depth_iso"
+    pd_age_to_time           = True
+/
+
