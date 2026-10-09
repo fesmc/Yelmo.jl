@@ -973,6 +973,7 @@ end
     Nx, Ny = size(H_ice, 1), size(H_ice, 2)
     H_init = copy(H_ice)
 
+    @test pc_history(y) !== nothing   # see below
     step!(y, 1.0)
 
     # One outer step of 1 yr with tau = 5 yr toward H_ref = 1000 m.
@@ -980,7 +981,6 @@ end
     # continues (no dt_min cold-start step) and dt_method = 0 takes the
     # year as one step. No transport, so both stages relax from H_n:
     # H_{n+1} = H_n + dt·(1000 − H_n)/5, and mb_relax is that rate.
-    @test pc_history(y) !== nothing
     H1 = 500.0 + 1.0 * (1000.0 - 500.0) / 5.0
     interior_view = view(H_ice, 2:Nx-1, 2:Ny-1, 1)
     @test all(abs.(interior_view .- H1) .< 1e-9)
