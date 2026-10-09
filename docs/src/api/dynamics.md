@@ -70,6 +70,7 @@ calc_uxy_sia_3D!
 
 ```@docs
 calc_ice_flux!
+calc_grounding_line_flux!
 calc_magnitude_from_staggered!
 calc_vel_ratio!
 ```

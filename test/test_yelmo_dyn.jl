@@ -207,6 +207,46 @@ end
     @test all(abs.(interior(qy)[:, 2:Ny, 1] .- expected_qy) .< 1e-9)
 end
 
+@testset "dyn: calc_ice_flux! — upwind thickness, periodic last face" begin
+    Nx, Ny = 4, 3
+    dx = 1000.0
+    g  = _bounded_2d(Nx, Ny; dx=dx)
+    H = CenterField(g)
+    interior(H)[:, :, 1] .= [100.0 * i for i in 1:Nx, j in 1:Ny]
+    u = XFaceField(g); v = YFaceField(g)
+    interior(u)[2, :, 1] .=  1.0     # face (1|2), flow +x → H of cell 1
+    interior(u)[3, :, 1] .= -1.0     # face (2|3), flow -x → H of cell 3
+    qx, qy = XFaceField(g), YFaceField(g)
+    calc_ice_flux!(qx, qy, u, v, H, dx, dx)
+    @test all(interior(qx)[2, :, 1] .==  100.0 * dx)
+    @test all(interior(qx)[3, :, 1] .== -300.0 * dx)
+
+    # Periodic x: the last face (Nx|1) is interior and wraps to slot 1.
+    gp = RectilinearGrid(size=(Nx, Ny), x=(0.0, Nx * dx), y=(0.0, Ny * dx),
+                         topology=(Periodic, Bounded, Flat))
+    Hp = CenterField(gp); interior(Hp)[:, :, 1] .= [100.0 * i for i in 1:Nx, j in 1:Ny]
+    up = XFaceField(gp); fill!(interior(up), 1.0)
+    qxp, qyp = XFaceField(gp), YFaceField(gp)
+    calc_ice_flux!(qxp, qyp, up, YFaceField(gp), Hp, dx, dx)
+    @test all(interior(qxp)[1, :, 1] .== 400.0 * dx)
+end
+
+@testset "dyn: calc_grounding_line_flux!" begin
+    Nx, Ny = 4, 2
+    g  = _bounded_2d(Nx, Ny; dx=1.0)
+    qx, qy = XFaceField(g), YFaceField(g)
+    fill!(interior(qx), 7.0); fill!(interior(qy), 3.0)
+    fg, fi = CenterField(g), CenterField(g)
+    interior(fg)[:, :, 1] .= [i <= 2 ? 1.0 : 0.0 for i in 1:Nx, j in 1:Ny]
+    interior(fi)[:, :, 1] .= [i <= 3 ? 1.0 : 0.0 for i in 1:Nx, j in 1:Ny]
+    gx, gy = XFaceField(g), YFaceField(g)
+    calc_grounding_line_flux!(gx, gy, qx, qy, fg, fi)
+    # Only the face between grounded cell 2 and floating ice cell 3.
+    @test all(interior(gx)[3, :, 1] .== 7.0)
+    @test all(interior(gx)[4:Nx+1, :, 1] .== 0.0)
+    @test all(interior(gy) .== 0.0)
+end
+
 @testset "dyn: calc_magnitude_from_staggered! — known u, v" begin
     Nx, Ny = 4, 3
     g = _bounded_2d(Nx, Ny; dx=1.0)
@@ -413,10 +453,8 @@ end
 # in the comments. Broken until the port; move each back to `@test` when
 # it matches.
 const DYN_DEV_GAPS = (
-    :qq_acx,         # 0.50
-    :qq_acy,         # 0.50
-    :qq,             # 0.33
     :uz_b,           # 0.93 (on ice-covered cells)
+    :uz_srf_err,     # from uz_star (kinematic rates, item 5.3c)
 )
 
 @testset "dyn: real-restart diagnostic-chain consistency" begin
@@ -462,7 +500,8 @@ const DYN_DEV_GAPS = (
     # YelmoModel after `load_state!`).
     snap_fields = (:taud_acx, :taud_acy, :taud, :taub,
                    :taul_int_acx, :taul_int_acy,
-                   :qq_acx, :qq_acy, :qq,
+                   :qq_acx, :qq_acy, :qq, :qq_gl_acx, :qq_gl_acy,
+                   :H_ice_solv, :f_ice_solv, :uz_srf_err,
                    :uxy_bar, :uxy_b, :uxy_s, :uxy_i_bar,
                    :uz_b, :uz_s, :ux_s, :uy_s,
                    :f_vbvs,
@@ -491,8 +530,8 @@ const DYN_DEV_GAPS = (
         k in DYN_DEV_GAPS ? (@test_broken err < 1e-3) : (@test err < 1e-3)
     end
 
-    # Ice flux (deterministic from u_bar · H_face · dx).
-    for k in (:qq_acx, :qq_acy)
+    # Ice flux (upwind H · u_bar · dy) and grounding-line flux.
+    for k in (:qq_acx, :qq_acy, :qq_gl_acx, :qq_gl_acy)
         err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
         k in DYN_DEV_GAPS ? (@test_broken err < 1e-3) : (@test err < 1e-3)
     end
@@ -535,6 +574,12 @@ const DYN_DEV_GAPS = (
     err_uz_s = _rel_linf_inner_masked(interior(y.dyn.uz_s),
                                       snap.uz_s, f_ice_mask)
     @test_broken err_uz_s < 1e-3
+
+    # Geometry of the velocity solution and the surface uz_star mismatch.
+    for k in (:H_ice_solv, :f_ice_solv, :uz_srf_err)
+        err = _rel_linf_inner(interior(getfield(y.dyn, k)), snap[k])
+        k in DYN_DEV_GAPS ? (@test_broken err < 1e-3) : (@test err < 1e-3)
+    end
 
     # f_vbvs — element-wise ratio.
     err = _rel_linf_inner(interior(y.dyn.f_vbvs), snap.f_vbvs)

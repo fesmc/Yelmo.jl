@@ -77,7 +77,7 @@ export dyn_step!,
        calc_lateral_bc_stress_2D!,
        calc_ydyn_neff!,
        calc_cb_ref!, calc_c_bed!, calc_beta!, stagger_beta!, set_beta_min_grounded!,
-       calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
+       calc_ice_flux!, calc_grounding_line_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!,
        calc_shear_stress_3D!, calc_uxy_sia_3D!, calc_velocity_sia!,
        calc_visc_eff_3D_aa!, calc_visc_eff_3D_nodes!, calc_visc_eff_int!,
        stagger_visc_aa_ab!,
@@ -175,6 +175,10 @@ function dyn_step!(y::YelmoModel, dt::Float64)
     # overwrites `uxy_bar` in place; we need the pre-step value
     # for `duxydt`.
     uxy_prev = copy(interior(y.dyn.uxy_bar))
+
+    # Active ice geometry of this solution (Fortran H_ice_solv / f_ice_solv).
+    interior(y.dyn.H_ice_solv) .= interior(y.tpo.H_ice_dyn)
+    interior(y.dyn.f_ice_solv) .= interior(y.tpo.f_ice_dyn)
 
     # 2. Driving stress on ac-staggered faces.
     calc_driving_stress!(y.dyn.taud_acx, y.dyn.taud_acy,
@@ -407,6 +411,10 @@ function dyn_step!(y::YelmoModel, dt::Float64)
               "(supported: 3 = \"uz_jac\").")
     end
 
+    # Surface sigma-velocity mismatch: kinematically uz_star = -smb at the
+    # surface (fully covered cells only). Fortran yelmo_dynamics.f90:289.
+    _calc_uz_srf_err!(y.dyn.uz_srf_err, y.dyn.uz_star, y.tpo.smb, y.tpo.f_ice_dyn)
+
     @timed_section y :dyn_jacobian_uz calc_jacobian_vel_3D_uzterms!(
         y.dyn.jvel_dzx, y.dyn.jvel_dzy, y.dyn.jvel_dzz,
         y.dyn.uz,
@@ -427,10 +435,14 @@ function dyn_step!(y::YelmoModel, dt::Float64)
 
     # 9. Post-solver diagnostics.
 
-    # Ice flux on ac-staggered faces.
+    # Ice flux on ac-staggered faces (upwind actual thickness) and across
+    # the grounding line.
     calc_ice_flux!(y.dyn.qq_acx, y.dyn.qq_acy,
-                   y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.H_ice_dyn,
+                   y.dyn.ux_bar, y.dyn.uy_bar, y.tpo.H_ice,
                    dx_g, dy_g)
+    calc_grounding_line_flux!(y.dyn.qq_gl_acx, y.dyn.qq_gl_acy,
+                              y.dyn.qq_acx, y.dyn.qq_acy,
+                              y.tpo.f_grnd, y.tpo.f_ice_dyn)
 
     # Stress + flux + velocity magnitudes at aa-cells.
     calc_magnitude_from_staggered!(y.dyn.qq,        y.dyn.qq_acx,   y.dyn.qq_acy,   y.tpo.f_ice_dyn)

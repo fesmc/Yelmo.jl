@@ -72,7 +72,8 @@ const ZFACE_VARIABLES = ["uz", "uz_star", "jvel_dzx", "jvel_dzy", "jvel_dzz"]
 #     schema. The patterns are anchored regex to avoid a false
 #     substring match against `uz_star` (which is a genuine 3D
 #     ZFace field and *should* keep its face allocation).
-const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$"]
+#   - `r"^uz_srf_err$"`: the surface `uz_star` mismatch, a 2D aa field.
+const CENTER_OVERRIDES = ["uxy", r"^uz_b$", r"^uz_s$", r"^uz_srf_err$"]
 
 # Per-cell ice evolution mask values (`bnd.mask_ice`) — defined in
 # YelmoConst and re-exported here for back-compat with existing call

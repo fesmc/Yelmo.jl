@@ -84,3 +84,6 @@
 | 80 | strn2D_de         | xc, yc           | 1/yr        | 2D effective strain rate                      |
 | 81 | strn2D_div        | xc, yc           | 1/yr        | 2D horizontal divergence                      |
 | 82 | strn2D_f_shear    | xc, yc           |             | 2D strain rate shear fraction                 |
+| 83 | H_ice_solv        | xc, yc           | m           | Ice thickness of the last velocity solution   |
+| 84 | f_ice_solv        | xc, yc           | 1           | Ice fraction of the last velocity solution    |
+| 85 | uz_srf_err        | xc, yc           | m/yr        | Surface uz_star + smb (kinematic mismatch)    |
