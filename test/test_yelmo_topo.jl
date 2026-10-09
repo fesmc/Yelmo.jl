@@ -459,9 +459,12 @@ end
     fill!(H_ice, 1000.0)
 
     # Zero velocities: isolate SMB; advection becomes a no-op on a
-    # uniform field anyway, but this also bypasses the CFL kernel.
-    fill!(interior(y.dyn.ux_bar), 0.0)
-    fill!(interior(y.dyn.uy_bar), 0.0)
+    # uniform field anyway, but this also bypasses the CFL kernel. The
+    # previous solution too: with `pc_filter_vel` the transport velocity
+    # is the mean of both.
+    for u in (y.dyn.ux_bar, y.dyn.uy_bar, y.dyn.ux_bar_prev, y.dyn.uy_bar_prev)
+        fill!(interior(u), 0.0)
+    end
 
     # Ensure all cells are dynamic and ice is allowed everywhere.
     fill!(interior(y.bnd.mask_ice),    Float64(MASK_ICE_DYNAMIC))
