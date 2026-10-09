@@ -639,9 +639,7 @@ function calc_velocity_diva!(y; no_slip::Bool = y.p.ydyn.solver == "diva-noslip"
 
     # Step 1 — SSA masks.
     set_ssa_masks!(y.dyn.ssa_mask_acx, y.dyn.ssa_mask_acy,
-                   y.tpo.mask_frnt, y.tpo.H_ice_dyn, y.tpo.f_ice_dyn,
-                   y.tpo.f_grnd, y.bnd.z_bed, y.bnd.z_sl, dx;
-                   use_ssa = true,
+                   y.tpo.mask_frnt, y.tpo.f_ice_dyn, y.tpo.f_grnd;
                    lateral_bc = p_ydyn.ssa_lat_bc)
 
     # Step 2 — snapshot for convergence check (DIVA uses ux_bar, not ux_b).
