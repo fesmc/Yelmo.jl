@@ -5,8 +5,10 @@
 # (currently a no-op for `solver = "fixed"`):
 #
 #   - `_clip_underflow!`       — drop sub-`TOL_UNDERFLOW` floats to zero.
-#   - `calc_ice_flux!`         — `qq_acx/y = H_face · dx · u_bar` on
-#                                 ac-staggered faces.
+#   - `calc_ice_flux!`         — `qq_acx/y = H_up · dy · u_bar` on
+#                                 ac-staggered faces (upwind thickness).
+#   - `calc_grounding_line_flux!` — `qq_gl_acx/y`, the face flux across
+#                                 the grounding line.
 #   - `calc_magnitude_from_staggered!` — `√(u² + v²)` at aa-cell
 #                                 centres using the symmetric face
 #                                 average of an X/Y-Face pair, masked
@@ -28,7 +30,7 @@ using Oceananigans.Fields: interior
 using Oceananigans.Grids: topology, Bounded, Periodic, AbstractTopology
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 
-export calc_ice_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
+export calc_ice_flux!, calc_grounding_line_flux!, calc_magnitude_from_staggered!, calc_vel_ratio!
 
 # Yelmo Fortran constants — `yelmo_defs.f90:44`.
 const TOL           = 1e-5
@@ -48,61 +50,124 @@ end
     calc_ice_flux!(qq_acx, qq_acy, ux_bar, uy_bar, H_ice, dx, dy)
         -> (qq_acx, qq_acy)
 
-Compute the ice flux on staggered ac-faces:
+Ice flux through each cell face [m³/yr] with the upwind ice thickness,
+as in the advection solvers:
 
-    qq_acx[i+1, j] = ½(H_ice[i, j] + H_ice[i+1, j]) · dx · ux_bar[i+1, j]
-    qq_acy[i, j+1] = ½(H_ice[i, j] + H_ice[i, j+1]) · dy · uy_bar[i, j+1]
+    qq_acx[i+1, j] = H_up · dy · ux_bar[i+1, j],  H_up = H_ice[i] if ux_bar ≥ 0 else H_ice[i+1]
 
-Units: m³ / yr (H · dx · u). Fortran loops `i = 1..nx-1` /
-`j = 1..ny-1` and leaves the rightmost / northernmost face row at the
-initial zero value; we mirror that by zeroing `qq_acx`/`qq_acy` first
-and only writing on the `i = 1..Nx-1` / `j = 1..Ny-1` interior loop.
-The leftmost/southernmost extra face slot is replicated for parity
-with the YelmoMirror loader convention.
+(likewise `qq_acy` with `dx`). The last face of a Bounded direction (the
+domain edge) stays zero; in a Periodic direction it wraps. The leading
+face slot of a Bounded direction is replicated for parity with the
+YelmoMirror loader convention. The model passes the actual thickness
+`tpo.H_ice`.
 
-Port of `velocity_general.f90:1727 calc_ice_flux`.
+Port of `velocity_general.f90:calc_ice_flux` (yelmo dev).
 """
 function calc_ice_flux!(qq_acx, qq_acy, ux_bar, uy_bar, H_ice,
                         dx::Real, dy::Real)
-    fill_halo_regions!(H_ice)
+    Qx, Qy = interior(qq_acx), interior(qq_acy)
+    Ux, Uy = interior(ux_bar), interior(uy_bar)
+    H      = interior(H_ice)
+    Nx, Ny = size(H, 1), size(H, 2)
+    Tx = topology(qq_acx.grid, 1)
+    Ty = topology(qq_acy.grid, 2)
+    _calc_ice_flux_kernel!(Qx, Qy, Ux, Uy, H, Float64(dx), Float64(dy), Tx, Ty, Nx, Ny)
+    return qq_acx, qq_acy
+end
 
-    Qx = interior(qq_acx)
-    Qy = interior(qq_acy)
+function _calc_ice_flux_kernel!(Qx, Qy, Ux, Uy, H, dx::Float64, dy::Float64,
+                                ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int
+                               ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
     fill!(Qx, 0.0)
     fill!(Qy, 0.0)
 
-    Nx = size(interior(H_ice), 1)
-    Ny = size(interior(H_ice), 2)
-    dx_f = Float64(dx)
-    dy_f = Float64(dy)
+    # The last face is an interior face only in a periodic direction.
+    i2 = Tx === Periodic ? Nx : Nx - 1
+    j2 = Ty === Periodic ? Ny : Ny - 1
 
-    Tx_top = topology(qq_acx.grid, 1)
-    Ty_top = topology(qq_acy.grid, 2)
-
-    # Loop ranges 1..Nx-1 / 1..Ny-1 mirror the Fortran convention of
-    # leaving the rightmost / northernmost face row at zero. The
-    # `_ip1_modular` / `_jp1_modular` wraps don't trigger inside that
-    # range (since i < Nx), so the index expression is identical to the
-    # original `i+1` under both Bounded and Periodic.
-    @inbounds for j in 1:Ny, i in 1:Nx-1
-        ip1f = _ip1_modular(i, Nx, Tx_top)
-        H_face = 0.5 * (H_ice[i, j, 1] + H_ice[i+1, j, 1]) * dx_f
-        Qx[ip1f, j, 1] = H_face * ux_bar[ip1f, j, 1]
+    @inbounds for j in 1:Ny, i in 1:i2
+        ip1  = _neighbor_ip1(i, Nx, Tx)
+        ip1f = _ip1_modular(i, Nx, Tx)
+        u    = Ux[ip1f, j, 1]
+        Qx[ip1f, j, 1] = (u >= 0.0 ? H[i, j, 1] : H[ip1, j, 1]) * dy * u
     end
-    if Tx_top === Bounded
+    @inbounds for j in 1:j2, i in 1:Nx
+        jp1  = _neighbor_jp1(j, Ny, Ty)
+        jp1f = _jp1_modular(j, Ny, Ty)
+        v    = Uy[i, jp1f, 1]
+        Qy[i, jp1f, 1] = (v >= 0.0 ? H[i, j, 1] : H[i, jp1, 1]) * dx * v
+    end
+
+    if Tx === Bounded
         @views Qx[1, :, :] .= Qx[2, :, :]
     end
-
-    @inbounds for j in 1:Ny-1, i in 1:Nx
-        jp1f = _jp1_modular(j, Ny, Ty_top)
-        H_face = 0.5 * (H_ice[i, j, 1] + H_ice[i, j+1, 1]) * dy_f
-        Qy[i, jp1f, 1] = H_face * uy_bar[i, jp1f, 1]
-    end
-    if Ty_top === Bounded
+    if Ty === Bounded
         @views Qy[:, 1, :] .= Qy[:, 2, :]
     end
+    return nothing
+end
 
-    return qq_acx, qq_acy
+"""
+    calc_grounding_line_flux!(qq_gl_acx, qq_gl_acy, qq_acx, qq_acy, f_grnd, f_ice)
+        -> (qq_gl_acx, qq_gl_acy)
+
+Ice flux across the grounding line [m³/yr]: the face flux `qq_acx/acy`
+(see [`calc_ice_flux!`](@ref)) through faces between a (partially)
+grounded cell (`f_grnd > 0`) and a floating ice cell (`f_grnd == 0`,
+`f_ice > 0`), zero elsewhere. The sign gives the direction (+x/+y).
+Neighbours follow the grid topology (clamped when Bounded).
+
+Port of `velocity_general.f90:calc_grounding_line_flux` (yelmo dev).
+"""
+function calc_grounding_line_flux!(qq_gl_acx, qq_gl_acy, qq_acx, qq_acy, f_grnd, f_ice)
+    Gx, Gy = interior(qq_gl_acx), interior(qq_gl_acy)
+    Qx, Qy = interior(qq_acx), interior(qq_acy)
+    Fg, Fi = interior(f_grnd), interior(f_ice)
+    Nx, Ny = size(Fg, 1), size(Fg, 2)
+    Tx = topology(qq_gl_acx.grid, 1)
+    Ty = topology(qq_gl_acy.grid, 2)
+    _calc_grounding_line_flux_kernel!(Gx, Gy, Qx, Qy, Fg, Fi, Tx, Ty, Nx, Ny)
+    return qq_gl_acx, qq_gl_acy
+end
+
+# Face between a (partially) grounded cell and a floating ice cell.
+@inline _is_gl_face(fg0, fg1, fi0, fi1) =
+    (fg0 > 0.0 && fg1 == 0.0 && fi1 > 0.0) || (fg1 > 0.0 && fg0 == 0.0 && fi0 > 0.0)
+
+function _calc_grounding_line_flux_kernel!(Gx, Gy, Qx, Qy, Fg, Fi,
+                                           ::Type{Tx}, ::Type{Ty}, Nx::Int, Ny::Int
+                                          ) where {Tx<:AbstractTopology, Ty<:AbstractTopology}
+    fill!(Gx, 0.0)
+    fill!(Gy, 0.0)
+    @inbounds for j in 1:Ny, i in 1:Nx
+        ip1  = _neighbor_ip1(i, Nx, Tx)
+        jp1  = _neighbor_jp1(j, Ny, Ty)
+        ip1f = _ip1_modular(i, Nx, Tx)
+        jp1f = _jp1_modular(j, Ny, Ty)
+        if _is_gl_face(Fg[i, j, 1], Fg[ip1, j, 1], Fi[i, j, 1], Fi[ip1, j, 1])
+            Gx[ip1f, j, 1] = Qx[ip1f, j, 1]
+        end
+        if _is_gl_face(Fg[i, j, 1], Fg[i, jp1, 1], Fi[i, j, 1], Fi[i, jp1, 1])
+            Gy[i, jp1f, 1] = Qy[i, jp1f, 1]
+        end
+    end
+    if Tx === Bounded
+        @views Gx[1, :, :] .= Gx[2, :, :]
+    end
+    if Ty === Bounded
+        @views Gy[:, 1, :] .= Gy[:, 2, :]
+    end
+    return nothing
+end
+
+# uz_srf_err = uz_star at the surface + smb on fully covered cells, else 0.
+function _calc_uz_srf_err!(uz_srf_err, uz_star, smb, f_ice)
+    E, Us, S, F = interior(uz_srf_err), interior(uz_star), interior(smb), interior(f_ice)
+    nz = size(Us, 3)
+    @inbounds for j in axes(E, 2), i in axes(E, 1)
+        E[i, j, 1] = F[i, j, 1] == 1.0 ? Us[i, j, nz] + S[i, j, 1] : 0.0
+    end
+    return uz_srf_err
 end
 
 """

@@ -29,7 +29,7 @@ Fortran's `calc_ydyn` body (`yelmo_dynamics.f90:48`):
 | 6 | Solver dispatch                         | `calc_velocity_sia!` / `calc_velocity_ssa!` / `calc_velocity_diva!` | `dyn.ux_i`, `dyn.uy_i`, `dyn.ux_i_bar`, `dyn.uy_i_bar`, `dyn.ux_s`, `dyn.uy_s`, plus combined `dyn.ux`, `dyn.uy`, `dyn.ux_bar`, `dyn.uy_bar` |
 | 7 | Underflow clip                          | inline                          | `dyn.ux/uy`, `dyn.ux_bar/uy_bar` |
 | 8 | Velocity Jacobian + `uz` + strain rates | `calc_strain_rate_2D!`, `calc_uz_3D!`, `calc_jacobian!` | `dyn.eps_xx`, `dyn.eps_yy`, `dyn.eps_xy`, `dyn.eps_eff`, `dyn.uz`, `dyn.uz_star`, `dyn.jvel_dz*` |
-| 9 | Diagnostics                             | `calc_ice_flux!`, `calc_magnitude_from_staggered!`, `calc_vel_ratio!` | `dyn.qq*`, `dyn.uxy*`, `dyn.taud`, `dyn.taub`, `dyn.f_vbvs`, `dyn.duxydt` |
+| 9 | Diagnostics                             | `calc_ice_flux!` (upwind `H_ice`), `calc_grounding_line_flux!`, `calc_magnitude_from_staggered!`, `calc_vel_ratio!` | `dyn.qq*`, `dyn.qq_gl_acx/acy`, `dyn.uxy*`, `dyn.taud`, `dyn.taub`, `dyn.f_vbvs`, `dyn.duxydt`, `dyn.H_ice_solv`, `dyn.f_ice_solv`, `dyn.uz_srf_err` |
 
 `dyn_step!` does **not** advance `y.time` — that is owned by the
 time loop, which calls it between the predictor and corrector
