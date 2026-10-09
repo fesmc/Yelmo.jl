@@ -300,7 +300,7 @@ _coo_count_in_row(I_idx, nnz, row) = sum(I_idx[k] == row for k in 1:nnz)
     # Use a free-slip / no-slip box. The Fortran "DEFAULT" boundary
     # branch is no-slip, but we want an interior cell (3, 3) that
     # is purely inner-SSA — that's any boundary type, since (3, 3)
-    # is in the interior. Pick :bounded → all-no-slip.
+    # is in the interior. Pick :zeros → all-no-slip.
     _assemble_ssa_matrix!(
         s.I_idx, s.J_idx, s.vals, s.b_vec, s.nnz_ref,
         s.ux_b, s.uy_b,
@@ -311,7 +311,7 @@ _coo_count_in_row(I_idx, nnz, row) = sum(I_idx[k] == row for k in 1:nnz)
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
         dx, dx;
-        boundaries=:bounded, lateral_bc="floating",
+        boundaries=:zeros, lateral_bc="floating",
     )
 
     # Hand-derive the ux row at Fortran cell (3, 3).
@@ -367,7 +367,7 @@ end
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
         dx, dx;
-        boundaries=:bounded,
+        boundaries=:zeros,
     )
 
     nr = 2 * ((3 - 1) * Nx + 3) - 1   # row_ux(3, 3)
@@ -403,7 +403,7 @@ end
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
         dx, dx;
-        boundaries=:bounded,
+        boundaries=:zeros,
     )
 
     ij2n(i, j) = (j - 1) * Nx + i
@@ -447,10 +447,10 @@ end
         s.taud_acx, s.taud_acy,
         s.taul_int_acx, s.taul_int_acy,
         dx, dx;
-        boundaries=:bounded,
+        boundaries=:zeros,
     )
 
-    # Boundary rows: with :bounded → all-no-slip, every boundary
+    # Boundary rows: with :zeros → all-no-slip, every boundary
     # row is a single-diagonal entry. The boundary cells are
     # i=1, i=Nx, j=1, j=Ny. For 5x5 that's (5-1)*4 + 4 corner
     # double-counted = 16 unique boundary cells, but we need to
