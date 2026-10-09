@@ -1705,10 +1705,9 @@ end
     # construction with a clear "not yet ported" message.
     @test_throws ErrorException ycalv_params(use_lsf=true, calv_flt_method="vm-l19")
 
-    # When use_lsf = false the validator is dormant — the default
-    # `calv_flt_method = "vm-l19"` (Fortran default) must round-trip
-    # without error since calving never runs.
-    p_dormant = ycalv_params(use_lsf=false)
+    # When use_lsf = false the validator is dormant: a method of the
+    # use_lsf = F family (here `vm-l19`) round-trips without error.
+    p_dormant = ycalv_params(use_lsf=false, calv_flt_method="vm-l19")
     @test p_dormant.calv_flt_method == "vm-l19"
 end
 
